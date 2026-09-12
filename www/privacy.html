@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Privacy Policy - ChatOKF</title>
+<meta name="description" content="ChatOKF privacy policy: on-device AI chat. No data collection, no tracking, no accounts; conversations never leave your device.">
+<meta name="theme-color" content="#070B14">
+<meta property="og:title" content="Privacy Policy - ChatOKF">
+<meta property="og:description" content="On-device AI chat. No data collection, no tracking, no accounts; conversations never leave your device.">
+<meta property="og:type" content="article">
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMDI0IDEwMjQiPjxyZWN0IHdpZHRoPSIxMDI0IiBoZWlnaHQ9IjEwMjQiIHJ4PSIyMjAiIGZpbGw9IiMwNzBCMTQiLz48ZyBmaWxsPSJub25lIiBzdHJva2U9IiMzRkQ4QzgiIHN0cm9rZS13aWR0aD0iNTIiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCI+PHBhdGggZD0iTTE1MCA1MTJIMzAwTTcyNCA1MTJIODkwIi8+PHBhdGggZD0iTTMwMCAyOTJINTEyQTIyMCAyMjAgMCAwIDEgNTEyIDczMkgzMDBaIi8+PC9nPjxwYXRoIGZpbGw9IiNGRkIzNDciIGQ9Ik02NTQgNTEyIDM4NiAzNTh2MzA4eiIvPjwvc3ZnPgo=">
+<script>
+/* set the theme before first paint so there is no light flash */
+(function () {
+  try {
+    var m = localStorage.getItem('chatokf-theme');
+    document.documentElement.setAttribute(
+      'data-theme', m === 'light' ? 'light' : 'dark');
+  } catch (e) { document.documentElement.setAttribute('data-theme', 'dark'); }
+}());
+</script>
+<style>
+/* ---------- dark is the design default ---------- */
+:root {
+  color-scheme: dark;
+  --substrate: #070B14;
+  --substrate-2: #0F1A2E;
+  --edge: #16233d;
+  --trace: #3FD8C8;
+  --trace-dim: #4E9E96;
+  --delta: #FFB347;
+  --delta-hot: #FFF1D0;
+  --gallium: #B8C4D9;
+  --ink: #E4EAF4;
+  --ink-mute: #93A1B8;
+  --amber-wash: rgba(255,179,71,0.07);
+  --amber-edge: rgba(255,179,71,0.30);
+  --nav-bg: rgba(7, 11, 20, 0.82);
+  --shot: 0 1px 0 rgba(255,255,255,0.04);
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    color-scheme: light;
+    --substrate: #EFF3F9;
+    --substrate-2: #FFFFFF;
+    --edge: #D2DCE9;
+    --trace: #0C7C71;
+    --trace-dim: #3D7B7E;
+    --delta: #9C5B06;
+    --delta-hot: #7A4604;
+    --gallium: #465872;
+    --ink: #0A1421;
+    --ink-mute: #4F6079;
+    --amber-wash: rgba(196,120,10,0.09);
+    --amber-edge: rgba(156,91,6,0.35);
+    --nav-bg: rgba(239, 243, 249, 0.86);
+    --shot: 0 1px 2px rgba(10,20,33,0.06);
+  }
+}
+:root[data-theme="light"] {
+  color-scheme: light;
+  --substrate: #EFF3F9;
+  --substrate-2: #FFFFFF;
+  --edge: #D2DCE9;
+  --trace: #0C7C71;
+  --trace-dim: #3D7B7E;
+  --delta: #9C5B06;
+  --delta-hot: #7A4604;
+  --gallium: #465872;
+  --ink: #0A1421;
+  --ink-mute: #4F6079;
+  --amber-wash: rgba(196,120,10,0.09);
+  --amber-edge: rgba(156,91,6,0.35);
+  --nav-bg: rgba(239, 243, 249, 0.86);
+  --shot: 0 1px 2px rgba(10,20,33,0.06);
+}
+
+:root {
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas,
+          "Liberation Mono", monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto,
+          Helvetica, Arial, sans-serif;
+  --gut: clamp(20px, 5vw, 64px);
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0;
+  background: var(--substrate);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 17px;
+  line-height: 1.62;
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+a { color: var(--trace); text-decoration: none; }
+a:hover { text-decoration: underline; }
+:focus-visible { outline: 2px solid var(--delta); outline-offset: 3px; }
+.wrap { max-width: 1080px; margin: 0 auto; padding: 0 var(--gut); }
+
+.eyebrow {
+  font-family: var(--mono); font-size: 11px; letter-spacing: 0.18em;
+  text-transform: uppercase; color: var(--trace-dim); margin: 0 0 14px;
+}
+h1, h2, h3 { font-weight: 680; letter-spacing: -0.025em; line-height: 1.08; }
+h1 { font-size: clamp(34px, 5.4vw, 58px); margin: 0 0 18px; }
+h2 { font-size: clamp(21px, 2.6vw, 27px); margin: 44px 0 12px; }
+h3 { font-size: 18px; letter-spacing: -0.01em; margin: 26px 0 8px; }
+p { max-width: 68ch; color: var(--ink-mute); }
+strong { color: var(--ink); font-weight: 640; }
+code {
+  font-family: var(--mono); font-size: 0.87em;
+  background: var(--substrate-2); border: 1px solid var(--edge);
+  border-radius: 4px; padding: 1px 5px; color: var(--gallium);
+}
+
+/* ---------- nav ---------- */
+header.nav {
+  position: sticky; top: 0; z-index: 50;
+  background: var(--nav-bg); backdrop-filter: blur(14px);
+  border-bottom: 1px solid var(--edge);
+}
+.nav-in { display: flex; align-items: center; gap: 22px; height: 62px; }
+.brand { display: flex; align-items: center; gap: 11px;
+         font-family: var(--mono); font-size: 15px; color: var(--ink); }
+.brand:hover { text-decoration: none; }
+.brand svg { width: 30px; height: 30px; display: block; }
+.f-none { fill: none; }
+.k-trace { stroke: var(--trace); }
+.f-amber { fill: var(--delta); }
+.nav-links { margin-left: auto; display: flex; gap: 20px; align-items: center;
+             font-family: var(--mono); font-size: 12.5px;
+             letter-spacing: 0.06em; }
+.nav-links a { color: var(--ink-mute); }
+.nav-links a:hover { color: var(--trace); text-decoration: none; }
+
+/* ---------- theme switch ---------- */
+.theme {
+  appearance: none; background: transparent; cursor: pointer;
+  border: 1px solid var(--edge); border-radius: 8px;
+  width: 36px; height: 36px; padding: 0; color: var(--ink-mute);
+  display: grid; place-items: center; flex: none;
+  transition: color 0.18s, border-color 0.18s;
+}
+.theme:hover { color: var(--delta); border-color: var(--amber-edge); }
+.theme svg { width: 18px; height: 18px; display: none; }
+.theme[data-mode="system"] .i-system,
+.theme[data-mode="light"]  .i-light,
+.theme[data-mode="dark"]   .i-dark { display: block; }
+
+/* ---------- page ---------- */
+.page { max-width: 760px; margin: 0 auto;
+        padding: clamp(46px, 7vw, 88px) var(--gut) clamp(64px, 9vw, 120px); }
+.lede { font-size: clamp(17px, 1.9vw, 20px); color: var(--ink-mute);
+        max-width: 62ch; margin: 0 0 10px; }
+.stamp { font-family: var(--mono); font-size: 12px; letter-spacing: 0.1em;
+         text-transform: uppercase; color: var(--trace-dim);
+         display: inline-block; margin: 6px 0 26px; }
+.page ul { list-style: none; margin: 0 0 14px; padding: 0; max-width: 68ch; }
+.page ul li {
+  color: var(--ink-mute); line-height: 1.62;
+  padding: 4px 0 4px 22px; position: relative;
+}
+.page ul li::before {
+  content: "\2022"; position: absolute; left: 6px;
+  color: var(--delta); font-weight: 700;
+}
+.tier {
+  border: 1px solid var(--edge); border-radius: 12px;
+  background: var(--substrate-2); box-shadow: var(--shot);
+  padding: 18px 22px 8px; margin: 0 0 14px; max-width: 68ch;
+}
+.tier h3 { margin-top: 0; }
+.tier .eyebrow { margin-bottom: 6px; }
+.btn {
+  font-family: var(--mono); font-size: 13.5px; letter-spacing: 0.04em;
+  padding: 12px 20px; border-radius: 7px; border: 1px solid var(--edge);
+  color: var(--ink); background: var(--substrate-2); box-shadow: var(--shot);
+  display: inline-block; transition: border-color 0.18s, color 0.18s;
+}
+.btn:hover { border-color: var(--trace-dim); color: var(--trace);
+             text-decoration: none; }
+.contact-row { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 26px; }
+
+footer { border-top: 1px solid var(--edge); padding: 38px 0 60px;
+         font-family: var(--mono); font-size: 12.5px; color: var(--ink-mute); }
+footer .wrap { display: flex; flex-wrap: wrap; gap: 14px 26px; }
+footer .sp { margin-left: auto; }
+</style>
+</head>
+<body>
+
+<header class="nav">
+  <div class="wrap nav-in">
+    <a class="brand" href="index.html">
+      <svg viewBox="0 0 1024 1024" aria-hidden="true">
+        <g class="f-none k-trace" stroke-width="70"
+           stroke-linecap="round" stroke-linejoin="round">
+          <path d="M150 512 H300 M724 512 H890"/>
+          <path d="M300 292 H512 A220 220 0 0 1 512 732 H300 Z"/>
+        </g>
+        <path class="f-amber" d="M654 512 L386 358 L386 666 Z"/>
+      </svg>
+      ChatOKF
+    </a>
+    <nav class="nav-links">
+      <a href="index.html">Home</a>
+      <button class="theme" id="theme" type="button" data-mode="system"
+              aria-label="Switch theme">
+        <svg class="i-system" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+          <circle cx="12" cy="12" r="8.5"/>
+          <path d="M12 3.5 a8.5 8.5 0 0 1 0 17 z" fill="currentColor"
+                stroke="none"/>
+        </svg>
+        <svg class="i-light" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
+             aria-hidden="true">
+          <circle cx="12" cy="12" r="4.2"/>
+          <path d="M12 2v2.4M12 19.6V22M2 12h2.4M19.6 12H22M4.9 4.9l1.7 1.7
+                   M17.4 17.4l1.7 1.7M19.1 4.9l-1.7 1.7M6.6 17.4l-1.7 1.7"/>
+        </svg>
+        <svg class="i-dark" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"
+             aria-hidden="true">
+          <path d="M20 13.5A8.5 8.5 0 0 1 10.5 4a8.5 8.5 0 1 0 9.5 9.5z"/>
+        </svg>
+      </button>
+    </nav>
+  </div>
+</header>
+
+<main class="page">
+  <p class="eyebrow">ChatOKF</p>
+  <h1>Privacy Policy</h1>
+  <p class="lede">ChatOKF runs its language models entirely on your device.
+  Your conversations are never sent to any server, because there is no
+  server to send them to.</p>
+  <span class="stamp">Effective July 2026</span>
+
+  <h2>What we collect</h2>
+  <p>Nothing. ChatOKF has no analytics, no crash reporters, no advertising
+  identifiers, and no user accounts. There is no backend and no database of
+  users.</p>
+
+  <h2>What stays on your device</h2>
+  <p>Everything you type, every image or document you attach, every reply
+  the model generates, and the model weights themselves live on your
+  device. Inference runs locally on the device's own GPU; prompts and
+  replies are never uploaded anywhere. Conversations are not synced or
+  backed up by the app, and deleting the app removes everything it ever
+  stored.</p>
+
+  <h2>Network access</h2>
+  <p>ChatOKF uses the network for exactly two things, both visible and
+  under your control.</p>
+
+  <h3>Model download</h3>
+  <p>On first run (and whenever you add a model in Settings) the app
+  downloads model weights from the Hugging Face Hub over HTTPS. This is an
+  ordinary file download: the host sees your IP address, as with any
+  download, and nothing else. Models are stored on the device and later
+  launches need no network.</p>
+
+  <h3>Optional lookups</h3>
+  <p>The model can consult reference sources while answering. Two switches
+  in Settings (also on the toolbar: airplane, book, globe) control what may
+  leave the device:</p>
+  <div class="tier">
+    <p class="eyebrow">Tier 1</p>
+    <h3>Wikipedia only</h3>
+    <ul>
+      <li>Your question is matched to a Wikipedia article <strong>on the
+      device</strong> by a local semantic index; nothing you type is sent
+      to any search engine. Only the matched article's numeric id goes to
+      <code>wikipedia.org</code> to fetch its text.</li>
+      <li>Today's headlines come from Wikipedia's public news feed; the
+      request carries only today's date.</li>
+    </ul>
+  </div>
+  <div class="tier">
+    <p class="eyebrow">Tier 2</p>
+    <h3>Web access</h3>
+    <ul>
+      <li>Web search sends the model's search terms to the Mwmbl search
+      engine, and pages the model picks from the results are fetched
+      directly.</li>
+      <li>Weather resolves your approximate location from your IP address
+      and queries public weather services (Open-Meteo, and the US National
+      Weather Service where covered). The app never uses GPS and never
+      asks for location permission.</li>
+    </ul>
+  </div>
+  <p>With both switches off, ChatOKF makes no network requests at all after
+  its models are downloaded. The app also screens outbound queries and
+  refuses to transmit anything that looks like a private key or an access
+  token.</p>
+
+  <h2>Permissions</h2>
+  <p>ChatOKF requests access only to:</p>
+  <ul>
+    <li>Images and text files you explicitly attach via the system file
+    picker, the photo library picker, or drag and drop.</li>
+    <li>Outbound HTTPS, for the model download and the optional lookups
+    described above.</li>
+  </ul>
+  <p>The photo picker runs out of process, so the app never sees your
+  library, only the photos you hand it. The app never requests your
+  camera, microphone, contacts, or location.</p>
+
+  <h2>Children's privacy</h2>
+  <p>ChatOKF is not directed at children under 13. We do not knowingly
+  collect information from children, or, for that matter, from anyone.</p>
+
+  <h2>Changes to this policy</h2>
+  <p>If this policy changes materially, we will update the effective date
+  above. Continued use of the app after any change constitutes acceptance
+  of the new policy.</p>
+
+  <h2>Contact</h2>
+  <p>Questions about privacy? Open an issue.</p>
+  <div class="contact-row">
+    <a class="btn" href="https://github.com/leok7v">GitHub</a>
+  </div>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>ChatOKF</span>
+    <span>on-device AI chat</span>
+    <span class="sp">&copy; 2026 Dmitry &ldquo;Leo&rdquo; Kuznetsov</span>
+  </div>
+</footer>
+
+<script>
+(function () {
+  var order = ['system', 'light', 'dark'];
+  var btn = document.getElementById('theme');
+  var root = document.documentElement;
+  var meta = document.querySelector('meta[name="theme-color"]');
+  var mode = 'dark';
+  try {
+    var saved = localStorage.getItem('chatokf-theme');
+    if (order.indexOf(saved) > 0) { mode = saved; }
+  } catch (e) { /* storage blocked: stay dark */ }
+  function apply(next) {
+    mode = next;
+    if (mode === 'system') { root.removeAttribute('data-theme'); }
+    else { root.setAttribute('data-theme', mode); }
+    if (btn) {
+      btn.setAttribute('data-mode', mode);
+      btn.title = 'Theme: ' + mode + ' (click to change)';
+      btn.setAttribute('aria-label', 'Theme: ' + mode + '. Click to change.');
+    }
+    if (meta) {
+      var dark = mode === 'dark' || (mode === 'system' &&
+                 window.matchMedia('(prefers-color-scheme: dark)').matches);
+      meta.setAttribute('content', dark ? '#070B14' : '#EFF3F9');
+    }
+    try { localStorage.setItem('chatokf-theme', mode); }
+    catch (e2) { /* nothing to persist to */ }
+  }
+  apply(mode);
+  if (btn) {
+    btn.addEventListener('click', function () {
+      apply(order[(order.indexOf(mode) + 1) % order.length]);
+    });
+  }
+}());
+</script>
+</body>
+</html>

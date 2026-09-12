@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>io.github.leok7v.ChatOKF.cli</string>
+    <key>CFBundleName</key>
+    <string>chatokf-cli</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <!-- Required for --gemma-mic: macOS refuses microphone access to a
+         process with no usage string, and kills it rather than prompting. -->
+    <key>NSMicrophoneUsageDescription</key>
+    <string>chatokf-cli listens so the speech gate and the audio tower can be
+    tested without the app.</string>
+</dict>
+</plist>

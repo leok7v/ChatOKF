@@ -1,0 +1,22 @@
+Audio fixtures for the gemma-4 speech path (LLM/tests/Gemma4AudioTests.swift).
+
+The SAME sentence in two languages, read by native speakers, so a
+transcription test measures the model rather than the fixture. Both come
+from Tatoeba (https://tatoeba.org) under CC BY 2.0 FR.
+
+  en-lets-leave-tomorrow.wav
+      "Let's leave tomorrow."
+      sentence #6066996 by CK, audio #644931 by CK
+
+  fr-partons-demain.wav
+      "Partons demain."
+      sentence #11460054 by lbdx, audio #1102917 by Adrien_FR
+
+Licence: CC BY 2.0 FR -- https://creativecommons.org/licenses/by/2.0/fr/
+Converted from the source MP3 to 16 kHz mono WAV (the rate
+gemma4.audio.mel.sample_rate names); no other processing.
+
+WHY these and not shorter clips: the model needs roughly a second of speech.
+Measured on single words, a 0.60s clip (15 soft tokens) returns "no
+discernible spoken words", while 0.77s (19) and 1.10s (28) transcribe
+correctly. These are 1.67s and 1.41s.

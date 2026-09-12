@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Raise the jetsam limit so the on-device model fits on 4-6GB phones;
+	     freely available since iOS 15. -->
+	<key>com.apple.developer.kernel.increased-memory-limit</key>
+	<true/>
+	<!-- Allow a >4GB virtual address space so the weight blobs, KV and the
+	     vision tower map at once. Pairs with increased-memory-limit. -->
+	<key>com.apple.developer.kernel.extended-virtual-addressing</key>
+	<true/>
+	<!-- GPU continued-processing, declared for a future background Metal path;
+	     not yet used (commits PARK while backgrounded); restricted. -->
+	<key>com.apple.developer.background-tasks.continued-processing.gpu</key>
+	<true/>
+</dict>
+</plist>

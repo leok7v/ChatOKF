@@ -1,0 +1,268 @@
+name: ChatOKF
+options:
+  bundleIdPrefix: io.github.leok7v
+  # Pin LastUpgradeCheck to the running Xcode (encoded major/minor/patch, e.g.
+  # 26.6.0 -> "2660").
+  xcodeVersion: "2660"
+  deploymentTarget:
+    macOS: "15.0"
+    iOS: "18.0"
+# Show config/ (entitlements + xcconfig) in the Xcode navigator; not compiled.
+fileGroups:
+  - config
+settings:
+  base:
+    DEVELOPMENT_TEAM: 692R843P25
+    DEAD_CODE_STRIPPING: YES
+    # Apple Silicon only: Float16 (used throughout the engine) does not exist
+    # on Intel, so any x86_64 compile fails.
+    EXCLUDED_ARCHS[sdk=macosx*]: x86_64
+    EXCLUDED_ARCHS[sdk=iphonesimulator*]: x86_64
+    # No "Apple Vision (Designed for iPad)" destination -- nothing is validated
+    # on visionOS.
+    SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD: "NO"
+targets:
+  # The pure-Swift engine as a native static library, so it inherits the
+  # project arch settings. Kernels.metal rides with each product, not here.
+  LLM:
+    type: library.static
+    supportedDestinations: [macOS, iOS]
+    sources:
+      - path: LLM/Base
+      - path: LLM/Gemma
+      - path: LLM/Quantize
+      - path: LLM/Qwen
+      - path: LLM/Slugs
+        excludes:
+          - minilm.gguf
+      - path: LLM/TTS
+        excludes:
+          - kitten_full.gguf
+          - voices.safetensors
+          - en_rules
+          - en_list
+    # Set directly, NOT via platform.xcconfig, which carries app-only
+    # settings this library must not inherit.
+    configFiles:
+      Debug: config/version.xcconfig
+      Release: config/version.xcconfig
+    settings:
+      base:
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: complete
+        SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
+        # Binds cblas_sgemm$NEWLAPACK.
+        OTHER_SWIFT_FLAGS: -Xcc -DACCELERATE_NEW_LAPACK
+      configs:
+        # OPTIMIZED EVEN IN DEBUG.
+        Debug:
+          SWIFT_OPTIMIZATION_LEVEL: "-O"
+  # Markdown transcript rendering; a native static-library target like LLM
+  # and Chat, so the whole app builds from one project description.
+  MD:
+    type: library.static
+    supportedDestinations: [macOS, iOS]
+    sources:
+      - path: MD
+        excludes:
+          - MDTests
+          - README.md
+          - buildServer.json
+          - .swiftpm
+          - Resources/highlights.ini
+          - Resources/STIXTwoMath.otf
+    settings:
+      base:
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: complete
+        SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
+  # The session driver: model load/switch, the ChatSession lifecycle, one
+  # turn's run, and conversation persistence.
+  Chat:
+    type: library.static
+    supportedDestinations: [macOS, iOS]
+    sources:
+      - Chat
+    configFiles:
+      Debug: config/platform.xcconfig
+      Release: config/platform.xcconfig
+    dependencies:
+      - target: LLM
+      - target: MD
+    settings:
+      base:
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: complete
+        SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
+      configs:
+        Debug:
+          SWIFT_OPTIMIZATION_LEVEL: "-O"
+  # The single app target: Hub-download-only.
+  ChatOKF:
+    type: application
+    supportedDestinations: [macOS, iOS]
+    sources:
+      - path: App
+        excludes:
+          - AppTests
+      # IQTables/IQKernels are #included by Kernels.metal; compiled on their
+      # own they see no codebook and fail.
+      - path: LLM/metal
+      # LLM's data blobs, excluded from the LLM target itself, copied in here
+      # instead so they end up inside ChatOKF.app.
+      - path: LLM/Slugs/minilm.gguf
+        buildPhase: resources
+      - path: LLM/TTS/kitten_full.gguf
+        buildPhase: resources
+      - path: LLM/TTS/voices.safetensors
+        buildPhase: resources
+      - path: LLM/TTS/en_rules
+        buildPhase: resources
+      - path: LLM/TTS/en_list
+        buildPhase: resources
+      - path: MD/Resources/highlights.ini
+        buildPhase: resources
+      - path: MD/Resources/STIXTwoMath.otf
+        buildPhase: resources
+    dependencies:
+      - target: Chat
+      - target: LLM
+      - target: MD
+    configFiles:
+      Debug: config/platform.xcconfig
+      Release: config/platform.xcconfig
+    settings:
+      base:
+        # The bundle id is the container identity; changing it factory-resets
+        # every install (macOS models move by hand between containers).
+        PRODUCT_BUNDLE_IDENTIFIER: io.github.leok7v.ChatOKF
+        INFOPLIST_KEY_CFBundleDisplayName: ChatOKF
+        GENERATE_INFOPLIST_FILE: YES
+        SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD: "NO"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY[sdk=macosx*]: "-"
+        # Entitlements set at the TARGET level (not the xcconfig) so Xcode's
+        # Signing & Capabilities tab actually shows them.
+        CODE_SIGN_ENTITLEMENTS[sdk=macosx*]: config/macos.entitlements
+        CODE_SIGN_ENTITLEMENTS[sdk=iphoneos*]: config/ios.entitlements
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        # Mac App Store validation rejects an archive without a category.
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.productivity
+        # Export compliance, declared once here so App Store Connect stops
+        # asking on every upload.
+        INFOPLIST_KEY_ITSAppUsesNonExemptEncryption: NO
+        # Dictation.
+        INFOPLIST_KEY_NSMicrophoneUsageDescription: ChatOKF listens only after you tap the microphone button, until you pause, and what you say is heard on this device.
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        # iPhone stays portrait-only (a chat composer on a narrow landscape
+        # strip is useless, and the per-idiom restriction remains supported).
+        INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone: UIInterfaceOrientationPortrait
+        INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad: UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight
+  # macOS command-line harness for driving and testing LLM without the UI (chat
+  # replay, divergence/perplexity probes, TTS, puzzles).
+  chatokf:
+    type: tool
+    supportedDestinations: [macOS]
+    sources:
+      - path: LLM/cli
+        excludes:
+          - Info.plist
+      - path: LLM/metal
+    dependencies:
+      - target: LLM
+    settings:
+      base:
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: complete
+        SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
+        OTHER_SWIFT_FLAGS: -Xcc -DACCELERATE_NEW_LAPACK
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY[sdk=macosx*]: "-"
+        # Embeds an Info.plist so NSBundle.mainBundle.bundleIdentifier is set
+        # (else it falls back to the executable name).
+        INFOPLIST_FILE: LLM/cli/Info.plist
+      configs:
+        Debug:
+          SWIFT_OPTIMIZATION_LEVEL: "-O"
+# Explicit scheme so `xcodebuild -scheme ChatOKF` works and survives
+# regenerate.
+  ChatOKFTests:
+    type: bundle.unit-test
+    supportedDestinations: [macOS, iOS]
+    sources:
+      - App/AppTests
+    dependencies:
+      - target: ChatOKF
+      - target: Chat
+      - target: LLM
+    settings:
+      base:
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: complete
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST[sdk=macosx*]: $(BUILT_PRODUCTS_DIR)/ChatOKF.app/Contents/MacOS/ChatOKF
+        TEST_HOST[sdk=iphoneos*]: $(BUILT_PRODUCTS_DIR)/ChatOKF.app/ChatOKF
+        TEST_HOST[sdk=iphonesimulator*]: $(BUILT_PRODUCTS_DIR)/ChatOKF.app/ChatOKF
+        BUNDLE_LOADER: $(TEST_HOST)
+  # UNHOSTED: hosting inside ChatOKF.app inherits its App Sandbox, which
+  # cannot read ~/Models, so every weight-gated test would SKIP SILENTLY.
+  LLMTests:
+    type: bundle.unit-test
+    supportedDestinations: [macOS, iOS]
+    sources:
+      - LLM/LLMTests
+      # The Metal kernel tests need a default.metallib of their own -- see
+      # the LLM target comment; the same trap applies to a test bundle.
+      - path: LLM/metal
+    dependencies:
+      - target: LLM
+    settings:
+      base:
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: complete
+        SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
+        GENERATE_INFOPLIST_FILE: YES
+  # UNHOSTED for the same reason as LLMTests.
+  MDTests:
+    type: bundle.unit-test
+    supportedDestinations: [macOS, iOS]
+    sources:
+      - MD/MDTests
+    dependencies:
+      - target: MD
+    settings:
+      base:
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: complete
+        SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
+        GENERATE_INFOPLIST_FILE: YES
+schemes:
+  ChatOKF:
+    build:
+      targets:
+        ChatOKF: all
+        ChatOKFTests: [test]
+        LLMTests: [test]
+        MDTests: [test]
+    test:
+      config: Debug
+      targets:
+        - ChatOKFTests
+        - LLMTests
+        - MDTests
+    run:
+      config: Release
+      # All DECLARED but UNCHECKED (isEnabled/value: false), so they survive a
+      # regenerate as ready toggles without firing.
+      environmentVariables:
+        - variable: OS_ACTIVITY_MODE
+          value: disable
+          isEnabled: false
+      commandLineArguments:
+        "--debug": false
+        "--verbosity 3": false
+        "--log-memory": false
+        "--speech-floor 3": false
+    archive:
+      config: Release

@@ -1,0 +1,18 @@
+// Date-stamp versions (YY.MM.DD marketing, YYMMDD.HHMM build), refreshed by
+// the Stamp Version build phase.
+#include "version.xcconfig"
+
+// No `#if os()` in Swift source: each platform's file compiles only for its
+// own SDK, with parallel files declaring identical symbol names.
+EXCLUDED_SOURCE_FILE_NAMES[sdk=iphoneos*]        = *-macOS.swift
+EXCLUDED_SOURCE_FILE_NAMES[sdk=iphonesimulator*] = *-macOS.swift
+EXCLUDED_SOURCE_FILE_NAMES[sdk=macosx*]          = *-iOS.swift
+
+IPHONEOS_DEPLOYMENT_TARGET = 18.0
+MACOSX_DEPLOYMENT_TARGET = 15.0
+SWIFT_VERSION = 6.0
+SWIFT_STRICT_CONCURRENCY = complete
+SWIFT_TREAT_WARNINGS_AS_ERRORS = YES
+
+// CODE_SIGN_ENTITLEMENTS lives in the target settings in project.yml, where
+// Xcode's Signing & Capabilities tab can show it.

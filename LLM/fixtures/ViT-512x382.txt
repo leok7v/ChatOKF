@@ -1,0 +1,30 @@
+ViT-512x382.jpeg -- a single-picture stress test for vision transformers
+and vision-language pipelines. A 512x382 progressive JPEG, deliberately
+dense in objects, textures, and text, with features aimed at the
+structural mechanics of ViT-style models:
+
+- Patch grid: a faint grid is superimposed over the whole scene,
+  mimicking ViT patch extraction and probing spatial grid alignment.
+- High-density signage: a large architectural sign structure carries an
+  array of dozens of prohibition icons (including a dog-on-a-skateboard
+  glyph), a "NO CATS ALLOWED" sign, and a "BEACH RULES & REGULATIONS"
+  text panel -- dense visual and semantic tokens in one region.
+- Serialized text: an airplane tows a banner of pseudo-token text
+  (patch/grid/serialization themed), a token stream embedded in pixels.
+- Semantic conflict: the no-cats rule and prohibition grid contradict
+  the scene itself -- a cat rests on a car while anthropomorphic dogs
+  surf, dig, and play across the beach, challenging detection and
+  scene-understanding alike.
+- Texture gradients: pavement, sand, ocean water, and foliage span the
+  frame to probe spatial interpolation.
+- Object inventory (one of each, minimum): cat, dog, person, airplane,
+  bicycle, motorcycle, car, palm tree, beach, ocean, sun.
+
+The scene reads as a parking lot in the foreground looking toward a
+crowded beach and the ocean: cars, a motorcycle, and a bicycle in the
+lot; a person with a dog; a thatched "DOGGY PADDLE RENTAL" hut with
+surfboards; palms on the right; the sun and the banner plane in the sky.
+
+A good single-image benchmark: OCR the signage, count or name the
+objects, resolve the rule-vs-scene contradictions, or describe the
+scene end to end.

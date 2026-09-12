@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- App Sandbox: required for the Mac App Store; it also scopes Application
+	     Support to the app's own container. -->
+	<key>com.apple.security.app-sandbox</key>
+	<true/>
+	<!-- Outbound network only, for the on-demand model download from the Hub. -->
+	<key>com.apple.security.network.client</key>
+	<true/>
+	<!-- The microphone, for dictation. Without it the tap installs and NO
+	     samples arrive; the usage string in project.yml is the other half. -->
+	<key>com.apple.security.device.audio-input</key>
+	<true/>
+	<!-- Read the picked image and WRITE the chosen save location; NSSavePanel
+	     refuses to display at all without read-write. -->
+	<key>com.apple.security.files.user-selected.read-write</key>
+	<true/>
+</dict>
+</plist>
