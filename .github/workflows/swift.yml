@@ -16,10 +16,17 @@ jobs:
     runs-on: macos-26
     steps:
       - uses: actions/checkout@v5
+      # e5-small.gguf is a Git LFS object. The checkout leaves a pointer;
+      # the object is restored from the Actions cache keyed by the pointer
+      # ids, so a run pulls from LFS only when a tracked file changes.
+      - name: LFS ids
+        run: git lfs ls-files -l | cut -d' ' -f1 | sort > .lfs-ids
+      - uses: actions/cache@v4
         with:
-          # e5-small.gguf is a Git LFS object; without this the checkout
-          # leaves a pointer file and the app bundles that instead.
-          lfs: true
+          path: .git/lfs
+          key: lfs-${{ hashFiles('.lfs-ids') }}
+      - name: LFS pull
+        run: git lfs pull
       - name: Xcode
         run: sudo xcode-select -s /Applications/Xcode.app
       - name: Generate the project
