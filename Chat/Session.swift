@@ -29,6 +29,8 @@ public enum TurnEvent: Sendable {
     public var systemPrompt: String
     public var wikipedia = true
     public var webAccess = true
+    public let memories = Memories()
+    private var recalledIds: Set<String> = []
 
     private var ggufBackend: (any AgentBackend)?
     private var ggufTemplate = ""
@@ -68,6 +70,7 @@ public enum TurnEvent: Sendable {
     public init(modelName: String, systemPrompt: String) {
         self.modelName = modelName
         self.systemPrompt = systemPrompt
+        memories.open()
     }
 
     public static let prepFailed = "This model could not be prepared. Try "
@@ -131,6 +134,8 @@ public enum TurnEvent: Sendable {
         media = nil
         modelSupportsReasoningEffort = false
         effortLevels = []
+        recalledIds = []
+        memories.forgetSeen()
     }
 
     public func requestStop() {
@@ -151,10 +156,12 @@ public enum TurnEvent: Sendable {
     }
 
     public func buildGguf(name: String, path: String) async -> String? {
+        memories.modelName = name
         releaseSession()
         await retiring?.value
         retiring = nil
         let loaded = await Session.loadHeavy(name: name, path: path)
+        await memories.awaitOpen()
         var failure: String? = Session.prepFailed
         if let built = loaded.built {
             ggufBackend = built.backend
@@ -253,6 +260,8 @@ public enum TurnEvent: Sendable {
 
     private static func tgKey(_ name: String) -> String { "tg.\(name)" }
 
+    private static func ppKey(_ name: String) -> String { "pp.\(name)" }
+
     public static func storedTG(_ name: String) -> Double {
         UserDefaults.standard.double(forKey: Session.tgKey(name))
     }
@@ -262,13 +271,51 @@ public enum TurnEvent: Sendable {
         return v > 0 ? v : 20
     }
 
-    private func recordTG(_ tg: Double) {
-        if tg > 0 {
-            let old = UserDefaults.standard.double(
-                forKey: Session.tgKey(modelName))
-            let ema = old > 0 ? 0.7 * old + 0.3 * tg : tg
-            UserDefaults.standard.set(ema, forKey: Session.tgKey(modelName))
+    public var measuredPP: Double {
+        let v = UserDefaults.standard.double(forKey: Session.ppKey(modelName))
+        return v > 0 ? v : 100
+    }
+
+    private func recordRate(_ key: String, _ rate: Double) {
+        if rate > 0 {
+            let old = UserDefaults.standard.double(forKey: key)
+            let ema = old > 0 ? 0.7 * old + 0.3 * rate : rate
+            UserDefaults.standard.set(ema, forKey: key)
         }
+    }
+
+    private func recordTG(_ tg: Double) {
+        recordRate(Session.tgKey(modelName), tg)
+    }
+
+    private func recordPP(_ pp: Double) {
+        recordRate(Session.ppKey(modelName), pp)
+    }
+
+    public func recall(_ question: String, also: [String]) -> Memories.Recall? {
+        var out: Memories.Recall? = nil
+        if memories.active {
+            let found = memories.recall(question, also: also,
+                                        pp: measuredPP, excluding: recalledIds)
+            if let found {
+                Diag.shared.report(.turn, String(
+                    format: "[recall] %@ %d note(s), standout %.1f, ~%d tok "
+                        + "%.1fs of %.0fs: %@",
+                    found.silent ? "silent" : "offered", found.ids.count,
+                    found.standout, found.tokens, found.seconds,
+                    Memories.budgetSeconds,
+                    found.ids.joined(separator: " ")))
+                if found.silent { recalledIds.formUnion(found.ids) }
+                out = found
+            }
+        }
+        return out
+    }
+
+    public func noteToUse(_ id: String) -> Memories.Note? {
+        let note = memories.note(id)
+        if note != nil { recalledIds.insert(id) }
+        return note
     }
 
     public static func rate(_ v: Double) -> String {
@@ -333,6 +380,14 @@ public enum TurnEvent: Sendable {
                 + "vision tower and fully visible to you: describe what you "
                 + "actually see, and never claim you cannot view images."
         }
+        if memories.active {
+            let map = memories.map
+            if !map.isEmpty {
+                s += "\nThe user's own notes, by area; a message may arrive "
+                    + "with the ones that fit it, and memory_search finds the "
+                    + "rest:\n" + map
+            }
+        }
         return s
     }
 
@@ -341,9 +396,12 @@ public enum TurnEvent: Sendable {
     public var toolRunnerOverride: (any ToolRunner)?
 
     private var toolRunner: (any ToolRunner)? {
-        toolRunnerOverride ?? SafeToolRunner(
+        let safe = SafeToolRunner(
             slugsPath: wikipedia ? Session.minilmPath : nil,
             wikipedia: wikipedia, network: webAccess)
+        let runner: any ToolRunner = memories.active
+            ? MemoryToolRunner(inner: safe, memories: memories) : safe
+        return toolRunnerOverride ?? runner
     }
 
     private func recordTrace(_ e: TraceEvent,
@@ -496,6 +554,9 @@ public enum TurnEvent: Sendable {
         await drainMeta()
         await session?.endPriming()
         Footprint.report(.load, "newChat outgoing released")
+        recalledIds = []
+        memories.forgetSeen()
+        await memories.awaitOpen()
         makeSession(config, onEvent: onEvent)
         primeSession(resetFirst: true,
                     thinkingActive: config.thinking && modelSupportsThinking)
@@ -536,7 +597,7 @@ public enum TurnEvent: Sendable {
         docs.compactMap { doc in
             doc.url.map { url in
                 DocRef(url: url, bytes: doc.content.utf8.count,
-                       short: doc.short)
+                       short: doc.short, total: doc.total)
             }
         }
     }
@@ -552,13 +613,15 @@ public enum TurnEvent: Sendable {
     ]
 
     public static func toolLabel(_ event: ToolRoundEvent) -> String {
-        event.resolved.flatMap { name in Session.toolGlyphs[name]?.label }
-            ?? event.name
+        event.resolved.flatMap { name in
+            (Session.toolGlyphs[name] ?? MemoryTools.glyphs[name])?.label
+        } ?? event.name
     }
 
     public static func toolSymbol(_ event: ToolRoundEvent) -> String {
-        event.resolved.flatMap { name in Session.toolGlyphs[name]?.symbol }
-            ?? "questionmark.circle"
+        event.resolved.flatMap { name in
+            (Session.toolGlyphs[name] ?? MemoryTools.glyphs[name])?.symbol
+        } ?? "questionmark.circle"
     }
 
     public static func toolArgs(_ event: ToolRoundEvent) -> String {
@@ -686,7 +749,10 @@ public enum TurnEvent: Sendable {
                 if Task.isCancelled { await session.quiesce() }
                 let outcome = await session.turnOutcome
                 let metrics = await session.lastMetrics
-                if outcome != .stopped { recordTG(metrics.tg) }
+                if outcome != .stopped {
+                    recordTG(metrics.tg)
+                    recordPP(metrics.pp)
+                }
                 reportTurn(metrics, outcome, thinkingActive, thinkTokenCap,
                            began)
                 cont.yield(.finished(outcome, metrics))
@@ -794,11 +860,23 @@ public enum TurnEvent: Sendable {
         return result
     }
 
-    public func runMetaTurns(titled: Bool, wantsFollowup: Bool,
-                             onTitle: @escaping @MainActor (String) -> Void,
-                             onFollowup: @escaping @MainActor (String) -> Void
+    public struct Extraction: Sendable {
+        public let exchange: String
+        public let conversation: UUID?
+
+        public init(exchange: String, conversation: UUID?) {
+            self.exchange = exchange
+            self.conversation = conversation
+        }
+    }
+
+    public func runMetaTurns(
+        titled: Bool, wantsFollowup: Bool, extraction: Extraction?,
+        onTitle: @escaping @MainActor (String) -> Void,
+        onFollowup: @escaping @MainActor (String) -> Void,
+        onRemembered: @escaping @MainActor ([Memories.Remembered]) -> Void
     ) {
-        if let session, titled || wantsFollowup {
+        if let session, titled || wantsFollowup || extraction != nil {
             let running = metaTask
             metaTask = Task { @MainActor in
                 await running?.value
@@ -809,9 +887,39 @@ public enum TurnEvent: Sendable {
                 if wantsFollowup, !Task.isCancelled {
                     onFollowup(await session.makeFollowup())
                 }
+                if let extraction, !Task.isCancelled {
+                    let got = await extract(extraction)
+                    if !got.isEmpty { onRemembered(got) }
+                }
                 self.metaTask = nil
             }
         }
+    }
+
+    private func extract(_ extraction: Extraction) async
+        -> [Memories.Remembered] {
+        var out: [Memories.Remembered] = []
+        if let session, memories.active, memories.isOpen {
+            let coverage = memories.coverage(extraction.exchange)
+            if coverage.covered {
+                Diag.shared.report(.turn, "[extract] covered by the store, "
+                                   + "skipped")
+            } else {
+                let began = Date()
+                let raw = await session.extractNotes(
+                    Memories.extractionInstruction(known: coverage.known))
+                let drafts = Memories.parseDrafts(raw)
+                out = memories.remember(drafts,
+                                        source: extraction.conversation,
+                                        excluding: recalledIds)
+                Diag.shared.report(.turn, String(
+                    format: "[extract] %d draft(s) of %d parsed from %d "
+                        + "chars in %.1fs: %@", out.count, drafts.count,
+                    raw.count, Date().timeIntervalSince(began),
+                    out.map { note in note.id }.joined(separator: " ")))
+            }
+        }
+        return out
     }
 
     private static let spokenPrompt = "Reply to what I just said."

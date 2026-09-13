@@ -71,6 +71,9 @@ public enum Flags {
         Knob(name: "speech-floor", takesValue: true, help:
             "gigabytes of RAM the reading voice requires", scope: .experiment,
             defaultValue: "3"),
+        Knob(name: "recall-budget", takesValue: true, help:
+            "seconds of prefill a silent memory recall may add to a turn",
+            scope: .engine, defaultValue: "5"),
         Knob(name: "search-parallel", takesValue: false, help:
             "use the Parallel web search service", scope: .engine,
             defaultValue: "1"),

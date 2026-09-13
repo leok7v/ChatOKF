@@ -54,11 +54,13 @@ import Foundation
         public let path: String
         public let bytes: Int
         public let short: Bool?
+        public let total: Int?
 
-        public init(path: String, bytes: Int, short: Bool?) {
+        public init(path: String, bytes: Int, short: Bool?, total: Int?) {
             self.path = path
             self.bytes = bytes
             self.short = short
+            self.total = total
         }
     }
 
@@ -91,10 +93,11 @@ import Foundation
         public var messages: [Msg]
         public var trace: [Trace]? = nil
         public var trashedAt: Date? = nil
+        public var extracted: Date? = nil
 
         public init(id: UUID, title: String, created: Date, updated: Date,
                     messages: [Msg], trace: [Trace]? = nil,
-                    trashedAt: Date? = nil) {
+                    trashedAt: Date? = nil, extracted: Date? = nil) {
             self.id = id
             self.title = title
             self.created = created
@@ -102,6 +105,7 @@ import Foundation
             self.messages = messages
             self.trace = trace
             self.trashedAt = trashedAt
+            self.extracted = extracted
         }
     }
 

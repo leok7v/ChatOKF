@@ -9,6 +9,7 @@ struct SettingsView: View {
     @State private var deleteName: String?
     @State private var confirmReset = false
     @State private var confirmClear = false
+    @State private var confirmForget = false
     @ScaledMetric(relativeTo: .body) private var railWidth: CGFloat = 215
     @ScaledMetric(relativeTo: .body) private var railIcon: CGFloat = 20
     @State private var draftZoom: Int?
@@ -76,6 +77,16 @@ struct SettingsView: View {
         } message: {
             Text("Moves every saved conversation to the trash, where it "
                + "stays for 30 days.")
+        }
+        .alert("Forget everything?", isPresented: $confirmForget) {
+            Button("Forget", role: .destructive) {
+                model.forgetAllMemories()
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("Deletes every memory the assistant has formed from its "
+               + "conversations with you. There is no trash for these. "
+               + "The conversations themselves stay.")
         }
     }
 
@@ -503,11 +514,17 @@ struct SettingsView: View {
 
     private var documentRows: some View {
         wideRow("Documents",
-                "How much of an attached document the assistant reads: up "
-                + "to about \(model.docBudget.pages) pages of text. Anything "
-                + "past that is left out, and the chat says so.") {
+                model.docBudget == .UL
+                ? "How much of an attached document the assistant reads: as "
+                    + "much as the model's context holds, about "
+                    + "\(model.docBudgetPages) pages with the model in use. "
+                    + "Long documents take minutes to read; the chat shows "
+                    + "the progress and Stop cancels."
+                : "How much of an attached document the assistant reads: up "
+                    + "to about \(model.docBudgetPages) pages of text. "
+                    + "Anything past that is left out, and the chat says so.") {
             Picker("Document size", selection: $model.docBudget) {
-                ForEach(ChatModel.DocBudget.allCases) { size in
+                ForEach(ChatModel.DocBudget.offered) { size in
                     Text(size.rawValue).tag(size)
                 }
             }
@@ -593,6 +610,9 @@ struct SettingsView: View {
             if model.modelSupportsThinking {
                 card { thinkingRows }
             }
+            if model.memoriesSupported {
+                card { totalRecallRow }
+            }
             card {
                 if model.canSuggestFollowups {
                     switchRow("Suggest follow-up questions",
@@ -634,6 +654,22 @@ struct SettingsView: View {
                 documentRows
             }
         }
+    }
+
+    private var totalRecallRow: some View {
+        switchRow("Total Recall",
+                  "The assistant keeps memories: durable things it learns "
+                  + "from your conversations, saved as plain notes on this "
+                  + "device. When you ask something, it looks through them "
+                  + "first and reads the ones that fit. It is not total, "
+                  + "whatever the name says; it remembers what it can, "
+                  + "forgets some things, and gets a few wrong, which is "
+                  + "what memory does. Memories can hold private details. "
+                  + "They stay on this device unless Backup Memories is on, "
+                  + "in Settings, Privacy. Turning this off stops the "
+                  + "assistant reading or writing memories; they stay until "
+                  + "Forget Everything, in Settings, Misc.",
+                  $model.totalRecall)
     }
 
     private var thinkingRows: some View {
@@ -682,6 +718,17 @@ struct SettingsView: View {
             .id(searchRevision)
             note("With both off, the assistant is not offered web search "
                 + "at all.")
+            if model.memoriesSupported {
+                heading("Memories")
+                card {
+                    switchRow("Backup Memories",
+                              "Include memories in iCloud and local backups. "
+                              + "Apple can see backed-up data to some degree "
+                              + "unless you encrypt your backups, which is a "
+                              + "setting on your device, not in this app.",
+                              $model.backupMemories)
+                }
+            }
             heading("Also reached")
             card {
                 destination("Wikipedia",
@@ -771,6 +818,21 @@ struct SettingsView: View {
                           + "Diagnostics pane. Nothing is written to a log "
                           + "file while this is off, and logging starts at "
                           + "the next launch.", $model.statusLine)
+            }
+            if model.memoriesSupported {
+                card {
+                    wideRow(nil,
+                            "Delete every memory the assistant has formed "
+                            + "from its conversations with you. The "
+                            + "conversations themselves stay.") {
+                        Button(role: .destructive) {
+                            confirmForget = true
+                        } label: {
+                            Label("Forget Everything", systemImage: "trash")
+                        }
+                        .disabled(model.busy)
+                    }
+                }
             }
             if !ConversationStore.shared.list.isEmpty || unlocked {
                 card {

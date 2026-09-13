@@ -1,9 +1,6 @@
-// A pure-Swift port of the reference llm.c embedder; the parity gate is
-// cosine ~1.0 against llama.cpp. No KV cache, causal mask or sampling.
+import Dispatch
 import Foundation
 
-// Big matrices stay QUANTIZED in the mmap and dequantize row by row, so a
-// live encoder pins ~36 MB of clean file-backed pages, not ~90 MB dirty.
 final class MiniLM {
     struct Layer {
         let wq: GGUFTensor, bq: [Float]
@@ -34,10 +31,19 @@ final class MiniLM {
     private let embNormB: [Float]
     private let layers: [Layer]
     private let vocab: [String: Int32]
-    // One reused row buffer; the encoder is single-threaded per embed.
+    private let unigram: Unigram?
     private var rowScratch: [Float]
 
+    static let cores = ProcessInfo.processInfo.activeProcessorCount
+
     var dim: Int { nEmbd }
+    var multilingual: Bool { unigram != nil }
+
+    static var bundledMultilingual: URL? {
+        Res.url("e5-small", "gguf",
+                dev: URL(fileURLWithPath: #filePath)
+                    .deletingLastPathComponent())
+    }
 
     init(gguf g: GGUF) {
         nLayer = g.int("bert.block_count") ?? 6
@@ -46,10 +52,17 @@ final class MiniLM {
         nHead = g.int("bert.attention.head_count") ?? 12
         nCtx = g.int("bert.context_length") ?? 512
         lnEps = Float(g.double("bert.attention.layer_norm_epsilon") ?? 1e-12)
-        clsId = Int32(g.int("tokenizer.ggml.cls_token_id") ?? 101)
-        sepId = Int32(g.int("tokenizer.ggml.seperator_token_id") ?? 102)
-        unkId = Int32(g.int("tokenizer.ggml.unknown_token_id") ?? 100)
-
+        let spm = Unigram.from(gguf: g)
+        unigram = spm
+        if spm != nil {
+            clsId = Int32(g.int("tokenizer.ggml.bos_token_id") ?? 0)
+            sepId = Int32(g.int("tokenizer.ggml.eos_token_id") ?? 2)
+            unkId = Int32(g.int("tokenizer.ggml.unknown_token_id") ?? 3)
+        } else {
+            clsId = Int32(g.int("tokenizer.ggml.cls_token_id") ?? 101)
+            sepId = Int32(g.int("tokenizer.ggml.seperator_token_id") ?? 102)
+            unkId = Int32(g.int("tokenizer.ggml.unknown_token_id") ?? 100)
+        }
         gguf = g
         tokEmb = g.tensor("token_embd.weight")
         posEmb = MiniLM.dequant(g.tensor("position_embd.weight"))
@@ -75,23 +88,27 @@ final class MiniLM {
                 outNormW: f("layer_output_norm.weight"),
                 outNormB: f("layer_output_norm.bias"))
         }
-        var v = [String: Int32](minimumCapacity: 30720)
-        if let tokens = g.strings("tokenizer.ggml.tokens") {
+        var v: [String: Int32] = [:]
+        if spm == nil, let tokens = g.strings("tokenizer.ggml.tokens") {
+            v.reserveCapacity(tokens.count)
             for (i, piece) in tokens.enumerated() { v[piece] = Int32(i) }
         }
         vocab = v
     }
 
-    // Block types take `start`/`count` in multiples of 32: rows are 32-wide
-    // multiples, so a row maps to whole blocks.
     static func dequant(_ t: GGUFTensor, _ start: Int, _ count: Int,
                         into buf: inout [Float]) {
+        buf.withUnsafeMutableBufferPointer { bp in
+            dequant(t, start, count, into: bp.baseAddress!)
+        }
+    }
+
+    static func dequant(_ t: GGUFTensor, _ start: Int, _ count: Int,
+                        into buf: UnsafeMutablePointer<Float>) {
         let base = t.base
         switch t.type {
         case .f32:
-            buf.withUnsafeMutableBytes {
-                _ = memcpy($0.baseAddress!, base + start * 4, count * 4)
-            }
+            _ = memcpy(buf, base + start * 4, count * 4)
         case .f16, .bf16:
             for i in 0..<count {
                 let h = base.loadUnaligned(
@@ -146,8 +163,6 @@ final class MiniLM {
         (c >= 0x41 && c <= 0x5A) ? c + 32 : c
     }
 
-    // BERT's basic tokenizer NFD-decomposes then drops marks, so accented Latin
-    // folds to its ASCII base; '.' marks the non-decomposable, left as [UNK].
     private static func foldTable(_ s: String) -> [UInt8] {
         s.utf8.map { $0 == UInt8(ascii: ".") ? 0 : $0 }
     }
@@ -160,7 +175,6 @@ final class MiniLM {
         "l..nnnnnn...oooo" + "oo..rrrrrrssssss" +
         "sstttt..uuuuuuuu" + "uuuuwwyyyzzzzzzs")
 
-    // Well-formed UTF-8 is assumed; a truncated lead returns its raw byte.
     private func utf8Decode(_ bytes: [UInt8], _ i: Int, _ len: Int)
         -> (cp: UInt32, adv: Int) {
         let c = bytes[i]
@@ -182,7 +196,6 @@ final class MiniLM {
 
     private enum CpKind { case chars, pass, punct, space, drop }
 
-    // Unicode dashes and quotes count as punctuation, so they bound words.
     private func foldCp(_ cp: UInt32) -> (kind: CpKind, folded: UInt8) {
         var kind: CpKind = .pass
         var folded: UInt8 = 0
@@ -192,9 +205,9 @@ final class MiniLM {
             else if isPunct(c) { kind = .punct; folded = c }
             else { kind = .chars; folded = lowerAscii(c) }
         } else if cp >= 0x0300 && cp <= 0x036F {
-            kind = .drop                                  // combining marks
+            kind = .drop
         } else if cp == 0x00A0 {
-            kind = .space                                 // no-break space
+            kind = .space
         } else if cp >= 0x00C0 && cp <= 0x00FF
             && MiniLM.latin1Fold[Int(cp - 0x00C0)] != 0 {
             kind = .chars; folded = MiniLM.latin1Fold[Int(cp - 0x00C0)]
@@ -202,19 +215,17 @@ final class MiniLM {
             && MiniLM.latinAFold[Int(cp - 0x0100)] != 0 {
             kind = .chars; folded = MiniLM.latinAFold[Int(cp - 0x0100)]
         } else if cp >= 0x2010 && cp <= 0x2015 {
-            kind = .punct; folded = 0x2D                  // hyphens / dashes
+            kind = .punct; folded = 0x2D
         } else if cp == 0x2018 || cp == 0x2019 || cp == 0x02BB {
-            kind = .punct; folded = 0x27                  // curly / okina '
+            kind = .punct; folded = 0x27
         } else if cp == 0x201C || cp == 0x201D {
-            kind = .punct; folded = 0x22                  // curly double "
+            kind = .punct; folded = 0x22
         } else {
-            kind = .pass                                  // CJK, Greek, ...
+            kind = .pass
         }
         return (kind, folded)
     }
 
-    // The U+2581 prefix is llama.cpp's phantom space: word-initial pieces carry
-    // it, so the whole word matches front to back. nil = out of vocab.
     private func wordpiece(_ w: [UInt8]) -> [Int32]? {
         var word1: [UInt8] = [0xE2, 0x96, 0x81]
         word1.append(contentsOf: w)
@@ -248,13 +259,13 @@ final class MiniLM {
         }
     }
 
-    func tokenize(_ text: String) -> [Int32] {
-        var ids: [Int32] = [clsId]
+    private func wordpieceIds(_ text: String) -> [Int32] {
+        var ids: [Int32] = []
         let bytes = Array(text.utf8)
         let n = bytes.count
         var word: [UInt8] = []
         var i = 0
-        while i < n && ids.count < nCtx - 1 {
+        while i < n && ids.count < nCtx - 2 {
             let (cp, adv) = utf8Decode(bytes, i, n)
             let (kind, folded) = foldCp(cp)
             switch kind {
@@ -273,27 +284,85 @@ final class MiniLM {
             }
             i += adv
         }
-        if !word.isEmpty && ids.count < nCtx - 1 { addWord(word, &ids) }
+        if !word.isEmpty && ids.count < nCtx - 2 { addWord(word, &ids) }
+        return ids
+    }
+
+    func tokenize(_ text: String) -> [Int32] {
+        var ids: [Int32] = [clsId]
+        if let spm = unigram {
+            ids.append(contentsOf: spm.encode(text, limit: nCtx - 2))
+        } else {
+            ids.append(contentsOf: wordpieceIds(text))
+        }
         ids.append(sepId)
         if ids.count > nCtx { ids.removeLast(ids.count - nCtx) }
         return ids
     }
 
-    // W's row is dequantized into rowScratch just before its dot; the loop
-    // stays a plain contiguous run so the optimizer vectorizes it.
-    private func linear(_ w: GGUFTensor, _ b: [Float], _ x: [Float],
-                        xoff: Int, inn: Int, out: Int,
-                        _ y: inout [Float], yoff: Int) {
+    private static func quad(_ p: UnsafeRawPointer,
+                             _ i: Int) -> SIMD4<Float> {
+        p.loadUnaligned(fromByteOffset: i * 4, as: SIMD4<Float>.self)
+    }
+
+    static func dot(_ a: UnsafePointer<Float>, _ b: UnsafePointer<Float>,
+                    _ n: Int) -> Float {
+        let ra = UnsafeRawPointer(a)
+        let rb = UnsafeRawPointer(b)
+        var q0 = SIMD4<Float>(repeating: 0)
+        var q1 = SIMD4<Float>(repeating: 0)
+        var q2 = SIMD4<Float>(repeating: 0)
+        var q3 = SIMD4<Float>(repeating: 0)
+        var i = 0
+        while i + 16 <= n {
+            q0 += MiniLM.quad(ra, i) * MiniLM.quad(rb, i)
+            q1 += MiniLM.quad(ra, i + 4) * MiniLM.quad(rb, i + 4)
+            q2 += MiniLM.quad(ra, i + 8) * MiniLM.quad(rb, i + 8)
+            q3 += MiniLM.quad(ra, i + 12) * MiniLM.quad(rb, i + 12)
+            i += 16
+        }
+        while i + 4 <= n {
+            q0 += MiniLM.quad(ra, i) * MiniLM.quad(rb, i)
+            i += 4
+        }
+        var total = ((q0 + q1) + (q2 + q3)).sum()
+        while i < n {
+            total += a[i] * b[i]
+            i += 1
+        }
+        return total
+    }
+
+    private func linearBatch(_ w: GGUFTensor, _ b: [Float],
+                             _ x: [Float], T: Int, inn: Int, out: Int,
+                             _ y: inout [Float]) {
+        let lanes = min(MiniLM.cores, out)
+        let span = (out + lanes - 1) / lanes
+        nonisolated(unsafe) let weight = w
         x.withUnsafeBufferPointer { xp in
-            let xb = xp.baseAddress! + xoff
-            for o in 0..<out {
-                MiniLM.dequant(w, o * inn, inn, into: &rowScratch)
-                var acc: Float = 0
-                rowScratch.withUnsafeBufferPointer { rp in
-                    let row = rp.baseAddress!
-                    for i in 0..<inn { acc += row[i] * xb[i] }
+            b.withUnsafeBufferPointer { bp in
+                y.withUnsafeMutableBufferPointer { yp in
+                    nonisolated(unsafe) let xb = xp.baseAddress!
+                    nonisolated(unsafe) let bb = bp.baseAddress!
+                    nonisolated(unsafe) let yb = yp.baseAddress!
+                    DispatchQueue.concurrentPerform(
+                        iterations: lanes) { lane in
+                        var row = [Float](repeating: 0, count: inn)
+                        let first = lane * span
+                        let last = min(out, first + span)
+                        row.withUnsafeMutableBufferPointer { rp in
+                            let rb = rp.baseAddress!
+                            for o in first..<last {
+                                MiniLM.dequant(weight, o * inn, inn,
+                                               into: rb)
+                                for t in 0..<T {
+                                    yb[t * out + o] = MiniLM.dot(
+                                        rb, xb + t * inn, inn) + bb[o]
+                                }
+                            }
+                        }
+                    }
                 }
-                y[yoff + o] = acc + b[o]
             }
         }
     }
@@ -316,7 +385,7 @@ final class MiniLM {
     }
 
     private func gelu(_ x: inout [Float], n: Int) {
-        let k: Float = 0.7978845608028654   // sqrt(2/pi)
+        let k: Float = 0.7978845608028654
         for i in 0..<n {
             let v = x[i]
             x[i] = 0.5 * v * (1 + tanhf(k * (v + 0.044715 * v * v * v)))
@@ -335,7 +404,6 @@ final class MiniLM {
         for i in 0..<n { s[i] *= inv }
     }
 
-    // Full bidirectional attention; post-LN, so the residual add precedes it.
     private func encoderLayer(_ L: Layer, _ x: inout [Float], T: Int) {
         let ne = nEmbd, hd = nEmbd / nHead
         let scale = 1 / Float(hd).squareRoot()
@@ -343,11 +411,29 @@ final class MiniLM {
         var k = [Float](repeating: 0, count: T * ne)
         var vv = [Float](repeating: 0, count: T * ne)
         var ctx = [Float](repeating: 0, count: T * ne)
+        linearBatch(L.wq, L.bq, x, T: T, inn: ne, out: ne, &q)
+        linearBatch(L.wk, L.bk, x, T: T, inn: ne, out: ne, &k)
+        linearBatch(L.wv, L.bv, x, T: T, inn: ne, out: ne, &vv)
+        attention(&q, &k, &vv, &ctx, T: T, ne: ne, hd: hd, scale: scale)
+        var proj = [Float](repeating: 0, count: T * ne)
+        var ff = [Float](repeating: 0, count: T * nFF)
+        linearBatch(L.wo, L.bo, ctx, T: T, inn: ne, out: ne, &proj)
         for t in 0..<T {
-            linear(L.wq, L.bq, x, xoff: t * ne, inn: ne, out: ne, &q, yoff: t * ne)
-            linear(L.wk, L.bk, x, xoff: t * ne, inn: ne, out: ne, &k, yoff: t * ne)
-            linear(L.wv, L.bv, x, xoff: t * ne, inn: ne, out: ne, &vv, yoff: t * ne)
+            for d in 0..<ne { x[t * ne + d] += proj[t * ne + d] }
+            layerNorm(&x, off: t * ne, n: ne, L.attnNormW, L.attnNormB)
         }
+        linearBatch(L.wUp, L.bUp, x, T: T, inn: ne, out: nFF, &ff)
+        gelu(&ff, n: T * nFF)
+        linearBatch(L.wDown, L.bDown, ff, T: T, inn: nFF, out: ne, &proj)
+        for t in 0..<T {
+            for d in 0..<ne { x[t * ne + d] += proj[t * ne + d] }
+            layerNorm(&x, off: t * ne, n: ne, L.outNormW, L.outNormB)
+        }
+    }
+
+    private func attention(_ q: inout [Float], _ k: inout [Float],
+                           _ vv: inout [Float], _ ctx: inout [Float],
+                           T: Int, ne: Int, hd: Int, scale: Float) {
         var scores = [Float](repeating: 0, count: T)
         for h in 0..<nHead {
             let off = h * hd
@@ -373,21 +459,8 @@ final class MiniLM {
                 }
             }
         }
-        var tmp = [Float](repeating: 0, count: ne)
-        var ff = [Float](repeating: 0, count: nFF)
-        for t in 0..<T {
-            linear(L.wo, L.bo, ctx, xoff: t * ne, inn: ne, out: ne, &tmp, yoff: 0)
-            for d in 0..<ne { x[t * ne + d] += tmp[d] }
-            layerNorm(&x, off: t * ne, n: ne, L.attnNormW, L.attnNormB)
-            linear(L.wUp, L.bUp, x, xoff: t * ne, inn: ne, out: nFF, &ff, yoff: 0)
-            gelu(&ff, n: nFF)
-            linear(L.wDown, L.bDown, ff, xoff: 0, inn: nFF, out: ne, &tmp, yoff: 0)
-            for d in 0..<ne { x[t * ne + d] += tmp[d] }
-            layerNorm(&x, off: t * ne, n: ne, L.outNormW, L.outNormB)
-        }
     }
 
-    // Type is always 0 (one segment); id*ne lands on a block boundary.
     private func embedTokens(_ ids: [Int32], _ x: inout [Float]) {
         let ne = nEmbd
         for t in 0..<ids.count {

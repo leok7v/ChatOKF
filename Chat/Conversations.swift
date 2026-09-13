@@ -16,7 +16,8 @@ extension Session {
 
     public func commitCurrent(generatedTitle: String?, fallbackTitle: String,
                               messages: [Message], traceEvents: [TraceEvent],
-                              currentConversationId: UUID?, readOnly: Bool)
+                              currentConversationId: UUID?, readOnly: Bool,
+                              extracted: Date? = nil)
         -> UUID? {
         let chars = messages.reduce(0) { sum, m in sum + m.text.count }
         let worth = !readOnly && messages.count >= 2 && chars > 200
@@ -30,7 +31,8 @@ extension Session {
                 title: generatedTitle ?? prior?.title ?? fallbackTitle,
                 created: prior?.created ?? now, updated: now,
                 messages: messages.map { m in Session.stored(m) },
-                trace: traceEvents.map { e in Session.storedTrace(e) })
+                trace: traceEvents.map { e in Session.storedTrace(e) },
+                extracted: extracted ?? prior?.extracted)
             ConversationStore.shared.save(convo)
             result = id
         }
@@ -130,7 +132,8 @@ extension Session {
             docs: m.docs.map { ref in
                 ConversationStore.StoredDoc(path: storedPath(ref.url),
                                             bytes: ref.bytes,
-                                            short: ref.short)
+                                            short: ref.short,
+                                            total: ref.total)
             },
             posters: m.posters.compactMap { cg in VisionPreprocess.jpeg(cg) })
     }
@@ -145,7 +148,7 @@ extension Session {
         }
         m.docs = (s.docs ?? []).map { d in
             DocRef(url: restoredURL(d.path), bytes: d.bytes,
-                  short: d.short ?? false)
+                  short: d.short ?? false, total: d.total ?? d.bytes)
         }
         m.toolRounds = s.rounds.enumerated().map { pair in
             ToolRound(id: pair.offset, emitted: pair.element.emitted,

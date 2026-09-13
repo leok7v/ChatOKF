@@ -49,10 +49,18 @@ struct DocChip: View {
     }
 
     private var size: String {
-        let kb = Double(doc.bytes) / 1024
-        let shown = kb < 1 ? String(format: "%.0f bytes", Double(doc.bytes))
-                           : String(format: "%.1f KB", kb)
-        return shown + " of text" + (doc.short ? ", truncated" : "")
+        var out = DocChip.kb(doc.bytes) + " of text"
+        if doc.short {
+            out = DocChip.kb(doc.bytes) + " of " + DocChip.kb(doc.total)
+                + " of text, the rest left out"
+        }
+        return out
+    }
+
+    private static func kb(_ bytes: Int) -> String {
+        let kb = Double(bytes) / 1024
+        return kb < 1 ? String(format: "%.0f bytes", Double(bytes))
+                      : String(format: "%.1f KB", kb)
     }
 
     @ViewBuilder

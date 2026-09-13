@@ -57,9 +57,12 @@ public struct TurnMetrics: Sendable {
     public let endReason: String
     public let overrun: Int
     public let stopToken: Int32?
+    public let prefillDone: Int
+    public let prefillTotal: Int
     public init(ctx: Int, thinkTokens: Int, contentTokens: Int,
                 pp: Double = 0, tg: Double = 0, endReason: String = "",
-                overrun: Int = 0, stopToken: Int32? = nil) {
+                overrun: Int = 0, stopToken: Int32? = nil,
+                prefillDone: Int = 0, prefillTotal: Int = 0) {
         self.ctx = ctx
         self.thinkTokens = thinkTokens
         self.contentTokens = contentTokens
@@ -68,6 +71,8 @@ public struct TurnMetrics: Sendable {
         self.endReason = endReason
         self.overrun = overrun
         self.stopToken = stopToken
+        self.prefillDone = prefillDone
+        self.prefillTotal = prefillTotal
     }
 }
 

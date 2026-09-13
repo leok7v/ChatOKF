@@ -1,0 +1,177 @@
+### map
+Joe Shmoe, who this knowledge base belongs to
+  Joe Shmoe, 47, project manager at a mid-size logistics company outside Columbus Ohio, married with two kids, gardens and bakes and is slowly fixing up a 1994 house.
+  full profile: person/joe
+
+156 concepts (+1 deprecated) in 7 areas. OKF 0.2. Search by meaning; these are areas, not ids.
+
+  garden/  25  herbs, problem, tomatoes, vegetables, basil, build
+  house/   25  reference, basement, maintenance, problem, procedure, appliance
+  kitchen/ 25  baking, equipment, bread, dinner, mexican, noodles
+  person/  6  schedule, allergies, constraints, family, food, health
+  tech/    25  network, smart-home, reference, security, tv, wifi
+  travel/  26  europe, city, latin-america, asia, food, nature
+  watch/   25  show, film, scifi, netflix, apple-tv, family
+### search1
+house/basement-humidity  0.912 [musty smell]
+  Basement humidity and the musty smell
+  Sixty-five percent relative humidity in summer, which is above the mold threshold, and the grading outside is part of it.
+garden/basil-window-box  0.839
+  Basil in the kitchen window box
+  Keeping a few basil plants alive indoors through winter, and why they never taste as good as the summer ones.
+house/door-sticking  0.839
+  The back door sticks in summer
+  Seasonal swelling, not a failing hinge, so the fix is planing a sixteenth off the latch stile in July.
+house/bathroom-fan  0.833
+  Replacing the upstairs bathroom fan
+  The old fan is undersized and vents into the attic, which is half of why there is frost on the roof sheathing.
+garden/basil  0.832
+  Growing basil
+  Basil hates cold, bolts the moment it flowers, and wants pinching every week to stay bushy.
+house/radon-test  0.825 [stale]
+  Radon test results
+  A short-term test in the basement read 2.7 pCi/L, under the action level but not zero. Due for a retest.
+garden/mint-containment  0.820
+  Keeping mint from taking the bed
+  Mint spreads by runners and will own a raised bed in two seasons, so it stays in a buried pot.
+garden/compost  0.817
+  The compost pile
+  A two-bin pile behind the garage, the brown-to-green ratio that keeps it from smelling, and what never goes in.
+### search2
+tech/wifi-mesh  0.829 [deco x55]
+  The mesh wifi setup
+  Three TP-Link Deco X55 units wired back to the router, which fixed the dead spots that a single router never could.
+tech/doorbell-camera  0.796
+  The video doorbell
+  Useful for packages, and the subscription to keep recordings is the part nobody mentions at purchase.
+tech/smart-tv-livingroom  0.793
+  The living room TV
+  A 65-inch 4K set from 2021 whose built-in software is slow and ad-ridden, so everything actually runs through the Apple TV.
+house/water-heater  0.792
+  The water heater
+  A 50-gallon gas tank from 2016, which puts it near the end of its life, and the anode rod has never been checked.
+tech/robot-vacuum  0.791
+  The robot vacuum
+  Runs daily, handles the open floors, and cannot deal with cords or the dog's water bowl.
+tech/streaming-devices  0.791
+  The other streaming boxes
+  What is on the other two TVs and why they are all different, which is a mild ongoing irritation.
+tech/password-manager  0.790
+  The password manager
+  One shared vault for the household, which finally killed the reused passwords and the sticky note by the router.
+tech/wifi-dead-spot  0.789
+  The dead spot in the back bedroom
+  The back bedroom is the far corner from the router with a chimney in between, and it is also the home office, which is why it mattered.
+### search3
+garden/thyme-oregano  0.870
+  Thyme and oregano
+  The two herbs that survive on neglect, come back every year, and want poor dry soil.
+garden/basil  0.843
+  Growing basil
+  Basil hates cold, bolts the moment it flowers, and wants pinching every week to stay bushy.
+garden/basil-window-box  0.841
+  Basil in the kitchen window box
+  Keeping a few basil plants alive indoors through winter, and why they never taste as good as the summer ones.
+garden/peppers  0.836
+  Sweet and hot peppers
+  Peppers want more heat and less water than I keep giving them, and they set fruit late.
+### search4
+house/basement-humidity  0.868 [mold]
+  Basement humidity and the musty smell
+  Sixty-five percent relative humidity in summer, which is above the mold threshold, and the grading outside is part of it.
+garden/compost  0.827 [smelling]
+  The compost pile
+  A two-bin pile behind the garage, the brown-to-green ratio that keeps it from smelling, and what never goes in.
+house/attic-insulation  0.824
+  Topping up the attic insulation
+  R-19 up there against R-49 recommended, plus air sealing the ceiling penetrations first, which matters more than the depth.
+### read
+# Basement humidity and the musty smell
+id: house/basement-humidity  type: Problem  tags: house, basement, humidity, problem
+
+Hygrometer reads 62 to 68 percent from June through September. Above 60 is
+where mold gets comfortable. The smell follows the number.
+
+Three contributors, in order:
+
+1. Surface water. The grade on the north side slopes toward the house and
+   the [gutters](/house/gutter-guards.md) overflow in a hard rain.
+2. No vapor barrier on the slab.
+3. Summer air. Opening the windows in July makes it worse, not better,
+   because warm humid air condenses on cool walls.
+
+Doing now: 50-pint dehumidifier draining to the
+[sump](/house/sump-pump.md), set to 50 percent. Regrade the north side in
+spring.
+
+Top of [the 2026 list](/house/projects-2026.md).
+
+links: house/gutter-guards house/sump-pump house/projects-2026
+backlinks: house/gutter-guards house/projects-2026 house/sump-pump
+### links
+garden/basil
+  out: garden/last-frost kitchen/pesto kitchen/caprese garden/basil-window-box
+  in:  garden/basil-window-box garden/last-frost kitchen/caprese kitchen/pesto
+### grep
+tech/wifi-mesh:2  Three TP-Link Deco X55 units wired back to the router, which fixed the dead spots that a single router never could.
+tech/wifi-mesh:7  Three TP-Link Deco X55 units: one at the router in the basement, one in
+### dream
+4 proposals
+
+merge  0.92
+  tech/appletv  The Apple TV box
+  tech/smart-tv-livingroom  The living room TV
+  -> near-duplicates: read both, fold into one with okf_update, okf_forget the other
+
+merge  0.91
+  house/tool-inventory  What tools we have
+  tech/device-inventory  Everything on the network
+  -> near-duplicates: read both, fold into one with okf_update, okf_forget the other
+
+merge  0.91
+  tech/doorbell-camera  The video doorbell
+  tech/smart-speakers  Smart speakers, and what they are actually used for
+  -> near-duplicates: read both, fold into one with okf_update, okf_forget the other
+
+merge  0.91
+  tech/isp-plan  Internet plan and what we actually need
+  watch/subscriptions  Streaming subscriptions and what they cost
+  -> near-duplicates: read both, fold into one with okf_update, okf_forget the other
+
+### stats
+concepts   157
+edges      264 out, avg 1.7 per concept, 0 dangling
+orphans    15
+stale      5
+body       79824B total, 508B avg, ~19956 tok
+abstracts  26483B total, 168B avg, ~6621 tok
+vectors    157 x 384 f32 x 2 = 482304B (multilingual-e5-small)
+types      Note 98, Recipe 17, Reference 17, Project 15, Procedure 7, Problem 2, Person 1
+### tok
+0 217267 23 70 42141 2
+### sim
+0.7765  musty basement in summer | damp cellar smell
+### create
+created kitchen/zz-probe  (158 concepts, re-embedded 1)
+note: its content sits nearest tech/, not kitchen/
+consider linking: tech/speed-test-2025 tech/device-inventory watch/watchlist tech/phone-upgrade house/tool-inventory
+### forget
+retired kitchen/zz-probe  (156 live concepts)
+### hidden
+[weak: no clear match; answer from your own knowledge rather than from these]
+tech/speed-test-2025  0.825 [stale]
+  Speed test results, 2025
+  Measured throughput at several places in the house after the mesh went in. A year old and worth redoing.
+### revealed
+kitchen/zz-probe  0.923 [deprecated] [probe]
+  Probe note
+  A probe for the update log.
+### purge
+purged kitchen/zz-probe  (157 concepts remain)
+### log
+# Update Log (UTC)
+
+## <date>
+* **Deletion**: [Probe note](/kitchen/zz-probe.md)
+* **Deprecation**: [Probe note](/kitchen/zz-probe.md)
+* **Creation**: [Probe note](/kitchen/zz-probe.md)

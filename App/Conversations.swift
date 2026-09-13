@@ -9,7 +9,8 @@ extension ChatModel {
         currentConversationId = session.commitCurrent(
             generatedTitle: generatedTitle, fallbackTitle: conversationTitle(),
             messages: messages, traceEvents: traceEvents,
-            currentConversationId: currentConversationId, readOnly: readOnly)
+            currentConversationId: currentConversationId, readOnly: readOnly,
+            extracted: extractedAt)
     }
 
     func openConversation(_ id: UUID) {

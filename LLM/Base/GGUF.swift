@@ -19,8 +19,31 @@ enum GGUFValue {
     case string(String)
     case ints([Int64])
     case doubles([Double])
-    case strings([String])
+    case stringTable(offset: Int, count: Int)
     case bool(Bool)
+}
+
+struct GGUFStringTable {
+    let base: UnsafeRawPointer
+    let count: Int
+
+    func forEach(_ body: (Int, UnsafeRawBufferPointer) -> Void) {
+        var at = 0
+        for _ in 0..<count {
+            let n = Int((base + at).loadUnaligned(as: UInt64.self))
+            body(at, UnsafeRawBufferPointer(start: base + at + 8, count: n))
+            at += 8 + n
+        }
+    }
+
+    func decoded() -> [String] {
+        var out: [String] = []
+        out.reserveCapacity(count)
+        forEach { _, bytes in
+            out.append(String(decoding: bytes, as: UTF8.self))
+        }
+        return out
+    }
 }
 
 struct GGUFTensor {
@@ -208,8 +231,13 @@ final class GGUF {
     }
 
     func strings(_ k: String) -> [String]? {
+        stringTable(k)?.decoded()
+    }
+
+    func stringTable(_ k: String) -> GGUFStringTable? {
         switch meta[k] {
-        case let .strings(v): v
+        case let .stringTable(offset, count):
+            GGUFStringTable(base: map + offset, count: count)
         default: nil
         }
     }
@@ -286,9 +314,9 @@ private struct Cursor {
         let et = u32()
         let n = Int(u64())
         if et == 8 {
-            var strs: [String] = []; strs.reserveCapacity(n)
-            for _ in 0..<n { strs.append(str()) }
-            return .strings(strs)
+            let start = pos
+            for _ in 0..<n { _ = bytes(Int(u64())) }
+            return .stringTable(offset: start, count: n)
         }
         var out: [Int64] = []; out.reserveCapacity(n)
         var dbl = false; var dvals: [Double] = []

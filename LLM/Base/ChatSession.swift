@@ -636,6 +636,10 @@ public actor ChatSession {
         return collected.text
     }
 
+    public func extractNotes(_ instruction: String) async -> String {
+        await oneShot(instruction, stopAfter: 2400, "extract")
+    }
+
     public func makeTitle() async -> String {
         let raw = await oneShot(ChatSession.titleInstruction, stopAfter: 160,
                                 "makeTitle")
@@ -1040,12 +1044,39 @@ public actor ChatSession {
         if !soft.isEmpty {
             afterHead = try await backend.extendSoft(closed, spans: soft)
         } else {
-            afterHead = try await backend.extend(closed)
+            afterHead = try await extendChunked(closed)
         }
         committed += closed
         try await backend.mark()
         let seed = gen.isEmpty ? afterHead : try await backend.extend(gen)
         return (seed, closed.count + gen.count)
+    }
+
+    static let prefillChunk = 1024
+
+    private func extendChunked(_ ids: [Int32]) async throws -> Int32 {
+        var next = backend.eos
+        if ids.count <= ChatSession.prefillChunk {
+            next = try await backend.extend(ids)
+        } else {
+            let t0 = Date()
+            let startCtx = await backend.position
+            var done = 0
+            while done < ids.count {
+                if done > 0 && backend.shouldStop() {
+                    throw EngineError.stopped
+                }
+                let end = min(ids.count, done + ChatSession.prefillChunk)
+                next = try await backend.extend(Array(ids[done..<end]))
+                done = end
+                let sec = Date().timeIntervalSince(t0)
+                lastMetrics = TurnMetrics(
+                    ctx: startCtx + done, thinkTokens: 0, contentTokens: 0,
+                    pp: sec > 0 ? Double(done) / sec : 0,
+                    prefillDone: done, prefillTotal: ids.count)
+            }
+        }
+        return next
     }
 
     private var attachmentCounts: [String: Int] = [:]

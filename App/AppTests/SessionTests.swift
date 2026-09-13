@@ -339,7 +339,8 @@ private final class TestRunner: ToolRunner, @unchecked Sendable {
             prompt: "hi", display: "hi", docs: [],
             thinkTokenCap: 200, thinkingActive: false)).events)
         session.runMetaTurns(titled: true, wantsFollowup: false,
-                             onTitle: { _ in }, onFollowup: { _ in })
+                             extraction: nil, onTitle: { _ in },
+                             onFollowup: { _ in }, onRemembered: { _ in })
         XCTAssertTrue(session.metaTaskRunning)
         await withCheckedContinuation {
             (k: CheckedContinuation<Void, Never>) in

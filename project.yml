@@ -29,6 +29,8 @@ targets:
     supportedDestinations: [macOS, iOS]
     sources:
       - path: LLM/Base
+        excludes:
+          - e5-small.gguf
       - path: LLM/Gemma
       - path: LLM/Quantize
       - path: LLM/Qwen
@@ -111,6 +113,8 @@ targets:
       # LLM's data blobs, excluded from the LLM target itself, copied in here
       # instead so they end up inside ChatOKF.app.
       - path: LLM/Slugs/minilm.gguf
+        buildPhase: resources
+      - path: LLM/Base/e5-small.gguf
         buildPhase: resources
       - path: LLM/TTS/kitten_full.gguf
         buildPhase: resources
@@ -211,7 +215,10 @@ targets:
     type: bundle.unit-test
     supportedDestinations: [macOS, iOS]
     sources:
-      - LLM/LLMTests
+      - path: LLM/LLMTests
+        excludes:
+          - okf-data
+          - okf-reference.txt
       # The Metal kernel tests need a default.metallib of their own -- see
       # the LLM target comment; the same trap applies to a test bundle.
       - path: LLM/metal

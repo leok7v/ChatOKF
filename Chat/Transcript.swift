@@ -9,12 +9,15 @@ public struct Doc: Identifiable, Sendable {
     public let content: String
     public let url: URL?
     public let short: Bool
+    public let total: Int
 
-    public init(name: String, content: String, url: URL?, short: Bool) {
+    public init(name: String, content: String, url: URL?, short: Bool,
+                total: Int) {
         self.name = name
         self.content = content
         self.url = url
         self.short = short
+        self.total = total
     }
 }
 
@@ -22,11 +25,13 @@ public struct DocRef: Hashable, Sendable {
     public let url: URL
     public let bytes: Int
     public let short: Bool
+    public let total: Int
 
-    public init(url: URL, bytes: Int, short: Bool) {
+    public init(url: URL, bytes: Int, short: Bool, total: Int) {
         self.url = url
         self.bytes = bytes
         self.short = short
+        self.total = total
     }
 }
 

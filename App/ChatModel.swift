@@ -152,7 +152,7 @@ import UniformTypeIdentifiers
     var consulting = false
     var thinkStatus = "Thinking"
     var thinkLabel = "Thinking"
-    var eulaAccepted = UserDefaults.standard.bool(forKey: "eulaAccepted")
+    var eulaAccepted = UserDefaults.standard.bool(forKey: ChatModel.eulaKey)
     var accepted = UserDefaults.standard.bool(forKey: "disclaimerAccepted")
     private static func startModel() -> String {
         let saved = UserDefaults.standard.string(forKey: "modelName")
@@ -189,21 +189,41 @@ import UniformTypeIdentifiers
             in: .whitespacesAndNewlines)
         let has = !text.isEmpty || !attachedImages.isEmpty
             || !attachedDocs.isEmpty || !attachedClips.isEmpty
-        return ready && !busy && has
+        return ready && !busy && has && heldSend == nil
     }
 
     var typing: Bool { !input.isEmpty }
 
+    static let bytesPerToken = 3.5
+
+    private var prefillRate: Double {
+        lastPP > 0 ? lastPP : session.measuredPP
+    }
+
+    func readSeconds(_ doc: Doc) -> Double {
+        Double(doc.content.utf8.count) / Self.bytesPerToken / prefillRate
+    }
+
+    static func readCost(_ seconds: Double) -> String {
+        var out = "under a second to read"
+        if seconds >= 90 {
+            out = "about \(Int((seconds / 60).rounded())) minutes to read"
+        } else if seconds >= 1.5 {
+            out = "about \(Int(seconds.rounded())) seconds to read"
+        }
+        return out
+    }
+
     var attachmentWarning: String? {
         let docTokens = attachedDocs.reduce(0) { sum, doc in
-            sum + doc.content.utf8.count / 4
+            sum + Int(Double(doc.content.utf8.count) / Self.bytesPerToken)
         }
         let total = attachedImages.count * session.perImageTokens + docTokens
         var result: String? = nil
         if total >= Self.warnTokens {
-            let secs = lastPP > 0 ? Double(total) / lastPP : 0
-            let time = secs >= 2 ? " (~\(Int(secs.rounded()))s)" : ""
-            result = "Large attachment\(time); this may take a moment."
+            let secs = Double(total) / prefillRate
+            result = "Large attachment, " + Self.readCost(secs)
+                + " before the answer starts."
         }
         return result
     }
@@ -275,6 +295,81 @@ import UniformTypeIdentifiers
     }
     var webAccess = true {
         didSet { session.webAccess = webAccess }
+    }
+
+    var totalRecall: Bool {
+        get { session.memories.enabled }
+        set { session.memories.enabled = newValue }
+    }
+
+    var backupMemories: Bool {
+        get { session.memories.backup }
+        set { session.memories.backup = newValue }
+    }
+
+    var memoriesSupported: Bool { Memories.supported }
+
+    struct OfferedNote: Identifiable {
+        let id: String
+        let title: String
+        let seconds: Double
+        var chosen = true
+    }
+
+    struct HeldSend {
+        let prompt: String
+        let display: String
+        let docs: [DocRef]
+        let stage: Whimsical.Stage
+        var notes: [OfferedNote]
+    }
+
+    var heldSend: HeldSend?
+
+    var heldNotes: [OfferedNote] { heldSend?.notes ?? [] }
+
+    var heldSeconds: Double {
+        heldNotes.filter { note in note.chosen }
+            .reduce(0) { sum, note in sum + note.seconds }
+    }
+
+    func toggleHeldNote(_ id: String) {
+        if var held = heldSend,
+           let at = held.notes.firstIndex(where: { note in note.id == id }) {
+            held.notes[at].chosen.toggle()
+            heldSend = held
+        }
+    }
+
+    func answerHeldSend() {
+        if let held = heldSend, canRunTurn {
+            heldSend = nil
+            var prompt = held.prompt
+            let chosen = held.notes.filter { note in note.chosen }
+                .compactMap { note in session.noteToUse(note.id) }
+            if !chosen.isEmpty {
+                prompt = "Notes remembered about this user, chosen by them "
+                    + "for the message below:\n\n"
+                    + chosen.map { note in note.text }
+                        .joined(separator: "\n\n---\n\n")
+                    + "\n\n---\n\n" + prompt
+            }
+            submitText(prompt: prompt, display: held.display,
+                       docs: held.docs, stage: held.stage)
+        }
+    }
+
+    func dropHeldSend() {
+        if let held = heldSend {
+            heldSend = nil
+            input = held.display
+            caret = input.utf16.count
+        }
+    }
+
+    func forgetAllMemories() {
+        session.memories.forgetAll()
+        flashHUD("Memories forgotten")
     }
 
     enum Access { case offline, wikipedia, full }
@@ -459,9 +554,11 @@ import UniformTypeIdentifiers
     private var lastTG = 0.0
     @ObservationIgnored private var phaseStart = Date()
 
+    static let eulaKey = "eulaAccepted.2026-09-12"
+
     func acceptEULA() {
         eulaAccepted = true
-        UserDefaults.standard.set(true, forKey: "eulaAccepted")
+        UserDefaults.standard.set(true, forKey: ChatModel.eulaKey)
         load(name: modelName)
     }
 
@@ -664,6 +761,9 @@ import UniformTypeIdentifiers
         readOnly = false
         generatedTitle = nil
         followupHint = ""
+        heldSend = nil
+        remembered = []
+        extractedAt = nil
         statsLabel = ""
         // Not the outgoing model's rates; pp has no EMA, so it reads "-".
         lastPP = 0
@@ -703,6 +803,9 @@ import UniformTypeIdentifiers
     func newChat() {
         Footprint.report(.load, "newChat begin")
         followupHint = ""
+        heldSend = nil
+        remembered = []
+        extractedAt = nil
         lastTurnSpoken = false
         speech.stopSpeaking()
         commitCurrent()
@@ -732,17 +835,48 @@ import UniformTypeIdentifiers
         let chars = messages.reduce(0) { sum, m in sum + m.text.count }
         let titled = !readOnly && generatedTitle == nil
             && messages.count >= 2 && chars > 200
-        if !readOnly, titled || offersFollowupHint {
+        let extraction = session.memories.active && messages.count >= 2
+            ? Session.Extraction(exchange: lastExchange,
+                                 conversation: currentConversationId)
+            : nil
+        if !readOnly, titled || offersFollowupHint || extraction != nil {
             session.runMetaTurns(
                 titled: titled, wantsFollowup: offersFollowupHint,
+                extraction: extraction,
                 onTitle: { [weak self] t in
                     self?.generatedTitle = t
                     self?.commitCurrent()
                 },
                 onFollowup: { [weak self] hint in
                     self?.followupHint = hint
+                },
+                onRemembered: { [weak self] notes in
+                    self?.remembered += notes
+                    self?.extractedAt = Date()
+                    self?.commitCurrent()
                 })
         }
+    }
+
+    private var lastExchange: String {
+        let tail = messages.suffix(2)
+        return tail.map { m in
+            (m.fromUser ? "User: " : "Assistant: ")
+                + String(m.text.prefix(1500))
+        }.joined(separator: "\n\n")
+    }
+
+    var remembered: [Memories.Remembered] = []
+    var extractedAt: Date?
+
+    func keepRemembered(_ id: String) {
+        session.memories.confirm(id)
+        remembered.removeAll { note in note.id == id }
+    }
+
+    func forgetRemembered(_ id: String) {
+        session.memories.discard(id)
+        remembered.removeAll { note in note.id == id }
     }
 
     var suggestFollowups: Bool = UserDefaults.standard
@@ -883,12 +1017,13 @@ import UniformTypeIdentifiers
 
     func attachDoc(_ name: String, _ content: String, at offset: Int,
                    from url: URL? = nil) {
-        let capped = Self.capDoc(content, docBudget.bytes)
+        let capped = Self.capDoc(content, docBudgetBytes)
         if !attachedDocs.contains(where: { d in d.content == capped }) {
             let unique = uniqueName(name)
             attachedDocs.append(
                 Doc(name: unique, content: capped, url: url,
-                    short: content.utf8.count > docBudget.bytes))
+                    short: content.utf8.count > docBudgetBytes,
+                    total: content.utf8.count))
             insertRef(unique, at: offset)
         }
     }
@@ -925,7 +1060,7 @@ import UniformTypeIdentifiers
                 let text = await ChatModel.markdown(of: kept)
                 converting -= 1
                 ChatModel.read(name, text, t0,
-                               docBudget.bytes)
+                               docBudgetBytes)
                 if let text {
                     attachDoc(name, text, at: caret, from: kept)
                 } else {
@@ -972,7 +1107,8 @@ import UniformTypeIdentifiers
                 take -= 1
             }
             out = (head ?? "")
-                + "\n[... truncated at \(limit >> 10) KB]"
+                + "\n[... truncated at \(limit >> 10) KB of "
+                + "\(content.utf8.count >> 10) KB]"
         }
         return out
     }
@@ -1059,7 +1195,7 @@ import UniformTypeIdentifiers
     static let maxImages = 4
     static let maxClips = 2
     enum DocBudget: String, CaseIterable, Identifiable {
-        case XS, S, M, L, XL
+        case XS, S, M, L, XL, UL
         var id: String { rawValue }
         var bytes: Int {
             switch self {
@@ -1068,10 +1204,35 @@ import UniformTypeIdentifiers
             case .M: return 32 << 10
             case .L: return 64 << 10
             case .XL: return 128 << 10
+            case .UL: return Int.max
             }
         }
-        var pages: Int { bytes / 2000 }
+        static var offered: [DocBudget] {
+            allCases.filter { size in size != .UL || !isOS }
+        }
     }
+
+    static let answerReserveTokens = 8192
+
+    var docBudgetBytes: Int {
+        var out = docBudget.bytes
+        if docBudget == .UL {
+            let context = modelShape?.trainedContext ?? 32768
+            let tokens = max(context - ChatModel.answerReserveTokens, 8192)
+            out = Int(Double(tokens) * ChatModel.bytesPerToken)
+        }
+        return out
+    }
+
+    var docBudgetPages: Int { docBudgetBytes / 2000 }
+
+    struct PrefillProgress: Equatable {
+        let done: Int
+        let total: Int
+        let secondsLeft: Double
+    }
+
+    private(set) var prefillProgress: PrefillProgress?
 
     var docBudget: DocBudget = {
         let raw = UserDefaults.standard.string(forKey: "docBudget") ?? ""
@@ -1280,6 +1441,7 @@ import UniformTypeIdentifiers
         let fm = FileManager.default
         try? fm.removeItem(at: Session.attachments)
         try? fm.removeItem(at: Bundle.modelStore())
+        Memories.erase()
         Diag.eraseCaches()
         quitApp()
     }
@@ -1366,6 +1528,7 @@ import UniformTypeIdentifiers
             phrases.cancel()
             self.genTask = nil
             self.prefilling = false
+            self.prefillProgress = nil
             self.consulting = false
             self.watching = false
             self.lookingAt = nil
@@ -1419,9 +1582,20 @@ import UniformTypeIdentifiers
         }
     }
 
+    private func adoptDrafts() {
+        let written = session.memories.takeDrafts()
+        if !written.isEmpty {
+            remembered.removeAll { note in
+                written.contains { draft in draft.id == note.id }
+            }
+            remembered += written
+        }
+    }
+
     private func finishTurn(_ outcome: ChatSession.TurnOutcome,
                             _ metrics: TurnMetrics, _ idx: Int) {
         if benchTask != nil { benchMetrics = metrics }
+        adoptDrafts()
         if outcome == .stopped {
             if messages.count >= 2 { messages.removeLast(2) }
         } else {
@@ -1462,7 +1636,7 @@ import UniformTypeIdentifiers
 
     private func sendText() {
         let raw = input
-        let prompt = promptFor(raw)
+        var prompt = promptFor(raw)
         let display = AttachmentRefs.stripped(raw)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         if !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
@@ -1473,18 +1647,45 @@ import UniformTypeIdentifiers
             caret = 0
             let docs = Session.refs(attachedDocs)
             attachedDocs = []
-            if let (asked, events) = session.sendText(
-                prompt: prompt, display: display, docs: docs,
-                thinkTokenCap: thinkTokenCap, thinkingActive: thinkingActive) {
-                beginTurn(asked, spoken: false, cue: .thinking, stage: stage,
-                         events: events)
+            let recall = session.recall(
+                display, also: [followupHint, generatedTitle ?? ""])
+            if let recall, !recall.silent {
+                let notes = zip(recall.ids, zip(recall.titles,
+                                                recall.readSeconds))
+                    .map { id, rest in
+                        OfferedNote(id: id, title: rest.0, seconds: rest.1)
+                    }
+                heldSend = HeldSend(prompt: prompt, display: display,
+                                    docs: docs, stage: stage, notes: notes)
+            } else {
+                if let recall { prompt = recall.block + prompt }
+                submitText(prompt: prompt, display: display, docs: docs,
+                           stage: stage)
             }
+        }
+    }
+
+    private func submitText(prompt: String, display: String,
+                            docs: [DocRef], stage: Whimsical.Stage) {
+        if let (asked, events) = session.sendText(
+            prompt: prompt, display: display, docs: docs,
+            thinkTokenCap: thinkTokenCap, thinkingActive: thinkingActive) {
+            beginTurn(asked, spoken: false, cue: .thinking, stage: stage,
+                     events: events)
         }
     }
 
     private func applyStats(_ t: TurnMetrics) {
         if t.pp > 0 { lastPP = t.pp }
         if t.tg > 0 { lastTG = t.tg }
+        if prefilling, t.prefillTotal > 0, t.prefillDone < t.prefillTotal {
+            let left = Double(t.prefillTotal - t.prefillDone)
+            prefillProgress = PrefillProgress(
+                done: t.prefillDone, total: t.prefillTotal,
+                secondsLeft: t.pp > 0 ? left / t.pp : 0)
+        } else {
+            prefillProgress = nil
+        }
         if t.ctx > 0 {
             let tokens = thinkingActive
                 ? "🤔 \(t.thinkTokens) 💬 \(t.contentTokens)"

@@ -57,6 +57,8 @@ struct Composer: View {
             ForEach(model.attachedImages) { img in imageChip(img) }
             ForEach(model.attachedClips) { clip in clipChip(clip) }
             ForEach(model.attachedDocs) { doc in docChip(doc) }
+            if model.heldSend != nil { heldNotes }
+            if !model.remembered.isEmpty { rememberedNotes }
             if let warning = model.attachmentWarning { warningBanner(warning) }
             PromptEditor(text: $model.input, editing: $editing,
                          caret: $model.caret, focus: focus,
@@ -131,6 +133,11 @@ struct Composer: View {
 
     private var controls: some View {
         VStack(spacing: 8) {
+            if let progress = model.prefillProgress {
+                ProgressView(value: Double(progress.done),
+                             total: Double(max(progress.total, 1)))
+                    .progressViewStyle(.linear)
+            }
             if inVoiceExchange { transport }
             standardControls
         }
@@ -353,10 +360,104 @@ struct Composer: View {
         .foregroundStyle(.secondary)
     }
 
+    private var heldNotes: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "brain").frame(width: 24, height: 24)
+                Text("Memories that may fit. Choose the ones to use, then "
+                    + "Answer.")
+                    .lineLimit(2)
+                Spacer()
+            }
+            .foregroundStyle(.tertiary)
+            ForEach(model.heldNotes) { note in heldNote(note) }
+            HStack(spacing: 10) {
+                Button(action: model.answerHeldSend) {
+                    Text(answerLabel)
+                }
+                .keyboardShortcut(.defaultAction)
+                Button("Edit message", action: model.dropHeldSend)
+                Spacer()
+            }
+            .padding(.leading, 30)
+            .padding(.top, 2)
+        }
+        .appFont(.caption)
+        .foregroundStyle(.secondary)
+    }
+
+    private var rememberedNotes: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "brain").frame(width: 24, height: 24)
+                Text("Remembered from this chat, as drafts until you keep "
+                    + "them.")
+                    .lineLimit(2)
+                Spacer()
+            }
+            .foregroundStyle(.tertiary)
+            ForEach(model.remembered) { note in rememberedNote(note) }
+        }
+        .appFont(.caption)
+        .foregroundStyle(.secondary)
+    }
+
+    private func rememberedNote(_ note: Memories.Remembered) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: "square.and.pencil")
+                .frame(width: 24, height: 24)
+            Text(note.title).lineLimit(1).truncationMode(.middle)
+            Text(note.id).foregroundStyle(.tertiary)
+            Spacer()
+            Button("Keep") { model.keepRemembered(note.id) }
+                .buttonStyle(.plain)
+                .foregroundStyle(Color.accentColor)
+            Button("Forget") { model.forgetRemembered(note.id) }
+                .buttonStyle(.plain)
+                .foregroundStyle(.red)
+        }
+    }
+
+    private var answerLabel: String {
+        let chosen = model.heldNotes.filter { note in note.chosen }.count
+        var out = "Answer without memories"
+        if chosen > 0 {
+            out = "Answer with \(chosen) "
+                + (chosen == 1 ? "memory" : "memories") + ", "
+                + Composer.readCost(model.heldSeconds)
+        }
+        return out
+    }
+
+    private func heldNote(_ note: ChatModel.OfferedNote) -> some View {
+        Button { model.toggleHeldNote(note.id) } label: {
+            HStack(spacing: 6) {
+                Image(systemName: note.chosen ? "checkmark.square.fill"
+                                              : "square")
+                    .foregroundStyle(note.chosen ? Color.accentColor
+                                                 : Color.secondary)
+                    .frame(width: 24, height: 24)
+                Text(note.title).lineLimit(1).truncationMode(.middle)
+                Text(Composer.readCost(note.seconds))
+                    .foregroundStyle(.tertiary)
+                Spacer()
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private static func readCost(_ seconds: Double) -> String {
+        seconds < 1.5 ? "about a second"
+                      : "about \(Int(seconds.rounded())) seconds"
+    }
+
     private func docChip(_ doc: Doc) -> some View {
         HStack(spacing: 6) {
             Image(systemName: "doc.text").frame(width: 24, height: 24)
             Text(doc.name).lineLimit(1).truncationMode(.middle)
+            Text(ChatModel.readCost(model.readSeconds(doc)))
+                .foregroundStyle(.tertiary)
             Spacer()
             Button { model.clearDoc(doc.id) } label: {
                 Image(systemName: "xmark.circle.fill")
@@ -423,7 +524,12 @@ struct Composer: View {
 
     private var noteText: String {
         let text: String
-        if model.listening {
+        if let progress = model.prefillProgress {
+            text = "Reading \(progress.done.formatted(.number)) of "
+                + "\(progress.total.formatted(.number)) tokens, "
+                + Composer.timeLeft(progress.secondsLeft)
+                + ". Stop cancels."
+        } else if model.listening {
             text = listeningNote
         } else if model.speech.paused {
             text = "Paused"
@@ -433,6 +539,16 @@ struct Composer: View {
             text = plainFootnote
         }
         return text
+    }
+
+    private static func timeLeft(_ seconds: Double) -> String {
+        var out = "almost done"
+        if seconds >= 90 {
+            out = "about \(Int((seconds / 60).rounded())) minutes left"
+        } else if seconds >= 5 {
+            out = "about \(Int(seconds.rounded())) seconds left"
+        }
+        return out
     }
 
     private var listeningNote: String {

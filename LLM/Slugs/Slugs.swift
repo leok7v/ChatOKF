@@ -1,11 +1,4 @@
-// A query never leaves the device; only the resolved article id is
-// fetched. Embedder and VectorIndex are the seams a second corpus would use.
 import Foundation
-
-protocol Embedder {
-    var dim: Int { get }
-    func embed(_ text: String) -> [Float]
-}
 
 protocol VectorIndex {
     var count: Int { get }
@@ -17,7 +10,7 @@ protocol VectorIndex {
 // of clean pages: cheap per query or held indefinitely.
 public final class WikiSlugs {
     private let gguf: GGUF
-    private let embedder: MiniLM
+    let embedder: MiniLM
     private let index: SignIndex
 
     public var articleCount: Int { index.count }

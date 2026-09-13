@@ -119,7 +119,26 @@ against loss. You are solely responsible for \
 maintaining independent backups of any data you \
 wish to retain.
 
-**6. Third-Party Model Licenses.** The Application \
+**6. Your Content and Stored Memories.** The \
+Application keeps on Your device, and nowhere \
+else, the conversations You conduct, the \
+documents, images, audio and other material You \
+provide, and the notes ("memories") it forms from \
+those conversations, whether written by a Model or \
+by You. You are solely responsible for all such \
+content: for its legality, accuracy and \
+suitability, for holding the rights to any \
+material You provide, and for the safekeeping of \
+Your device and of any backup or export that \
+carries this content. The Authors never receive, \
+review, transmit or curate this content and \
+accept no responsibility for it, for anything a \
+Model derives from it, or for any consequence of \
+its loss, disclosure, inaccuracy or use. Memories \
+are formed and recalled on a best-effort basis \
+and may be incomplete, mistaken or absent.
+
+**7. Third-Party Model Licenses.** The Application \
 provides a technical interface to third-party AI \
 Models. Each Model is governed exclusively by its \
 own license agreement, terms of use, and applicable \
@@ -141,7 +160,7 @@ reviewed and accepted that Model's license, and \
 that You hold the Authors entirely harmless with \
 respect to any claim arising therefrom.
 
-**7. Indemnification.** You agree to indemnify, \
+**8. Indemnification.** You agree to indemnify, \
 defend, and hold harmless the Authors from and \
 against any and all claims, demands, actions, \
 losses, liabilities, damages, costs, and expenses \
@@ -152,14 +171,14 @@ generate, rely upon, or distribute; (c) Your \
 violation of this Agreement; or (d) Your violation \
 of any applicable law or third-party right.
 
-**8. Severability.** If any provision of this \
+**9. Severability.** If any provision of this \
 Agreement is held invalid, illegal, or \
 unenforceable, that provision shall be modified \
 to the minimum extent necessary to make it \
 enforceable, and the remaining provisions shall \
 continue in full force and effect.
 
-**9. Entire Agreement.** This Agreement constitutes \
+**10. Entire Agreement.** This Agreement constitutes \
 the entire agreement between You and the Authors \
 concerning the Application and supersedes all \
 prior or contemporaneous representations, \
@@ -167,7 +186,7 @@ understandings, negotiations, or agreements, \
 whether written or oral, relating to the same \
 subject matter.
 
-**10. Acceptance.** By clicking Accept, installing, \
+**11. Acceptance.** By clicking Accept, installing, \
 or otherwise using the Application, You confirm \
 that You have read, understood, and agree to be \
 bound by every term of this Agreement. If You do \

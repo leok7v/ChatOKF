@@ -70,6 +70,14 @@ enum Credits {
                changed: "Quantized to GGUF. It matches your question to a "
                    + "Wikipedia article on this device, which is what keeps "
                    + "the question itself off the network."),
+        Credit(name: "multilingual-e5-small",
+               author: "intfloat, Microsoft",
+               terms: "MIT",
+               source: "https://huggingface.co/intfloat/multilingual-e5-small",
+               changed: "Quantized to 8-bit GGUF by cstr. It turns your "
+                   + "questions and the assistant's memories into vectors on "
+                   + "this device, so the memory that fits a question can be "
+                   + "found without the question leaving."),
         Credit(name: "Parallel",
                author: "Parallel Web Systems",
                terms: "Commercial service",

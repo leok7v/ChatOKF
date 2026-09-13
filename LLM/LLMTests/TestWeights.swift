@@ -33,9 +33,15 @@ enum TestWeights {
                     out = readable(set.appendingPathComponent(file).path)
                 }
             }
-            for root in clones where out == nil {
-                out = readable(root + "/" + src.repo + "/" + file)
-            }
+            if out == nil { out = clone(src.repo, file) }
+        }
+        return out
+    }
+
+    static func clone(_ repo: String, _ file: String) -> String? {
+        var out: String? = nil
+        for root in clones where out == nil {
+            out = readable(root + "/" + repo + "/" + file)
         }
         return out
     }
