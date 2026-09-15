@@ -85,7 +85,7 @@ struct SettingsView: View {
             Button("Cancel", role: .cancel) { }
         } message: {
             Text("Deletes every memory the assistant has formed from its "
-               + "conversations with you. There is no trash for these. "
+               + "conversations with you, and empties the memories trash. "
                + "The conversations themselves stay.")
         }
     }
@@ -699,6 +699,11 @@ struct SettingsView: View {
                 hairline
                 reasoningEffortRow
             }
+            hairline
+            switchRow("Export Reasoning",
+                      "Include the thinking above each answer in exported "
+                      + "and shared transcripts, PDF and HTML alike.",
+                      $model.exportReasoning)
         }
     }
 
@@ -819,7 +824,7 @@ struct SettingsView: View {
                           + "file while this is off, and logging starts at "
                           + "the next launch.", $model.statusLine)
             }
-            if model.memoriesSupported {
+            if model.memoriesSupported, model.hasMemories || unlocked {
                 card {
                     wideRow(nil,
                             "Delete every memory the assistant has formed "
@@ -893,8 +898,15 @@ struct SettingsView: View {
                 + "the log is. A launch argument naming the same category "
                 + "wins over these switches for that run.")
             card {
+                switchRow("All", "Every switch below at once.", Binding(
+                    get: { DiagGate.switchable.allSatisfy { g in g.wanted } },
+                    set: { on in
+                        for gate in DiagGate.switchable { gate.set(on) }
+                        gateRevision += 1
+                    }
+                ))
                 ForEach(DiagGate.switchable) { gate in
-                    if gate != DiagGate.switchable.first { hairline }
+                    hairline
                     gateRow(gate)
                 }
             }

@@ -21,6 +21,27 @@ enum AppTheme: String, CaseIterable, Identifiable {
     }
 }
 
+enum SidebarTab: String, CaseIterable, Identifiable {
+    case chats = "Chats"
+    case memories = "Memories"
+    var id: String { rawValue }
+}
+
+struct SidebarRow: Identifiable {
+    let id: String
+    let title: String
+    let subtitle: String
+    let detail: String
+    let marked: Bool
+    let current: Bool
+}
+
+struct SidebarSection: Identifiable {
+    let id: String
+    let rows: [SidebarRow]
+    var title: String { id }
+}
+
 struct Sidebar: View {
 
     let model: ChatModel
@@ -31,30 +52,44 @@ struct Sidebar: View {
     let onSettings: () -> Void
     let onRename: (ConversationStore.Convo) -> Void
 
-    @State private var armedDelete: UUID?
+    @State private var armedDelete: String?
     @State private var disarmTask: Task<Void, Never>?
     @State private var query = ""
     @State private var showingTrash = false
     @State private var armedEmpty = false
+    @State private var chosen: SidebarTab = .chats
+    @State private var openNote: MemoryRow?
     @State private var exportFile: ExportFile?
     @State private var showExporter = false
     @State private var exportName = "Conversation"
 
-    private var hasHistory: Bool { !ConversationStore.shared.list.isEmpty }
-    private var trash: [ConversationStore.Convo] {
-        ConversationStore.shared.trashed
+    private var tab: SidebarTab { model.memoriesOn ? chosen : .chats }
+
+    private var searching: Bool { ConversationSearch.active(query) }
+
+    private var flat: Bool { searching || showingTrash }
+
+    private var hasItems: Bool {
+        tab == .chats ? !ConversationStore.shared.list.isEmpty
+                      : !model.memoryList.isEmpty
+    }
+
+    private var trashCount: Int {
+        tab == .chats ? ConversationStore.shared.trashed.count
+                      : model.memoryTrash.count
     }
 
     var body: some View {
-        let items = shown
+        let items = sections
         return VStack(spacing: 0) {
             closeRow
             newChatRow
+            tabPicker
             if showingTrash {
                 trashHeader
                 Divider()
-                if trash.isEmpty { emptyTrash } else { history(trash) }
-            } else if hasHistory {
+                if items.isEmpty { emptyTrash } else { history(items) }
+            } else if hasItems {
                 searchField
                 Divider()
                 if items.isEmpty {
@@ -72,13 +107,89 @@ struct Sidebar: View {
         .fileExporter(isPresented: $showExporter, document: exportFile,
                       contentType: .pdf,
                       defaultFilename: exportName) { _ in }
+        .sheet(item: $openNote) { row in
+            MemoryNoteView(model: model, row: row, onOpen: onOpen,
+                           onClose: { openNote = nil })
+        }
     }
 
-    private var shown: [ConversationStore.Convo] {
+    @ViewBuilder
+    private var tabPicker: some View {
+        if model.memoriesOn {
+            Picker("Show", selection: $chosen) {
+                ForEach(SidebarTab.allCases) { option in
+                    Text(option.rawValue).tag(option)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .padding(.horizontal, 16)
+            .padding(.bottom, 4)
+            .onChange(of: chosen) { _, _ in
+                query = ""
+                showingTrash = false
+                armedDelete = nil
+                armedEmpty = false
+            }
+        }
+    }
+
+    private var sections: [SidebarSection] {
+        tab == .chats ? chatSections : memorySections
+    }
+
+    private var chatSections: [SidebarSection] {
         let store = ConversationStore.shared
-        return ConversationSearch.active(query)
-            ? ConversationSearch.rank(store.list, store.words, query)
-            : store.list
+        let items = showingTrash
+            ? store.trashed
+            : (searching ? ConversationSearch.rank(store.list, store.words,
+                                                   query)
+                         : store.list)
+        var out: [SidebarSection] = []
+        if flat {
+            let rows = items.map { convo in chatRow(convo) }
+            if !rows.isEmpty { out = [SidebarSection(id: "", rows: rows)] }
+        } else {
+            out = Sidebar.dated(items).map { group in
+                SidebarSection(id: group.title,
+                               rows: group.items.map { c in chatRow(c) })
+            }
+        }
+        return out
+    }
+
+    private var memorySections: [SidebarSection] {
+        let items = showingTrash
+            ? model.memoryTrash
+            : (searching ? MemorySearch.rank(model.memoryList, query)
+                         : model.memoryList)
+        var out: [SidebarSection] = []
+        if flat {
+            let rows = items.map { note in memoryRow(note) }
+            if !rows.isEmpty { out = [SidebarSection(id: "", rows: rows)] }
+        } else {
+            out = Sidebar.byArea(items).map { group in
+                SidebarSection(id: Sidebar.areaTitle(group.area),
+                               rows: group.notes.map { n in memoryRow(n) })
+            }
+        }
+        return out
+    }
+
+    private func chatRow(_ convo: ConversationStore.Convo) -> SidebarRow {
+        let reason = searching
+            ? ConversationSearch.reason(convo, query) : nil
+        return SidebarRow(id: convo.id.uuidString, title: convo.title,
+                          subtitle: reason ?? Sidebar.when(convo.updated),
+                          detail: "", marked: false,
+                          current: convo.id == model.currentConversationId)
+    }
+
+    private func memoryRow(_ note: MemoryRow) -> SidebarRow {
+        SidebarRow(id: note.id, title: note.title,
+                   subtitle: note.description,
+                   detail: note.id + "   " + Sidebar.when(note.updated),
+                   marked: note.isPrivate, current: false)
     }
 
     // The trash's own list replaces the history rather than sitting under
@@ -100,9 +211,9 @@ struct Sidebar: View {
 
     @ViewBuilder
     private var emptyButton: some View {
-        if !trash.isEmpty {
+        if trashCount > 0 {
             if armedEmpty {
-                Button { model.emptyTrash(); armedEmpty = false } label: {
+                Button { emptyNow(); armedEmpty = false } label: {
                     capsuleLabel("Empty")
                 }
                 .buttonStyle(.plain)
@@ -114,6 +225,14 @@ struct Sidebar: View {
                 .buttonStyle(.plain)
                 .help("Empty the trash")
             }
+        }
+    }
+
+    private func emptyNow() {
+        if tab == .chats {
+            model.emptyTrash()
+        } else {
+            model.emptyMemoriesTrash()
         }
     }
 
@@ -135,7 +254,7 @@ struct Sidebar: View {
 
     @ViewBuilder
     private var trashRow: some View {
-        if !trash.isEmpty, !showingTrash {
+        if trashCount > 0, !showingTrash {
             HStack {
                 Button(action: toggleTrash) {
                     Text("Trash")
@@ -165,7 +284,8 @@ struct Sidebar: View {
             Text("Trash is empty")
                 .appFont(.callout)
                 .foregroundStyle(.secondary)
-            Text("Deleted chats are kept for 30 days.")
+            Text(tab == .chats ? "Deleted chats are kept for 30 days."
+                               : "Deleted memories are kept for 30 days.")
                 .appFont(.caption)
                 .foregroundStyle(.tertiary)
                 .multilineTextAlignment(.center)
@@ -176,15 +296,20 @@ struct Sidebar: View {
 
     private var emptyState: some View {
         VStack(spacing: 8) {
-            Image(systemName: "bubble.left.and.bubble.right")
+            Image(systemName: tab == .chats
+                  ? "bubble.left.and.bubble.right" : "brain")
                 .appFont(.largeTitle)
                 .foregroundStyle(.tertiary)
-            Text("No conversations yet")
+            Text(tab == .chats ? "No conversations yet"
+                               : "Nothing remembered yet")
                 .appFont(.callout)
                 .foregroundStyle(.secondary)
-            Text("Your chats will appear here.")
+            Text(tab == .chats
+                 ? "Your chats will appear here."
+                 : "Notes the assistant keeps will appear here.")
                 .appFont(.caption)
                 .foregroundStyle(.tertiary)
+                .multilineTextAlignment(.center)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(24)
@@ -254,28 +379,21 @@ struct Sidebar: View {
         isOS ? EdgeInsets(top: 2, leading: 8, bottom: 2, trailing: 8) : nil
     }
 
-    private func history(_ items: [ConversationStore.Convo]) -> some View {
-        List {
-            if ConversationSearch.active(query) || showingTrash {
-                ForEach(items) { convo in
-                    historyRow(convo)
-                        .listRowBackground(Color.clear)
-                        .listRowInsets(rowInsets)
-                        .deleteDisabled(model.busy)
-                }
-                .onDelete { offsets in delete(offsets, in: items) }
+    private func history(_ sections: [SidebarSection]) -> some View {
+        let loose = sections.count == 1 && sections[0].title.isEmpty
+        return List {
+            if loose {
+                ForEach(sections[0].rows) { row in listed(row) }
+                    .onDelete { offsets in
+                        delete(offsets, in: sections[0].rows)
+                    }
             } else {
-                ForEach(Sidebar.groups(items)) { group in
-                    Section(group.title) {
-                        ForEach(group.items) { convo in
-                            historyRow(convo)
-                                .listRowBackground(Color.clear)
-                                .listRowInsets(rowInsets)
-                                .deleteDisabled(model.busy)
-                        }
-                        .onDelete { offsets in
-                            delete(offsets, in: group.items)
-                        }
+                ForEach(sections) { section in
+                    Section(section.title) {
+                        ForEach(section.rows) { row in listed(row) }
+                            .onDelete { offsets in
+                                delete(offsets, in: section.rows)
+                            }
                     }
                 }
             }
@@ -285,73 +403,164 @@ struct Sidebar: View {
         .modifier(TightSections())
     }
 
-    private func isCurrent(_ convo: ConversationStore.Convo) -> Bool {
-        convo.id == model.currentConversationId
+    private func listed(_ row: SidebarRow) -> some View {
+        historyRow(row)
+            .listRowBackground(Color.clear)
+            .listRowInsets(rowInsets)
+            .deleteDisabled(blocked(row))
     }
 
-    private func historyRow(_ convo: ConversationStore.Convo) -> some View {
+    private func blocked(_ row: SidebarRow) -> Bool {
+        tab == .memories ? model.busy : (model.busy && row.current)
+    }
+
+    private func historyRow(_ row: SidebarRow) -> some View {
         HStack(spacing: 6) {
-            Button { armedDelete = nil; open(convo) } label: { row(convo) }
+            Button { armedDelete = nil; open(row) } label: { label(row) }
                 .buttonStyle(.plain)
                 .disabled(model.busy)
                 .help(rowHelp)
             // The armed capsule confirms BOTH the trash button and the
             // context menu, so it is not macOS-only like the trash button.
-            if armedDelete == convo.id {
-                Button { confirmArmed(convo) } label: { capsuleLabel("Delete") }
+            if armedDelete == row.id {
+                Button { confirmArmed(row) } label: { capsuleLabel("Delete") }
                     .buttonStyle(.plain)
-                    .disabled(model.busy)
+                    .disabled(blocked(row))
                     .help("Click to delete; this cannot be undone")
             } else if !isOS {
-                Button { requestDelete(convo) } label: {
+                Button { requestDelete(row) } label: {
                     Image(systemName: "trash")
                         .appFont(.caption)
                         .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
-                .disabled(model.busy)
-                .help(trashHelp)
+                .disabled(blocked(row))
+                .help(trashHelp(row))
             }
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
-        .background(isCurrent(convo) ? Color.accentColor.opacity(0.15)
-                                     : .clear,
+        .background(row.current ? Color.accentColor.opacity(0.15) : .clear,
                     in: RoundedRectangle(cornerRadius: 7))
         .animation(.easeInOut(duration: 0.15), value: armedDelete)
-        .contextMenu { menu(convo) }
+        .contextMenu { menu(row) }
+    }
+
+    private func label(_ row: SidebarRow) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 4) {
+                if row.marked {
+                    Image(systemName: "lock.fill")
+                        .appFont(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                Text(row.title)
+                    .lineLimit(1)
+                    .fontWeight(row.current ? .semibold : .regular)
+                    .foregroundStyle(row.current ? Color.accentColor
+                                                 : .primary)
+            }
+            Text(row.subtitle)
+                .appFont(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            if !row.detail.isEmpty {
+                Text(row.detail)
+                    .appFont(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
     }
 
     @ViewBuilder
-    private func menu(_ convo: ConversationStore.Convo) -> some View {
+    private func menu(_ row: SidebarRow) -> some View {
+        if tab == .chats {
+            chatMenu(row)
+        } else {
+            memoryMenu(row)
+        }
+    }
+
+    @ViewBuilder
+    private func chatMenu(_ row: SidebarRow) -> some View {
         if showingTrash {
-            Button { model.restoreConversation(convo.id) } label: {
-                Label("Restore", systemImage: "arrow.uturn.backward")
+            if let convo = Sidebar.convo(row.id) {
+                Button { model.restoreConversation(convo.id) } label: {
+                    Label("Restore", systemImage: "arrow.uturn.backward")
+                }
+                Divider()
             }
-            Divider()
-            Button(role: .destructive) { requestDelete(convo) } label: {
+            Button(role: .destructive) { requestDelete(row) } label: {
                 Label("Delete Forever", systemImage: "trash")
             }
         } else {
-            Button { onRename(convo) } label: {
-                Label("Rename\u{2026}", systemImage: "pencil")
-            }
-            ShareLink(item: ConversationPDF(convo: convo),
-                      preview: SharePreview(convo.title)) {
-                Label("Share PDF", systemImage: "square.and.arrow.up")
-            }
-            if !isOS {
-                Button { save(convo) } label: {
-                    Label("Save PDF\u{2026}",
-                          systemImage: "square.and.arrow.down")
+            if let convo = Sidebar.convo(row.id) {
+                Button { onRename(convo) } label: {
+                    Label("Rename\u{2026}", systemImage: "pencil")
                 }
+                ShareLink(item: ConversationPDF(convo: convo),
+                          preview: SharePreview(convo.title)) {
+                    Label("Share PDF", systemImage: "square.and.arrow.up")
+                }
+                if !isOS {
+                    Button { save(convo) } label: {
+                        Label("Save PDF\u{2026}",
+                              systemImage: "square.and.arrow.down")
+                    }
+                }
+                Divider()
             }
-            Divider()
-            Button(role: .destructive) { requestDelete(convo) } label: {
+            Button(role: .destructive) { requestDelete(row) } label: {
                 Label("Delete", systemImage: "trash")
             }
-            .disabled(model.busy)
+            .disabled(blocked(row))
         }
+    }
+
+    @ViewBuilder
+    private func memoryMenu(_ row: SidebarRow) -> some View {
+        if showingTrash {
+            Button { model.restoreMemory(row.id) } label: {
+                Label("Restore", systemImage: "arrow.uturn.backward")
+            }
+            Divider()
+            Button(role: .destructive) { requestDelete(row) } label: {
+                Label("Delete Forever", systemImage: "trash")
+            }
+        } else {
+            if let source = Sidebar.sourceChat(model, row.id) {
+                Button { onOpen(source) } label: {
+                    Label("Open the Chat", systemImage: "bubble.left")
+                }
+                .disabled(model.busy)
+                Divider()
+            }
+            Button(role: .destructive) { requestDelete(row) } label: {
+                Label("Delete", systemImage: "trash")
+            }
+            .disabled(blocked(row))
+        }
+    }
+
+    static func convo(_ id: String) -> ConversationStore.Convo? {
+        let store = ConversationStore.shared
+        let uuid = UUID(uuidString: id)
+        return (store.list + store.trashed).first { c in c.id == uuid }
+    }
+
+    static func sourceChat(_ model: ChatModel, _ id: String) -> UUID? {
+        var out: UUID? = nil
+        if let source = model.memoryList.first(where: { n in n.id == id })?
+            .source,
+           ConversationStore.shared.list.contains(where: { c in
+               c.id == source
+           }) {
+            out = source
+        }
+        return out
     }
 
     private func save(_ convo: ConversationStore.Convo) {
@@ -369,41 +578,55 @@ struct Sidebar: View {
         }
     }
 
-    private func open(_ convo: ConversationStore.Convo) {
-        onOpen(convo.id)
-    }
-
-    private var trashHelp: String {
-        let what = showingTrash ? "Delete this conversation forever"
-                                : "Delete conversation"
-        return model.busy ? "Available once this turn has finished" : what
-    }
-
-    private var rowHelp: String {
-        model.busy ? "Available once this turn has finished"
-                   : "Open this conversation"
-    }
-
-    private func requestDelete(_ convo: ConversationStore.Convo) {
-        if model.confirmDeleteConversation {
-            armedDelete = convo.id
-            scheduleDisarm(convo.id)
+    private func open(_ row: SidebarRow) {
+        if tab == .chats {
+            if let id = UUID(uuidString: row.id) { onOpen(id) }
         } else {
-            remove(convo.id)
+            openNote = (showingTrash ? model.memoryTrash : model.memoryList)
+                .first { note in note.id == row.id }
         }
     }
 
-    private func confirmArmed(_ convo: ConversationStore.Convo) {
-        disarmTask?.cancel()
-        armedDelete = nil
-        remove(convo.id)
+    private func trashHelp(_ row: SidebarRow) -> String {
+        let noun = tab == .chats ? "conversation" : "memory"
+        let what = showingTrash ? "Delete this \(noun) forever"
+                                : "Delete \(noun)"
+        return blocked(row) ? "Available once this turn has finished" : what
     }
 
-    private func remove(_ id: UUID) {
-        if showingTrash {
-            model.deleteForever(id)
+    private var rowHelp: String {
+        let what = tab == .chats ? "Open this conversation" : "Read this note"
+        return model.busy ? "Available once this turn has finished" : what
+    }
+
+    private func requestDelete(_ row: SidebarRow) {
+        if tab == .memories || model.confirmDeleteConversation {
+            armedDelete = row.id
+            scheduleDisarm(row.id)
         } else {
-            model.deleteConversation(id)
+            remove(row.id)
+        }
+    }
+
+    private func confirmArmed(_ row: SidebarRow) {
+        disarmTask?.cancel()
+        armedDelete = nil
+        remove(row.id)
+    }
+
+    private func remove(_ id: String) {
+        if tab == .chats {
+            if let uuid = UUID(uuidString: id) {
+                if showingTrash {
+                    model.deleteForever(uuid)
+                } else {
+                    model.deleteConversation(uuid)
+                }
+            }
+        } else if showingTrash {
+            model.deleteMemoryForever(id)
+        } else {
+            model.forgetMemory(id)
         }
     }
 
@@ -411,7 +634,7 @@ struct Sidebar: View {
     // once the menu has finished dismissing.
     private static let disarmSeconds = 6.0
 
-    private func scheduleDisarm(_ id: UUID) {
+    private func scheduleDisarm(_ id: String) {
         disarmTask?.cancel()
         disarmTask = Task { @MainActor in
             try? await Task.sleep(for: .seconds(Sidebar.disarmSeconds))
@@ -433,7 +656,7 @@ struct Sidebar: View {
         var title: String { id }
     }
 
-    private static func groups(_ list: [ConversationStore.Convo]) -> [Group] {
+    private static func dated(_ list: [ConversationStore.Convo]) -> [Group] {
         let cal = Calendar.current
         let now = Date()
         let titles = ["Today", "Yesterday", "Previous 7 Days", "Older"]
@@ -459,27 +682,22 @@ struct Sidebar: View {
         return result
     }
 
-    private func row(_ convo: ConversationStore.Convo) -> some View {
-        let reason = ConversationSearch.active(query)
-            ? ConversationSearch.reason(convo, query) : nil
-        let current = isCurrent(convo)
-        return VStack(alignment: .leading, spacing: 2) {
-            Text(convo.title)
-                .lineLimit(1)
-                .fontWeight(current ? .semibold : .regular)
-                .foregroundStyle(current ? Color.accentColor : .primary)
-            Text(reason ?? Sidebar.when(convo.updated))
-                .appFont(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
+    static func byArea(_ notes: [MemoryRow])
+        -> [(area: String, notes: [MemoryRow])] {
+        var members: [String: [MemoryRow]] = [:]
+        for note in notes { members[note.area, default: []].append(note) }
+        return members.keys.sorted().map { area in
+            (area, members[area] ?? [])
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .contentShape(Rectangle())
     }
 
-    private func delete(_ offsets: IndexSet,
-                        in items: [ConversationStore.Convo]) {
-        let ids = offsets.map { i in items[i].id }
+    static func areaTitle(_ area: String) -> String {
+        area == "." ? "Loose" : area.replacingOccurrences(of: "-", with: " ")
+            .capitalized
+    }
+
+    private func delete(_ offsets: IndexSet, in rows: [SidebarRow]) {
+        let ids = offsets.map { i in rows[i].id }
         for id in ids { remove(id) }
     }
 
@@ -503,7 +721,7 @@ struct Sidebar: View {
         .padding(.bottom, 16)
     }
 
-    private static func when(_ date: Date) -> String {
+    static func when(_ date: Date) -> String {
         let f = RelativeDateTimeFormatter()
         return f.localizedString(for: date, relativeTo: Date())
     }

@@ -133,7 +133,9 @@ extension Session {
                 ConversationStore.StoredDoc(path: storedPath(ref.url),
                                             bytes: ref.bytes,
                                             short: ref.short,
-                                            total: ref.total)
+                                            total: ref.total,
+                                            read: ref.read,
+                                            cut: ref.cut)
             },
             posters: m.posters.compactMap { cg in VisionPreprocess.jpeg(cg) })
     }
@@ -148,7 +150,8 @@ extension Session {
         }
         m.docs = (s.docs ?? []).map { d in
             DocRef(url: restoredURL(d.path), bytes: d.bytes,
-                  short: d.short ?? false, total: d.total ?? d.bytes)
+                  short: d.short ?? false, total: d.total ?? d.bytes,
+                  read: d.read, cut: d.cut ?? "")
         }
         m.toolRounds = s.rounds.enumerated().map { pair in
             ToolRound(id: pair.offset, emitted: pair.element.emitted,

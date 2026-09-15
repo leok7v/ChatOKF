@@ -15,14 +15,35 @@ extension ChatModel {
 
     func openConversation(_ id: UUID) {
         commitCurrent()
+        let leaving = liveConversation
         if !busy, let restored = session.openConversation(id) {
             messages = restored.messages
             traceEvents = restored.traceEvents
             currentConversationId = id
             generatedTitle = nil
             followupHint = ""
+            heldSend = nil
+            remembered = []
+            extractedAt = nil
             readOnly = true
             statsLabel = ""
+            if leaving != nil || session.hasParked(id) {
+                genTask = Task { @MainActor in
+                    if let leaving { await session.parkCurrent(leaving) }
+                    await resumeParked(id)
+                    genTask = nil
+                }
+            }
+        }
+    }
+
+    private func resumeParked(_ id: UUID) async {
+        if session.hasParked(id), await session.resumeParked(
+            id, sessionConfig(), onEvent: { [weak self] e in
+                self?.recordTrace(e)
+            }) {
+            generatedTitle = ConversationStore.shared.load(id)?.title
+            readOnly = false
         }
     }
 
@@ -37,6 +58,7 @@ extension ChatModel {
 
     func deleteConversation(_ id: UUID) {
         ConversationStore.shared.trash(id)
+        session.dropParked(id)
         closeIfShowing(id)
         sweepAttachments()
     }
@@ -47,6 +69,7 @@ extension ChatModel {
 
     func deleteForever(_ id: UUID) {
         ConversationStore.shared.deleteForever(id)
+        session.dropParked(id)
         closeIfShowing(id)
         sweepAttachments()
     }
@@ -54,7 +77,10 @@ extension ChatModel {
     func emptyTrash() {
         let gone = ConversationStore.shared.trashed.map { convo in convo.id }
         ConversationStore.shared.emptyTrash()
-        for id in gone { closeIfShowing(id) }
+        for id in gone {
+            session.dropParked(id)
+            closeIfShowing(id)
+        }
         sweepAttachments()
     }
 
@@ -71,7 +97,9 @@ extension ChatModel {
     }
 
     func clearAllConversations() {
+        let gone = ConversationStore.shared.list.map { convo in convo.id }
         ConversationStore.shared.trashAll()
+        for id in gone { session.dropParked(id) }
         currentConversationId = nil
         if readOnly { newChat() }
         sweepAttachments()
@@ -86,8 +114,8 @@ extension ChatModel {
     var transcriptDocument: Markdown.Document {
         let stream = MarkdownStream()
         for m in messages {
-            let who = m.fromUser ? "**You**\n\n" : "**ChatOKF**\n\n"
-            stream.append(who + m.text + "\n\n")
+            stream.append(ConversationExport.block(
+                fromUser: m.fromUser, text: m.text, reasoning: m.reasoning))
         }
         return stream.finish()
     }

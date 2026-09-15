@@ -56,9 +56,10 @@ struct ViewCommands: Commands {
 
 @MainActor func quitApp() { NSApp.terminate(nil) }
 
-func setClipboard(_ s: String) {
+func setClipboard(_ plain: String, html: String? = nil) {
     NSPasteboard.general.clearContents()
-    NSPasteboard.general.setString(s, forType: .string)
+    if let html { NSPasteboard.general.setString(html, forType: .html) }
+    NSPasteboard.general.setString(plain, forType: .string)
 }
 
 var isOS: Bool { return false }

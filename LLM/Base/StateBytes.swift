@@ -5,7 +5,7 @@ enum StateBytes {
     // A state file names itself: a stale file from a build with the empty-Data
     // default would deserialize to pos 0 with no KV and SUCCEED.
     static let magic: [UInt8] = Array("GDNS".utf8)
-    static let version = 1
+    static let version = 5
 
     static func putHeader(_ out: inout Data) {
         out.append(contentsOf: magic)
@@ -17,14 +17,9 @@ enum StateBytes {
         withUnsafeBytes(of: &x) { out.append(contentsOf: $0) }
     }
 
-    static func putFloats(_ out: inout Data, _ v: [Float]) {
-        putInt(&out, v.count)
-        v.withUnsafeBufferPointer { b in
-            out.append(UnsafeBufferPointer(start: b.baseAddress, count: b.count)
-                .withMemoryRebound(to: UInt8.self) { raw in
-                    Data(buffer: raw)
-                })
-        }
+    static func putRaw(_ out: inout Data, _ p: UnsafeRawPointer, _ n: Int) {
+        putInt(&out, n)
+        out.append(p.assumingMemoryBound(to: UInt8.self), count: n)
     }
 
     static func putKeyed<V>(_ out: inout Data, _ dict: [Int: V],
@@ -56,23 +51,6 @@ enum StateBytes {
         return out
     }
 
-    struct FloatSpan {
-        let raw: UnsafeRawBufferPointer
-        let at: Int
-        let count: Int
-
-        func f(_ i: Int) -> Float {
-            raw.loadUnaligned(fromByteOffset: at + i * 4, as: Float.self)
-        }
-
-        var array: [Float] {
-            [Float](unsafeUninitializedCapacity: count) { out, n in
-                for i in 0..<count { out[i] = f(i) }
-                n = count
-            }
-        }
-    }
-
     struct Reader {
         let raw: UnsafeRawBufferPointer
         var at = 0
@@ -100,12 +78,20 @@ enum StateBytes {
             return out
         }
 
-        mutating func span() -> FloatSpan {
+        mutating func bytes() -> UnsafeRawBufferPointer {
             let n = max(int(), 0)
-            let whole = at + n * 4 <= raw.count
-            let out = FloatSpan(raw: raw, at: at, count: whole ? n : 0)
-            at += n * 4
+            let whole = at + n <= raw.count
+            let out = UnsafeRawBufferPointer(
+                rebasing: raw[at ..< (whole ? at + n : at)])
+            at += n
             return out
+        }
+
+        mutating func bytes(into b: UnsafeMutableRawPointer, count: Int) {
+            let src = bytes()
+            if src.count == count {
+                _ = memcpy(b, src.baseAddress!, count)
+            }
         }
     }
 }

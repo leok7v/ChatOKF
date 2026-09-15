@@ -97,7 +97,7 @@ struct TranscriptActions: View {
     }
 
     private func copy() {
-        setClipboard(Markdown.plainText(document))
+        MarkdownCopy.put(document, title: title)
         copied = true
         copiedReset?.cancel()
         copiedReset = Task { @MainActor in

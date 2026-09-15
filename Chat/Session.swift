@@ -32,14 +32,14 @@ public enum TurnEvent: Sendable {
     public let memories = Memories()
     private var recalledIds: Set<String> = []
 
-    private var ggufBackend: (any AgentBackend)?
+    var ggufBackend: (any AgentBackend)?
     private var ggufTemplate = ""
     private var ggufVocabCount = 0
     private var activePresets: SamplingPresets?
     private var media: (any MediaEncoder)?
     public var audioSampleRate: Double? { media?.audioSampleRate }
     public var maxAudioSeconds: Double? { media?.maxAudioSeconds }
-    private var session: ChatSession?
+    var session: ChatSession?
     private var metaTask: Task<Void, Never>?
     private var workTask: Task<Void, Never>?
     private var primingTask: Task<Void, Never>?
@@ -54,7 +54,7 @@ public enum TurnEvent: Sendable {
     public private(set) var perImageTokens = 256
     // Reasoning can turn OFF later by closing the channel as it opens, but
     // never ON: the marker some templates carry is already in the KV.
-    public private(set) var primedThinking = true
+    public internal(set) var primedThinking = true
 
     public var hasSession: Bool { session != nil }
     public var metaTaskRunning: Bool { metaTask != nil }
@@ -115,10 +115,11 @@ public enum TurnEvent: Sendable {
         }
     }
 
-    public func releaseSession() {
+    public func releaseSession(parking id: UUID? = nil) {
         let outgoing = session
         let meta = metaTask
         let prior = retiring
+        let name = modelName
         metaTask = nil
         retiring = Task {
             await prior?.value
@@ -127,6 +128,9 @@ public enum TurnEvent: Sendable {
             await meta?.value
             await outgoing?.endPriming()
             await outgoing?.quiesce()
+            if let id, let outgoing {
+                await park(outgoing, as: id, model: name)
+            }
         }
         ggufBackend = nil
         session = nil
@@ -134,6 +138,10 @@ public enum TurnEvent: Sendable {
         media = nil
         modelSupportsReasoningEffort = false
         effortLevels = []
+        forgetRecalled()
+    }
+
+    func forgetRecalled() {
         recalledIds = []
         memories.forgetSeen()
     }
@@ -449,9 +457,23 @@ public enum TurnEvent: Sendable {
                 reasoningEffort: modelSupportsReasoningEffort ? wire : nil,
                 maxReasoning: config.thinkTokenCap * 2,
                 softReasoningCap: config.thinkTokenCap,
-                overthink: Session.overthinkLambda, runner: toolRunner)
+                overthink: Session.overthinkLambda, runner: toolRunner,
+                readGuard: Session.memoryGuard)
             hookTrace(thinkingActive: thinkingActive, onEvent: onEvent)
         }
+    }
+
+    nonisolated static let readFloor =
+        UInt64(Flags.int("read-floor-mb") ?? 300) << 20
+
+    nonisolated static func memoryGuard() -> String? {
+        var out: String? = nil
+        if let left = Footprint.availableBytes(), left < Session.readFloor {
+            out = "\(left >> 20) MB left before the device kills the app, "
+                + "floor \(Session.readFloor >> 20) MB"
+            Diag.shared.report(.turn, "[read] cut: " + out!)
+        }
+        return out
     }
 
     private static var precookDir: URL {
@@ -461,9 +483,9 @@ public enum TurnEvent: Sendable {
     }
 
     private static func precookURL(_ name: String, _ stamp: String) -> URL {
-        let rev = ModelCatalog.source(name)?.revision ?? "local"
-        return precookDir.appendingPathComponent(
-            "\(name).\(rev.prefix(8)).\(stamp.prefix(16)).ctx")
+        precookDir.appendingPathComponent(
+            "\(name).\(Session.revision8(name)).\(stamp.prefix(16))",
+            isDirectory: true)
     }
 
     // A 27B cooks to hundreds of MB.
@@ -471,14 +493,13 @@ public enum TurnEvent: Sendable {
 
     private static func prunePrecook(keeping: URL) {
         let fm = FileManager.default
-        let keys: [URLResourceKey] = [.contentModificationDateKey,
-                                      .fileSizeKey]
+        let keys: [URLResourceKey] = [.contentModificationDateKey]
         let found = (try? fm.contentsOfDirectory(
             at: precookDir, includingPropertiesForKeys: keys)) ?? []
         var newest = found.map { url -> (url: URL, at: Date, size: Int) in
             let v = try? url.resourceValues(forKeys: Set(keys))
             return (url, v?.contentModificationDate ?? .distantPast,
-                    v?.fileSize ?? 0)
+                    ChatSession.allocated(url))
         }
         newest.sort { a, b in a.at > b.at }
         var total = 0
@@ -491,8 +512,7 @@ public enum TurnEvent: Sendable {
     }
 
     private static func isStampNamed(_ url: URL) -> Bool {
-        let parts = url.lastPathComponent.split(separator: ".")
-        let stamp = parts.count > 2 ? parts[parts.count - 2] : ""
+        let stamp = url.lastPathComponent.split(separator: ".").last ?? ""
         return stamp.count == 16
             && stamp.allSatisfy { c in c.isHexDigit && !c.isUppercase }
     }
@@ -500,6 +520,7 @@ public enum TurnEvent: Sendable {
     private static func ensurePrecookDir() {
         try? FileManager.default.createDirectory(
             at: precookDir, withIntermediateDirectories: true)
+        Platform.protectUntilFirstUnlock(precookDir)
     }
 
     public static func wipePrecook() {
@@ -510,13 +531,21 @@ public enum TurnEvent: Sendable {
     // depends on. Empty means no cookable prefix, so only the reset is owed.
     private func primeOrCookInternal(_ s: ChatSession, reset: Bool) async {
         let stamp = await s.precookStamp
-        if stamp.isEmpty {
+        let live = Session.liveDir(modelName)
+        try? FileManager.default.removeItem(at: live)
+        let attached = (try? await s.attach(live: live)) != nil
+        if !attached {
+            Diag.shared.report("[park] cannot attach \(live.path); "
+                               + "this run keeps no state on disk")
+        }
+        if stamp.isEmpty || !attached {
             if reset { await s.reset() }
         } else {
             Session.ensurePrecookDir()
             let url = Session.precookURL(modelName, stamp)
             await s.primeOrCook(at: url, resetFirst: reset)
             await s.awaitPriming()
+            Session.recordParkRate(modelName, await s.lastSaved)
             Session.prunePrecook(keeping: url)
         }
     }
@@ -554,8 +583,7 @@ public enum TurnEvent: Sendable {
         await drainMeta()
         await session?.endPriming()
         Footprint.report(.load, "newChat outgoing released")
-        recalledIds = []
-        memories.forgetSeen()
+        forgetRecalled()
         await memories.awaitOpen()
         makeSession(config, onEvent: onEvent)
         primeSession(resetFirst: true,
@@ -795,6 +823,7 @@ public enum TurnEvent: Sendable {
     }
 
     public func sendText(prompt: String, display: String, docs: [DocRef],
+                         stoppable: String? = nil,
                          thinkTokenCap: Int, thinkingActive: Bool)
         -> (asked: Message, events: AsyncStream<TurnEvent>)? {
         var result: (asked: Message, events: AsyncStream<TurnEvent>)? = nil
@@ -804,7 +833,8 @@ public enum TurnEvent: Sendable {
             let events = runTurn(thinkTokenCap: thinkTokenCap,
                                  thinkingActive: thinkingActive,
                                  failure: { _ in "" }) { session, hooks in
-                session.reply(prompt, onReasoning: hooks.onReasoning,
+                session.reply(prompt, stoppable: stoppable,
+                              onReasoning: hooks.onReasoning,
                               onTool: hooks.onTool,
                               onToolRound: hooks.onToolRound)
             }
@@ -842,19 +872,36 @@ public enum TurnEvent: Sendable {
         return result
     }
 
-    public func sendSpoken(said: [SpeechGate.Utterance],
+    public func sendSpoken(said: [SpeechGate.Utterance], typed: String,
+                           images: [ImageAttachment], clips: [ClipAttachment],
+                           docs: [DocRef], budget: Int,
                            thinkTokenCap: Int, thinkingActive: Bool)
         -> (asked: Message, events: AsyncStream<TurnEvent>)? {
         var result: (asked: Message, events: AsyncStream<TurnEvent>)? = nil
         if let media, session != nil {
             let secs = said.reduce(0.0) { sum, u in sum + u.seconds }
-            var asked = Message(fromUser: true,
-                                text: String(format: "Spoken, %.1fs", secs))
+            let previews = images.compactMap { img in
+                VisionPreprocess.thumbnail(img.data, maxPx: 640)
+            }
+            var asked = Message(
+                fromUser: true, text: String(format: "Spoken, %.1fs", secs),
+                images: previews,
+                clips: clips.filter { c in c.isVideo }.map { c in c.url },
+                posters: clips.compactMap { c in c.thumbnail })
+            asked.docs = docs
             asked.placeholder = true
-            let events = softTurn(Session.spokenPrompt, labelled: false,
+            let seen = !images.isEmpty || !clips.isEmpty
+            let events = softTurn(typed, labelled: seen,
                                   thinkTokenCap: thinkTokenCap,
                                   thinkingActive: thinkingActive
-            ) { _ in try await Session.encode(media, speech: said) }
+            ) { onFrame in
+                let looked = try await Session.encode(
+                    media, images: images, clips: clips, budget: budget,
+                    onFrame: onFrame)
+                let heard = try await Session.encode(media, speech: said)
+                return (looked.parts + heard.parts,
+                        looked.spans + heard.spans, looked.perImage)
+            }
             result = (asked, events)
         }
         return result
@@ -922,7 +969,7 @@ public enum TurnEvent: Sendable {
         return out
     }
 
-    private static let spokenPrompt = "Reply to what I just said."
+    public static let spokenPrompt = "Reply to what I just said."
 
     private static func softDefaultPrompt(_ parts: [ContentPart]) -> String {
         var images = 0, videos = 0, sounds = 0

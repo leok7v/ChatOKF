@@ -2,7 +2,6 @@ import Foundation
 
 public protocol TextEngine: AnyObject {
     associatedtype Bookmark: Sendable
-    associatedtype Parked: BackendState
     var pos: Int { get }
     var sampler: Sampler? { get set }
     var queued: Int { get }
@@ -15,21 +14,26 @@ public protocol TextEngine: AnyObject {
     func setSpeculation(_ on: Bool)
     func bookmark() -> Bookmark
     func restore(_ b: Bookmark)
-    func serialize(_ b: Bookmark) -> Data
-    func deserialize(_ data: Data) -> Parked?
-    func adopt(_ parked: Parked)
+    func retain(from position: Int)
+    func attach(_ dir: URL) throws
+    func flush(_ dir: URL) throws
+    func export(_ dir: URL) throws
+    func detach()
+    var stateBytes: Int { get }
 }
 
 public extension TextEngine {
     var queued: Int { 0 }
+    func retain(from position: Int) {}
     func requestStop() {}
     func shouldStop() -> Bool { false }
     func drainSpecTurn() -> SpecTurn? { nil }
     func setSpeculation(_ on: Bool) {}
-}
-
-public extension TextEngine where Parked == Bookmark {
-    func adopt(_ parked: Parked) { restore(parked) }
+    func attach(_ dir: URL) throws { throw EngineError.missingModel("state") }
+    func flush(_ dir: URL) throws {}
+    func export(_ dir: URL) throws {}
+    func detach() {}
+    var stateBytes: Int { 0 }
 }
 
 public protocol Tokenizing: Sendable {
@@ -97,7 +101,10 @@ public class EngineBackend<E: TextEngine, T: Tokenizing>: AgentBackend,
 
     public func supportsVision() async -> Bool { false }
 
-    public func mark() async throws { savedMark = engine.bookmark() }
+    public func mark() async throws {
+        savedMark = engine.bookmark()
+        engine.retain(from: engine.pos)
+    }
 
     public func rewind() async throws {
         if let m = savedMark { engine.restore(m) }
@@ -115,30 +122,73 @@ public class EngineBackend<E: TextEngine, T: Tokenizing>: AgentBackend,
     }
 
     public func loadState(_ state: any BackendState) async throws {
-        if let s = state as? State {
-            engine.restore(s.bookmark)
-        } else if let p = state as? E.Parked {
-            engine.adopt(p)
+        if let s = state as? State { engine.restore(s.bookmark) }
+    }
+
+    public private(set) var attachedDir: URL?
+
+    public var stateBytes: Int { get async { engine.stateBytes } }
+
+    public func attach(_ dir: URL) async throws {
+        try FileManager.default.createDirectory(
+            at: dir, withIntermediateDirectories: true)
+        try engine.attach(dir)
+        attachedDir = dir
+        savedMark = nil
+    }
+
+    public func detach() async {
+        engine.detach()
+        attachedDir = nil
+        savedMark = nil
+    }
+
+    public func park(to dir: URL, meta: Data) async throws {
+        if let from = attachedDir {
+            try engine.flush(from)
+            try meta.write(to: from.appendingPathComponent("meta.json"),
+                           options: .atomic)
+            engine.detach()
+            attachedDir = nil
+            savedMark = nil
+            if from.standardizedFileURL != dir.standardizedFileURL {
+                try? FileManager.default.removeItem(at: dir)
+                try FileManager.default.moveItem(at: from, to: dir)
+            }
         }
     }
 
-    public func serializeState(_ state: any BackendState) async -> Data {
-        var out = Data()
-        if let s = state as? State {
-            out = engine.serialize(s.bookmark)
-        } else if let b = state as? E.Bookmark {
-            out = engine.serialize(b)
-        }
-        return out
+    public func resume(from dir: URL) async throws -> Data {
+        let meta = try Data(contentsOf: dir.appendingPathComponent("meta.json"))
+        try await attach(dir)
+        return meta
     }
 
-    public func deserializeState(_ data: Data) async throws
-        -> any BackendState {
-        let parked = engine.deserialize(data)
-        if parked == nil {
-            throw GGUFErr.parse("parked state is not this build's format")
+    public func prime(from cooked: URL, into live: URL) async throws -> Data {
+        engine.detach()
+        attachedDir = nil
+        savedMark = nil
+        try? FileManager.default.removeItem(at: live)
+        try EngineBackend.clone(cooked, to: live)
+        return try await resume(from: live)
+    }
+
+    public func precook(to cooked: URL, meta: Data) async throws {
+        if attachedDir != nil {
+            try? FileManager.default.removeItem(at: cooked)
+            try engine.export(cooked)
+            try meta.write(to: cooked.appendingPathComponent("meta.json"),
+                           options: .atomic)
         }
-        return parked!
+    }
+
+    static func clone(_ from: URL, to: URL) throws {
+        try FileManager.default.createDirectory(
+            at: to.deletingLastPathComponent(),
+            withIntermediateDirectories: true)
+        if clonefile(from.path, to.path, 0) != 0 {
+            try FileManager.default.copyItem(at: from, to: to)
+        }
     }
 
     public func checkpoint() async throws -> any BackendState {

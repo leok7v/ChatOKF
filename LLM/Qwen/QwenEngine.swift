@@ -46,47 +46,6 @@ public final class QwenEngine {
         return Int32(Vectors.argmax(logits))
     }
 
-    // The GDN recurrence is copied whole, since it cannot be paged; the KV
-    // shares append-only page snapshots, so only a partial tail copies.
-
-    public func serialize(_ b: Bookmark) -> Data {
-        var out = Data()
-        StateBytes.putHeader(&out)
-        StateBytes.putInt(&out, b.pos)
-        StateBytes.putKeyed(&out, b.gdn) { out, _, s in
-            StateBytes.putFloats(&out, s.conv)
-            StateBytes.putFloats(&out, s.rec)
-        }
-        StateBytes.putKeyed(&out, b.kv) { out, _, s in
-            StateBytes.putInt(&out, s.len)
-            StateBytes.putInt(&out, s.kPages.count)
-            for page in s.kPages { StateBytes.putFloats(&out, page) }
-            for page in s.vPages { StateBytes.putFloats(&out, page) }
-        }
-        return out
-    }
-
-    public func deserialize(_ data: Data) -> Bookmark? {
-        StateBytes.read(data) { r in
-            let pos = r.int()
-            let gdn = StateBytes.keyed(&r) {
-                r -> (conv: [Float], rec: [Float]) in
-                let conv = r.span().array
-                let rec = r.span().array
-                return (conv: conv, rec: rec)
-            }
-            let kv = StateBytes.keyed(&r) { r -> KVCache.Snapshot in
-                let len = r.int()
-                let n = r.int()
-                var kp: [[Float]] = [], vp: [[Float]] = []
-                for _ in 0..<n { kp.append(r.span().array) }
-                for _ in 0..<n { vp.append(r.span().array) }
-                return KVCache.Snapshot(kPages: kp, vPages: vp, len: len)
-            }
-            return Bookmark(pos: pos, gdn: gdn, kv: kv)
-        }
-    }
-
     public struct Bookmark: @unchecked Sendable {
         let pos: Int
         let gdn: [Int: (conv: [Float], rec: [Float])]

@@ -26,8 +26,7 @@ struct AttachButton: View {
             }
         }
         .buttonStyle(.plain)
-        .foregroundStyle(model.hasAttachments ? Color.accentColor
-                                              : Color.secondary)
+        .foregroundStyle(Color.accentColor)
         .disabled(model.busy)
         .photosPicker(isPresented: $showPhotos, selection: $photos,
                       maxSelectionCount: ChatModel.maxImages,

@@ -105,6 +105,10 @@ public actor ChatSession {
     private var forceEndThink = false
     private var metaTurn = false
     private var genStartsThink = false
+    private var stoppable: String?
+    private var readFraction = 1.0
+    private var readStop = ""
+    private let readGuard: (@Sendable () -> String?)?
     public enum TurnOutcome: String, Sendable {
         case answered, stopped, answerless
     }
@@ -125,8 +129,10 @@ public actor ChatSession {
                 reasoningEffort: String? = nil, maxTokens: Int = .max,
                 maxReasoning: Int = 0, softReasoningCap: Int = 0,
                 overthink: Float = 0, seed: UInt64 = 0,
-                runner: (any ToolRunner)? = nil) {
+                runner: (any ToolRunner)? = nil,
+                readGuard: (@Sendable () -> String?)? = nil) {
         self.backend = backend
+        self.readGuard = readGuard
         self.template = template
         let wire = ChatWire.derive(template)
         self.wire = wire
@@ -252,6 +258,7 @@ public actor ChatSession {
 
     public func resume(_ context: ChatContext) async throws {
         try await backend.loadState(context.state)
+        try await backend.mark()
         history = context.history
         committed = context.committed
         attachmentCounts = context.attachments
@@ -263,41 +270,37 @@ public actor ChatSession {
         let roles: [String]
         let contents: [String]
         let attachments: [String: Int]
+        let bytes: Int?
     }
 
-    public func saveContext(to url: URL, stamp: String) async throws {
-        let context = try await park()
-        let stateData = await backend.serializeState(context.state)
-        let meta = ContextMeta(
-            stamp: stamp, committed: context.committed,
-            roles: context.history.map { $0.role },
-            contents: context.history.map { $0.content },
-            attachments: context.attachments)
-        var out = Data()
-        let json = try JSONBytes.reproducible(meta)
-        var len = Int64(json.count).littleEndian
-        withUnsafeBytes(of: &len) { out.append(contentsOf: $0) }
-        out.append(json)
-        out.append(stateData)
-        try out.write(to: url)
+    public private(set) var lastSaved: (tokens: Int, bytes: Int)?
+
+    public var committedCount: Int { committed.count }
+
+    public private(set) var liveDir: URL?
+
+    public func attach(live dir: URL) async throws {
+        try await backend.attach(dir)
+        liveDir = dir
     }
 
-    public func loadContext(from url: URL, stamp: String) async throws -> Bool {
-        let data = try Data(contentsOf: url, options: .mappedIfSafe)
-        let base = data.startIndex
-        var len: Int64 = 0
-        withUnsafeMutableBytes(of: &len) { dst in
-            _ = data.copyBytes(to: dst, from: base ..< base + 8)
-        }
-        let jlen = Int(Int64(littleEndian: len))
-        let meta = try JSONDecoder().decode(
-            ContextMeta.self,
-            from: data[base + 8 ..< base + 8 + jlen])
+    public func detach() async {
+        await backend.detach()
+    }
+
+    private func metaBytes(_ stamp: String) async throws -> Data {
+        try JSONBytes.reproducible(ContextMeta(
+            stamp: stamp, committed: committed,
+            roles: history.map { m in m.role },
+            contents: history.map { m in m.content },
+            attachments: attachmentCounts,
+            bytes: await backend.stateBytes))
+    }
+
+    private func adoptMeta(_ data: Data, stamp: String) async -> Bool {
         var loaded = false
-        if meta.stamp == stamp {
-            let state = try await backend.deserializeState(
-                data[(base + 8 + jlen)...])
-            try await backend.loadState(state)
+        if let meta = try? JSONDecoder().decode(ContextMeta.self, from: data),
+           meta.stamp == stamp {
             var restored: [AgentMessage] = []
             for i in 0 ..< meta.roles.count {
                 restored.append(AgentMessage(role: meta.roles[i],
@@ -306,7 +309,45 @@ public actor ChatSession {
             history = restored
             committed = meta.committed
             attachmentCounts = meta.attachments
+            lastMetrics = TurnMetrics(ctx: await backend.position,
+                                      thinkTokens: 0, contentTokens: 0)
             loaded = true
+        }
+        return loaded
+    }
+
+    public static func allocated(_ dir: URL) -> Int {
+        let fm = FileManager.default
+        let meta = try? JSONDecoder().decode(
+            ContextMeta.self,
+            from: Data(contentsOf: dir.appendingPathComponent("meta.json")))
+        let files = (try? fm.contentsOfDirectory(
+            at: dir, includingPropertiesForKeys: [.totalFileAllocatedSizeKey]))
+            ?? []
+        let onDisk = files.reduce(0) { sum, url in
+            sum + ((try? url.resourceValues(
+                forKeys: [.totalFileAllocatedSizeKey]))?
+                .totalFileAllocatedSize ?? 0)
+        }
+        return max(onDisk, meta?.bytes ?? 0)
+    }
+
+    public func park(to dir: URL, stamp: String) async throws {
+        await priming?.value
+        try await backend.rewind()
+        try await backend.park(to: dir, meta: await metaBytes(stamp))
+        lastSaved = (committed.count, ChatSession.allocated(dir))
+    }
+
+    public func resume(from dir: URL, stamp: String) async throws -> Bool {
+        let meta = try await backend.resume(from: dir)
+        let loaded = await adoptMeta(meta, stamp: stamp)
+        if loaded {
+            try await backend.mark()
+            liveDir = dir
+            lastSaved = (committed.count, ChatSession.allocated(dir))
+        } else {
+            await backend.detach()
         }
         return loaded
     }
@@ -370,11 +411,14 @@ public actor ChatSession {
             let t0 = Date()
             let prefixIds = backend.encode(r.prefix)
             let fullIds = backend.encode(r.full)
+            if let liveDir { try await backend.attach(liveDir) }
             await backend.reset()
             _ = try await backend.extend(prefixIds)
             committed = prefixIds
             Diag.memory?("precook before save")
-            try await saveContext(to: url, stamp: ChatSession.stamp(r.prefix))
+            try await backend.precook(
+                to: url, meta: await metaBytes(ChatSession.stamp(r.prefix)))
+            lastSaved = (prefixIds.count, ChatSession.allocated(url))
             Diag.memory?("precook after save")
             if fullIds.count >= prefixIds.count,
                Array(fullIds.prefix(prefixIds.count)) == prefixIds {
@@ -440,9 +484,11 @@ public actor ChatSession {
         let t0 = Date()
         let r = systemRenders()
         var ok = false
-        if !r.prefix.isEmpty {
-            ok = (try? await loadContext(
-                from: url, stamp: ChatSession.stamp(r.prefix))) == true
+        var primed = false
+        if !r.prefix.isEmpty, let live = liveDir,
+           let meta = try? await backend.prime(from: url, into: live) {
+            primed = await adoptMeta(meta, stamp: ChatSession.stamp(r.prefix))
+            ok = primed
         }
         if ok {
             let fullIds = backend.encode(r.full)
@@ -461,13 +507,14 @@ public actor ChatSession {
             }
             history = [AgentMessage(role: "system",
                                     content: systemStable + systemTail)]
-            if !ok {
-                // A torn restore must not leave half a prefix in the KV.
-                await backend.reset()
-                committed = []
-            }
+        }
+        if primed && !ok {
+            if let liveDir { try? await backend.attach(liveDir) }
+            await backend.reset()
+            committed = []
         }
         if ok {
+            lastSaved = (committed.count, ChatSession.allocated(url))
             Diag.memory?("primed \(committed.count) ids from cache")
             trace(.prime, from: t0, ctx: await backend.position,
                   tokens: committed.count,
@@ -478,14 +525,15 @@ public actor ChatSession {
     }
 
     public nonisolated func reply(
-        _ user: String,
+        _ user: String, stoppable: String? = nil,
         onReasoning: (@Sendable (String) -> Void)? = nil,
         onTool: (@Sendable (String) -> Void)? = nil,
         onToolRound: (@Sendable (ToolRoundEvent) -> Void)? = nil
     ) -> AsyncStream<String> {
         AsyncStream { cont in
             let task = Task {
-                await self.runTurn(user, onReasoning: onReasoning,
+                await self.runTurn(user, stoppable: stoppable,
+                                   onReasoning: onReasoning,
                                    onTool: onTool,
                                    onToolRound: onToolRound) { piece in
                     cont.yield(piece)
@@ -801,7 +849,7 @@ public actor ChatSession {
         return usable ? body : ""
     }
 
-    private func runTurn(_ user: String,
+    private func runTurn(_ user: String, stoppable: String?,
                          onReasoning: (@Sendable (String) -> Void)?,
                          onTool: (@Sendable (String) -> Void)?,
                          onToolRound: (@Sendable (ToolRoundEvent) -> Void)?,
@@ -810,6 +858,7 @@ public actor ChatSession {
         enterEngine()
         defer { leaveEngine() }
         let saved = await enterTurn()
+        self.stoppable = stoppable
         trace(.user, ctx: await backend.position,
               summary: String(user.prefix(80)), text: user)
         history.append(AgentMessage(role: "user", content: user))
@@ -945,8 +994,9 @@ public actor ChatSession {
                 last.role == "assistant" && last.content.isEmpty
             } ?? false
             if empty {
-                await rollbackTurn(saved, why: ChatSession.userStopped(
-                    lastMetrics.endReason) ? .stopped : .answerless)
+                let byUser = ChatSession.userStopped(lastMetrics.endReason)
+                await rollbackTurn(saved, why: byUser && readFraction == 1
+                                       ? .stopped : .answerless)
             }
         }
     }
@@ -1017,7 +1067,16 @@ public actor ChatSession {
         if metaTurn { genText += ChatSession.titleSeed(genText, wire) }
         genStartsThink = wire.startsInReasoning(genPrompt: genText,
                                                 enabled: true)
-        let encoded = backend.encode(closedText)
+        var encoded = backend.encode(closedText)
+        var tail: [Int32] = []
+        var spanStart = 0
+        if soft.isEmpty, let span = stoppable,
+           let at = closedText.range(of: span) {
+            encoded = backend.encode(String(closedText[..<at.upperBound]))
+            tail = backend.encode(String(closedText[at.upperBound...]))
+            spanStart = backend.encode(String(closedText[..<at.lowerBound]))
+                .count
+        }
         let closed = soft.isEmpty ? encoded
             : Continuation.expandSpans(encoded, soft)
         let gen = backend.encode(genText)
@@ -1040,40 +1099,106 @@ public actor ChatSession {
               summary: fresh ? "fresh (system + tools + user)"
                              : "delta (prev answer + user)",
               text: fullText)
-        let afterHead: Int32
+        var afterHead: Int32
+        var laid = closed
         if !soft.isEmpty {
             afterHead = try await backend.extendSoft(closed, spans: soft)
         } else {
-            afterHead = try await extendChunked(closed)
+            let read = try await extendChunked(closed, tail: tail,
+                                               spanStart: spanStart)
+            afterHead = read.next
+            laid = read.laid
         }
-        committed += closed
+        committed += laid
         try await backend.mark()
-        let seed = gen.isEmpty ? afterHead : try await backend.extend(gen)
-        return (seed, closed.count + gen.count)
+        var seed = afterHead
+        if !gen.isEmpty {
+            seed = readFraction < 1 ? try await lay(gen)
+                                    : try await backend.extend(gen)
+        }
+        return (seed, laid.count + gen.count)
     }
 
     static let prefillChunk = 1024
 
-    private func extendChunked(_ ids: [Int32]) async throws -> Int32 {
+    static func readingStopped(_ fraction: Double, _ why: String) -> String {
+        let cause = why == "memory"
+            ? "because the device ran out of memory" : "by the user"
+        return "\n[Reading stopped \(cause) at \(Int(fraction * 100)) "
+            + "percent of the attached text; answer from what was read.]\n"
+    }
+
+    private func extendChunked(_ ids: [Int32], tail: [Int32],
+                               spanStart: Int) async throws
+        -> (next: Int32, laid: [Int32]) {
         var next = backend.eos
-        if ids.count <= ChatSession.prefillChunk {
+        var laid = ids
+        if ids.count <= ChatSession.prefillChunk && tail.isEmpty {
             next = try await backend.extend(ids)
         } else {
-            let t0 = Date()
             let startCtx = await backend.position
+            let total = ids.count + tail.count
             var done = 0
-            while done < ids.count {
+            var rest = tail
+            var cutAt: Int? = nil
+            while done < ids.count && cutAt == nil {
+                let starved = done > 0 ? readGuard?() : nil
                 if done > 0 && backend.shouldStop() {
-                    throw EngineError.stopped
+                    cutAt = done
+                    readStop = "user"
+                } else if let starved {
+                    cutAt = done
+                    readStop = "memory"
+                    trace(.inject, summary: "reading starved: " + starved)
+                } else {
+                    let end = min(ids.count, done + ChatSession.prefillChunk)
+                    let from = done
+                    let chunkStart = Date()
+                    do {
+                        next = try await backend.extend(Array(ids[done..<end]))
+                        done = end
+                    } catch EngineError.stopped {
+                        cutAt = await backend.position - startCtx
+                        readStop = "user"
+                    }
+                    let sec = Date().timeIntervalSince(chunkStart)
+                    let at = cutAt ?? done
+                    lastMetrics = TurnMetrics(
+                        ctx: startCtx + at, thinkTokens: 0, contentTokens: 0,
+                        pp: sec > 0 ? Double(at - from) / sec : 0,
+                        prefillDone: at, prefillTotal: total)
                 }
-                let end = min(ids.count, done + ChatSession.prefillChunk)
-                next = try await backend.extend(Array(ids[done..<end]))
-                done = end
-                let sec = Date().timeIntervalSince(t0)
-                lastMetrics = TurnMetrics(
-                    ctx: startCtx + done, thinkTokens: 0, contentTokens: 0,
-                    pp: sec > 0 ? Double(done) / sec : 0,
-                    prefillDone: done, prefillTotal: ids.count)
+                if cutAt != nil && tail.isEmpty { throw EngineError.stopped }
+            }
+            if let at = cutAt {
+                let span = max(1, ids.count - spanStart)
+                readFraction = min(1, Double(max(0, at - spanStart))
+                                      / Double(span))
+                laid = Array(ids[..<at])
+                rest = backend.encode(
+                    ChatSession.readingStopped(readFraction, readStop)) + tail
+                trace(.inject, summary: "reading stopped at \(at) of "
+                      + "\(ids.count) tokens")
+            }
+            if !rest.isEmpty {
+                next = try await lay(rest)
+                laid += rest
+            }
+        }
+        return (next, laid)
+    }
+
+    private func lay(_ ids: [Int32]) async throws -> Int32 {
+        var next = backend.eos
+        var rest = ids
+        while !rest.isEmpty {
+            let before = await backend.position
+            do {
+                next = try await backend.extend(rest)
+                rest = []
+            } catch EngineError.stopped {
+                let laid = await backend.position - before
+                rest = Array(rest.dropFirst(max(0, laid)))
             }
         }
         return next
@@ -1116,6 +1241,8 @@ public actor ChatSession {
 
     private func enterTurn() async -> SavedTurn {
         turnOutcome = .answered
+        readFraction = 1
+        readStop = ""
         runner?.beginTurn()
         let checkpoint = try? await backend.checkpoint()
         return SavedTurn(checkpoint: checkpoint, history: history,
@@ -1326,7 +1453,9 @@ public actor ChatSession {
         var thinkRescues = 0
         let g0 = Date()
         lastMetrics = TurnMetrics(ctx: startCtx, thinkTokens: tally.think,
-                                  contentTokens: tally.content, pp: pp, tg: 0)
+                                  contentTokens: tally.content, pp: pp, tg: 0,
+                                  readFraction: readFraction,
+                                  readStop: readStop)
         while !backend.eosIds.contains(cur) && !stop && !Task.isCancelled
               && !backend.shouldStop() {
             ids.append(cur)
@@ -1449,7 +1578,8 @@ public actor ChatSession {
                     / max(Date().timeIntervalSince(g0), 1e-6)
                 lastMetrics = TurnMetrics(
                     ctx: startCtx + steps, thinkTokens: tally.think + think,
-                    contentTokens: tally.content + content, pp: pp, tg: tg)
+                    contentTokens: tally.content + content, pp: pp, tg: tg,
+                    readFraction: readFraction, readStop: readStop)
             }
             let softOver = softReasoningCap > 0 && think >= softReasoningCap &&
                 bytes.last == 0x0A
@@ -1637,7 +1767,9 @@ public actor ChatSession {
         lastMetrics = TurnMetrics(ctx: ctx, thinkTokens: tally.think + think,
                                   contentTokens: tally.content + content,
                                   pp: pp, tg: tg, endReason: reason,
-                                  overrun: ctx - fed, stopToken: cur)
+                                  overrun: ctx - fed, stopToken: cur,
+                                  readFraction: readFraction,
+                                  readStop: readStop)
         trace(.decode, from: g0, ctx: ctx, tokens: steps,
               summary: reason + String(format:
                   " (think %d, content %d, tg %.1f t/s)", think, content, tg),

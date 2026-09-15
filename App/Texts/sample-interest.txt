@@ -1,0 +1,1 @@
+A savings account starts with $1,000 and earns 5% interest each year, so every year its balance multiplies by 1.05. Use the calculator to find the balance after 22 years.

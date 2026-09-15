@@ -55,12 +55,17 @@ import Foundation
         public let bytes: Int
         public let short: Bool?
         public let total: Int?
+        public let read: Int?
+        public let cut: String?
 
-        public init(path: String, bytes: Int, short: Bool?, total: Int?) {
+        public init(path: String, bytes: Int, short: Bool?, total: Int?,
+                    read: Int? = nil, cut: String? = nil) {
             self.path = path
             self.bytes = bytes
             self.short = short
             self.total = total
+            self.read = read
+            self.cut = cut
         }
     }
 

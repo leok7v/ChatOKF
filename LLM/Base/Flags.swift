@@ -74,6 +74,10 @@ public enum Flags {
         Knob(name: "recall-budget", takesValue: true, help:
             "seconds of prefill a silent memory recall may add to a turn",
             scope: .engine, defaultValue: "5"),
+        Knob(name: "read-floor-mb", takesValue: true, help:
+            "megabytes of jetsam headroom under which a document read stops "
+            + "and answers from what was read (iOS)", scope: .engine,
+            defaultValue: "300"),
         Knob(name: "search-parallel", takesValue: false, help:
             "use the Parallel web search service", scope: .engine,
             defaultValue: "1"),
@@ -130,6 +134,21 @@ public enum Flags {
         Knob(name: "bench-cool", takesValue: true, help:
             "seconds idle between the bench arms", scope: .diagnostic,
             defaultValue: "90"),
+        Knob(name: "memories", takesValue: false, help:
+            "the memory store; --no-memories runs a turn on the context "
+            + "alone, neither recalling nor writing a note",
+            scope: .engine, defaultValue: "1"),
+        Knob(name: "read-file", takesValue: true, help:
+            "a file in the app's Caches folder the app attaches under UL "
+            + "and sends at launch; repeatable, each in its own chat",
+            scope: .diagnostic, defaultValue: ""),
+        Knob(name: "read-prompt", takesValue: true, help:
+            "the question sent with read-file, default a summary request",
+            scope: .diagnostic, defaultValue: ""),
+        Knob(name: "prompt", takesValue: true, help:
+            "a turn the app sends at launch, repeatable and in order; "
+            + "'new' leaves the conversation and 'reopen' brings it back",
+            scope: .diagnostic, defaultValue: ""),
     ]
 
     private static let byName: [String: Knob] = {
@@ -148,6 +167,22 @@ public enum Flags {
 
     public static func int(_ name: String) -> Int? {
         value(name).flatMap { text in Int(text) }
+    }
+
+    public static func values(_ name: String) -> [String] {
+        var out: [String] = []
+        var i = 1
+        while i < arguments.count {
+            let token = arguments[i]
+            if token == "--" + name, i + 1 < arguments.count {
+                out.append(arguments[i + 1])
+                i += 1
+            } else if token.hasPrefix("--" + name + "=") {
+                out.append(String(token.dropFirst(name.count + 3)))
+            }
+            i += 1
+        }
+        return out
     }
 
     public static func double(_ name: String) -> Double? {

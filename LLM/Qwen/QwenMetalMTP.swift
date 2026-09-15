@@ -28,7 +28,9 @@ final class QwenMetalMTP {
         head = model.output
         let c = model.cfg
         pool = MetalKVPool(device: ctx.device, P: pageP,
-                           kvDim: c.headDim * c.nHeadKV)
+                           kvDim: c.headDim * c.nHeadKV,
+                           capacity: MetalKVPool.pagesFor(model.gguf,
+                                                          P: pageP))
         bEmbed = ctx.makeF32(c.nEmbd)
         bCat = ctx.makeF32(2 * c.nEmbd)
         bCur = ctx.makeF32(c.nEmbd)
@@ -56,6 +58,8 @@ final class QwenMetalMTP {
         pool.truncate(to: 0)
         origin = position
     }
+
+    func adopt(origin position: Int) { origin = position }
 
     func truncate(to n: Int) { pool.truncate(to: n) }
 

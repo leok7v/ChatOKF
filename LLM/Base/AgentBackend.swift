@@ -59,10 +59,13 @@ public struct TurnMetrics: Sendable {
     public let stopToken: Int32?
     public let prefillDone: Int
     public let prefillTotal: Int
+    public let readFraction: Double
+    public let readStop: String
     public init(ctx: Int, thinkTokens: Int, contentTokens: Int,
                 pp: Double = 0, tg: Double = 0, endReason: String = "",
                 overrun: Int = 0, stopToken: Int32? = nil,
-                prefillDone: Int = 0, prefillTotal: Int = 0) {
+                prefillDone: Int = 0, prefillTotal: Int = 0,
+                readFraction: Double = 1, readStop: String = "") {
         self.ctx = ctx
         self.thinkTokens = thinkTokens
         self.contentTokens = contentTokens
@@ -73,6 +76,8 @@ public struct TurnMetrics: Sendable {
         self.stopToken = stopToken
         self.prefillDone = prefillDone
         self.prefillTotal = prefillTotal
+        self.readFraction = readFraction
+        self.readStop = readStop
     }
 }
 
@@ -104,8 +109,13 @@ public protocol AgentBackend: Sendable {
     func loadState(_ state: any BackendState) async throws
     func checkpoint() async throws -> any BackendState
     func rollback(_ state: any BackendState) async throws
-    func serializeState(_ state: any BackendState) async -> Data
-    func deserializeState(_ data: Data) async throws -> any BackendState
+    func attach(_ dir: URL) async throws
+    func detach() async
+    var stateBytes: Int { get async }
+    func park(to dir: URL, meta: Data) async throws
+    func resume(from dir: URL) async throws -> Data
+    func prime(from cooked: URL, into live: URL) async throws -> Data
+    func precook(to cooked: URL, meta: Data) async throws
 }
 
 public protocol BackendState: Sendable {}
@@ -125,10 +135,17 @@ public extension AgentBackend {
     func extendSoft(_ ids: [Int32], spans: [SoftSpan]) async throws -> Int32 {
         throw EngineError.missingModel("soft tokens")
     }
-    func serializeState(_ state: any BackendState) async -> Data { Data() }
-    func deserializeState(_ data: Data) async throws -> any BackendState {
-        NullBackendState()
+    func attach(_ dir: URL) async throws {}
+    func detach() async {}
+    var stateBytes: Int { get async { 0 } }
+    func park(to dir: URL, meta: Data) async throws {}
+    func resume(from dir: URL) async throws -> Data {
+        throw EngineError.missingModel("state")
     }
+    func prime(from cooked: URL, into live: URL) async throws -> Data {
+        throw EngineError.missingModel("state")
+    }
+    func precook(to cooked: URL, meta: Data) async throws {}
     func checkpoint() async throws -> any BackendState {
         try await saveState()
     }

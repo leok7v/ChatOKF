@@ -286,6 +286,7 @@ public enum QwenMetalSelfTest {
                                   N: Int) -> KVFixture {
         precondition(nKV == 1, "the k/v below are indexed as one kv head")
         let pool = MetalKVPool(device: ctx.device, P: P, kvDim: hd * nKV)
+        try! pool.attachTemp()
         pool.appendBatch(T)
         let src = fill(2 * T * hd, seed: 60)
         var k = [Float](repeating: 0, count: T * hd)

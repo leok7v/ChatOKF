@@ -51,9 +51,13 @@ extension ModelShape {
         }
         self.init(
             towers: ModelShape.grouped(text, vision, audio) + sidecars,
-            trainedContext: g.int(arch + ".context_length")
-                ?? ModelShape.sourceContext(g),
+            trainedContext: ModelShape.trainedContext(g),
             embedding: g.int(arch + ".embedding_length") ?? 0)
+    }
+
+    static func trainedContext(_ g: GGUF) -> Int {
+        let arch = g.string("general.architecture") ?? ""
+        return g.int(arch + ".context_length") ?? ModelShape.sourceContext(g)
     }
 
     private static func sourceContext(_ g: GGUF) -> Int {

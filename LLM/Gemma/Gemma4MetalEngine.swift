@@ -142,10 +142,18 @@ public final class Gemma4MetalEngine {
         bPleGateN = ctx.makeF32(B * pleDim)
         bClampN = ctx.makeF32(B * max(maxFF, max(pleWidth, c.nEmbd)))
         bBlocks = ctx.makeU32(2 * (B + 8))
+        let pages = MetalKVPool.pagesFor(model.gguf, P: pageP)
         for il in 0..<c.nLayer where !c.isShared(il) {
-            kv[il] = MetalKVPool(
+            let source = (0..<c.nLayer).contains { j in
+                c.isShared(j) && c.sharedSource(j) == il
+            }
+            let pool = MetalKVPool(
                 device: ctx.device, P: pageP,
-                kvDim: c.headDim(il) * model.layers[il].nHeadKV)
+                kvDim: c.headDim(il) * model.layers[il].nHeadKV,
+                window: c.isFull(il) || source ? nil : c.slidingWindow,
+                capacity: pages)
+            pool.starved = { [stopSignal] in stopSignal.raise() }
+            kv[il] = pool
         }
         let g = model.gguf
         for L in model.layers {
@@ -298,8 +306,17 @@ public final class Gemma4MetalEngine {
         return out
     }
 
+    private var floor = 0
+
+    public func retain(from position: Int) { floor = position }
+
+    private func evictAll() {
+        for (_, pool) in kv { pool.evict(floor: floor) }
+    }
+
     public func reset() {
         pos = 0
+        floor = 0
         stopSignal.clear()
         specFlush()
         let pages = kv.values.reduce(0) { sum, pool in sum + pool.pageCount }
@@ -467,6 +484,7 @@ public final class Gemma4MetalEngine {
             if cfg.hasPerLayerInputs { buildPLE(f) }
             layers(f, pos: pos)
         }
+        evictAll()
     }
 
     private func seedToken(_ token: Int) {
@@ -513,6 +531,7 @@ public final class Gemma4MetalEngine {
             if cfg.hasPerLayerInputs { buildPLE(f) }
             layers(f, pos: pos)
         }
+        evictAll()
     }
 
     private func seedEmbedding(_ embedding: [Float]) {
@@ -586,6 +605,7 @@ public final class Gemma4MetalEngine {
         if c.hasPerLayerInputs { gatherPLEChunk(ids, soft, n) }
         for (_, pool) in kv { pool.appendBatch(n) }
         encodeChunk(basePos: basePos, n: n)
+        evictAll()
         let src = bNormedN.f32(n * c.nEmbd)
         let dst = bNormed.f32(c.nEmbd)
         for i in 0..<c.nEmbd { dst[i] = src[(n - 1) * c.nEmbd + i] }
@@ -669,6 +689,7 @@ public final class Gemma4MetalEngine {
             il = end
         }
         queued[queued.count - 1].waitUntilCompleted()
+        for (_, pool) in kv { pool.touch() }
         let fault = queued.compactMap { cb in cb.error }.first
         if let fault {
             let why = "prefill chunk n=\(n) pos=\(basePos): \(fault)"
@@ -784,15 +805,18 @@ public final class Gemma4MetalEngine {
             f.rmsnormRowsNoWeight(x: bVN, xoff: 0, d: hd,
                                   rows: n * nKV, eps: c.eps)
             f.kvAppendBatch(kCurN: bKN, vCurN: bVN, kAddr: pool.kAddr,
-                            vAddr: pool.vAddr, pages: pool.residentPages,
+                            vAddr: pool.vAddr,
+                            pages: pool.pages(rows: basePos, basePos + n - 1),
                             kvDim: hd * nKV, basePos: basePos,
                             P: pool.P, N: n)
         }
         // Scale 1: q_norm is the query's only normalization. The window is per
         // ROW.
+        let lo = full ? 0 : max(0, basePos - c.slidingWindow + 1)
         if !Gemma4MetalEngine.skip.contains("attn") {
             f.attnBatch(qN: bQN, kAddr: pool.kAddr, vAddr: pool.vAddr,
-                        pages: pool.residentPages, gateN: bGateNullN,
+                        pages: pool.pages(rows: lo, basePos + n - 1),
+                        gateN: bGateNullN,
                         outN: bAttnOutN, hd: hd, nH: c.nHead, nKV: nKV,
                         kvDim: hd * nKV, P: pool.P, scale: 1,
                         basePos: basePos, N: n, gated: 0,
@@ -936,7 +960,7 @@ public final class Gemma4MetalEngine {
         let lo = full ? 0 : max(0, pos - c.slidingWindow + 1)
         if !Gemma4MetalEngine.skip.contains("attn") {
             f.attnPaged(q: bQ, kAddr: pool.kAddr, vAddr: pool.vAddr,
-                        pages: pool.residentPages, gate: bGateNull,
+                        pages: pool.pages(rows: lo, pos), gate: bGateNull,
                         out: bAttnOut, hd: hd, nH: c.nHead, nKV: nKV,
                         T: pos + 1, kvDim: hd * nKV, P: pool.P, scale: 1,
                         gated: 0, lo: lo)
@@ -986,53 +1010,73 @@ public final class Gemma4MetalEngine {
         pos = kv.isEmpty ? b.pos : reached
     }
 
-    public func serialize(_ b: Bookmark) -> Data {
+    public func attach(_ dir: URL) throws {
+        var at = 0
+        var rows: [Int: (first: Int, len: Int)] = [:]
+        let header = dir.appendingPathComponent("state")
+        if let data = try? Data(contentsOf: header, options: .mappedIfSafe) {
+            let read: Void? = StateBytes.read(data) { r in
+                at = r.int()
+                rows = StateBytes.keyed(&r) { r in (first: r.int(), len: r.int()) }
+            }
+            if read == nil { at = 0; rows = [:] }
+        }
+        for (il, pool) in kv {
+            let slot = rows[il] ?? (first: 0, len: 0)
+            try pool.attach(dir.appendingPathComponent("pool.\(il)"),
+                            first: slot.first, len: slot.len)
+        }
+        specFlush()
+        stopSignal.clear()
+        pos = at
+        floor = at
+        if let (il, pool) = kv.min(by: { a, b in a.key < b.key }) {
+            Diag.memory?("attach pos \(at) pool.\(il) len \(pool.len) "
+                         + pool.probe)
+        }
+    }
+
+    public func export(_ dir: URL) throws {
+        try FileManager.default.createDirectory(
+            at: dir, withIntermediateDirectories: true)
+        for (il, pool) in kv {
+            pool.export(dir.appendingPathComponent("pool.\(il)"))
+        }
+        try header().write(to: dir.appendingPathComponent("state"),
+                           options: .atomic)
+    }
+
+    private func header() -> Data {
         var out = Data()
         StateBytes.putHeader(&out)
-        StateBytes.putInt(&out, b.pos)
-        StateBytes.putKeyed(&out, b.lens) { out, il, len in
-            let pool = kv[il]!
+        StateBytes.putInt(&out, pos)
+        var lens: [Int: Int] = [:]
+        for (il, pool) in kv { lens[il] = pool.len }
+        StateBytes.putKeyed(&out, lens) { out, il, len in
+            StateBytes.putInt(&out, kv[il]!.firstLive(below: len))
             StateBytes.putInt(&out, len)
-            StateBytes.putFloats(&out, pool.flatten(pool.kPages, len: len))
-            StateBytes.putFloats(&out, pool.flatten(pool.vPages, len: len))
         }
         return out
     }
 
-    public struct Parked: @unchecked Sendable, BackendState {
-        let pos: Int
-        let bytes: Data
-        let pools: [Int: (count: Int, kAt: Int, vAt: Int)]
-    }
-
-    public func deserialize(_ data: Data) -> Parked? {
-        StateBytes.read(data) { r in
-            let pos = r.int()
-            let pools = StateBytes.keyed(&r) { r in
-                _ = r.int()
-                let k = r.span()
-                let v = r.span()
-                return (count: k.count, kAt: k.at, vAt: v.at)
-            }
-            return Parked(pos: pos, bytes: data, pools: pools)
+    public func flush(_ dir: URL) throws {
+        for (_, pool) in kv { pool.writeBack() }
+        try header().write(to: dir.appendingPathComponent("state"),
+                           options: .atomic)
+        if let (il, pool) = kv.min(by: { a, b in a.key < b.key }) {
+            Diag.memory?("flush pos \(pos) pool.\(il) len \(pool.len) "
+                         + pool.probe)
         }
     }
 
-    // Refilled through the ordinary append, so the page table is built one way.
-    public func adopt(_ parked: Parked) {
-        reset()
-        parked.bytes.withUnsafeBytes { raw in
-            for (il, slice) in parked.pools {
-                if let pool = kv[il] {
-                    pool.fill(k: StateBytes.FloatSpan(raw: raw, at: slice.kAt,
-                                                      count: slice.count),
-                              v: StateBytes.FloatSpan(raw: raw, at: slice.vAt,
-                                                      count: slice.count),
-                              count: slice.count / pool.kvDim)
-                }
-            }
-        }
-        pos = parked.pos
+    public func detach() {
+        for (_, pool) in kv { pool.detach() }
+        pos = 0
+        floor = 0
+    }
+
+    public var stateBytes: Int {
+        kv.values.reduce(0) { sum, pool in sum + pool.liveBytes }
     }
 
     public func hidden() -> [Float] { Array(bNormed.f32(cfg.nEmbd)) }
@@ -1044,6 +1088,7 @@ public final class Gemma4MetalEngine {
         let t0 = Date()
         cb.commit()
         cb.waitUntilCompleted()
+        for (_, pool) in kv { pool.touch() }
         if let err = cb.error {
             Diag.shared.report("[metal] \(tag): \(err)")
             fatalError("metal \(tag): \(err)")

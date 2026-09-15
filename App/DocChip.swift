@@ -50,7 +50,11 @@ struct DocChip: View {
 
     private var size: String {
         var out = DocChip.kb(doc.bytes) + " of text"
-        if doc.short {
+        if doc.read < doc.bytes {
+            out = DocChip.kb(doc.read) + " of " + DocChip.kb(doc.total)
+                + (doc.cut == "memory" ? " of text read before memory ran out"
+                                       : " of text read before Stop")
+        } else if doc.short {
             out = DocChip.kb(doc.bytes) + " of " + DocChip.kb(doc.total)
                 + " of text, the rest left out"
         }

@@ -44,8 +44,8 @@ enum ConversationSearch {
             .map { pair in pair.convo }
     }
 
-    private static func score(_ want: String,
-                              _ counts: [String: Int]) -> Int {
+    static func score(_ want: String,
+                      _ counts: [String: Int]) -> Int {
         var total = 0
         for (word, count) in counts {
             if word == want {
@@ -82,8 +82,8 @@ enum ConversationSearch {
         return result
     }
 
-    private static func snippet(_ text: String,
-                                _ range: Range<String.Index>) -> String {
+    static func snippet(_ text: String,
+                        _ range: Range<String.Index>) -> String {
         let pad = 24
         let lo = text.index(range.lowerBound, offsetBy: -pad,
                             limitedBy: text.startIndex) ?? text.startIndex
@@ -94,6 +94,57 @@ enum ConversationSearch {
         if lo > text.startIndex { out = "\u{2026}" + out }
         if hi < text.endIndex { out += "\u{2026}" }
         return out
+    }
+
+}
+
+enum MemorySearch {
+
+    static func active(_ query: String) -> Bool {
+        ConversationSearch.active(query)
+    }
+
+    static func rank(_ rows: [MemoryRow], _ query: String) -> [MemoryRow] {
+        let wanted = ConversationSearch.words(query)
+        var scored: [(row: MemoryRow, score: Int)] = []
+        scored.reserveCapacity(rows.count)
+        for row in rows {
+            let counts = weigh(row)
+            var total = 0
+            var landed = 0
+            for want in wanted {
+                let gain = ConversationSearch.score(want, counts)
+                total += gain
+                if gain > 0 { landed += 1 }
+            }
+            if landed == wanted.count { scored.append((row, total)) }
+        }
+        return scored
+            .sorted { a, b in
+                a.score == b.score
+                    ? a.row.updated > b.row.updated
+                    : a.score > b.score
+            }
+            .map { pair in pair.row }
+    }
+
+    private static let titleWeight = 5
+
+    private static func weigh(_ row: MemoryRow) -> [String: Int] {
+        var counts: [String: Int] = [:]
+        add(row.title, titleWeight, &counts)
+        add(row.id.replacingOccurrences(of: "/", with: " "), titleWeight,
+            &counts)
+        add(row.description, 1, &counts)
+        add(row.tags.joined(separator: " "), 1, &counts)
+        return counts
+    }
+
+    private static func add(_ text: String, _ weight: Int,
+                            _ counts: inout [String: Int]) {
+        for word in ConversationSearch.words(text) {
+            counts[word, default: 0] += weight
+        }
     }
 
 }

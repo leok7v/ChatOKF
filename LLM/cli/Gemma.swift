@@ -1191,27 +1191,31 @@ private func gemmaEyes(_ chat: GemmaChat, _ gpu: Gemma4MetalEngine?)
                                           : chat.backend()
     let ids = chat.encode(String(repeating: "The quarterly logistics review "
         + "covered warehouse throughput and pallet rotation. ", count: 40))
-    let t0 = Date()
-    let want = try await backend.extend(ids)
-    let cooked = Date().timeIntervalSince(t0)
-    let state = try await backend.saveState()
-    let bytes = await backend.serializeState(state)
-    err(String(format: "[park] %d ids cooked in %.2fs -> %d KiB\n",
-               ids.count, cooked, bytes.count / 1024))
-    if bytes.isEmpty {
-        print("park bytes           EMPTY -- this backend re-prefills")
+    let tmp = FileManager.default.temporaryDirectory
+        .appendingPathComponent("park-gate-\(UUID().uuidString)")
+    let live = tmp.appendingPathComponent("live")
+    let parked = tmp.appendingPathComponent("parked")
+    if (try? await backend.attach(live)) == nil {
+        print("park state           NONE -- this backend re-prefills")
         print("GATE FAIL")
         exit(1)
     }
-    await backend.reset()
+    let t0 = Date()
+    let want = try await backend.extend(ids)
+    let cooked = Date().timeIntervalSince(t0)
+    try await backend.mark()
+    try await backend.park(to: parked, meta: Data())
+    let bytes = ChatSession.allocated(parked)
+    err(String(format: "[park] %d ids cooked in %.2fs -> %d KiB on disk\n",
+               ids.count, cooked, bytes / 1024))
     let t1 = Date()
-    try await backend.loadState(try await backend.deserializeState(bytes))
+    _ = try await backend.resume(from: parked)
     let restored = Date().timeIntervalSince(t1)
     // The engine predicts from the state alone, so the SAME token proves the
     // whole KV came back, not merely the position counter.
     let got = try await backend.decode(want)
     let again = try await backend.decode(got)
-    await backend.reset()
+    try await backend.attach(live)
     _ = try await backend.extend(ids)
     let ref = try await backend.decode(want)
     let ref2 = try await backend.decode(ref)
@@ -1224,6 +1228,7 @@ private func gemmaEyes(_ chat: GemmaChat, _ gpu: Gemma4MetalEngine?)
         + (again == ref2 ? "MATCH" : "DIFFER"))
     print(got == ref && again == ref2 && restored < cooked / 4
           ? "GATE PASS" : "GATE FAIL")
+    try? FileManager.default.removeItem(at: tmp)
 }
 
 // Root mean square, the size a cosine deliberately divides away.

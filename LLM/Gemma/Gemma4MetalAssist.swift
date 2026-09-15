@@ -157,7 +157,7 @@ final class Gemma4MetalAssist {
                     base: base, pos: pos)
         let lo = isFull ? 0 : max(0, pos - cfg.slidingWindow + 1)
         f.attnPaged(q: bQ, kAddr: pool.kAddr, vAddr: pool.vAddr,
-                    pages: pool.residentPages, gate: bGateNull,
+                    pages: pool.pages(rows: lo, pos), gate: bGateNull,
                     out: bAttnOut, hd: hd, nH: w.nHead, nKV: nKV,
                     T: pos + 1, kvDim: hd * nKV, P: pool.P, scale: 1,
                     gated: 0, lo: lo)

@@ -7,8 +7,10 @@ public enum Whimsical {
              downloading
         case listening, mulling
         case heard
+        case remembering
     }
 
+    static let remembering = load("remembering").shuffled()
     static let reasoning = load("reasoning").shuffled()
     static let prefill = load("prefill").shuffled()
     static let documents = load("documents").shuffled()
@@ -31,18 +33,15 @@ public enum Whimsical {
         case .listening: result = listening
         case .mulling: result = mulling
         case .heard: result = heard
+        case .remembering: result = remembering
         }
         return result
     }
 
     private static func load(_ name: String) -> [String] {
-        let url = Bundle.main.url(forResource: name, withExtension: "txt")
-        let text = url.flatMap { u in
-            try? String(contentsOf: u, encoding: .utf8)
-        }
         var seen: Set<String> = []
         var out: [String] = []
-        for line in (text ?? "").split(whereSeparator: \.isNewline) {
+        for line in Texts.text(name).split(whereSeparator: \.isNewline) {
             let phrase = line.trimmingCharacters(in: .whitespaces)
             if !phrase.isEmpty, seen.insert(phrase).inserted {
                 out.append(phrase)

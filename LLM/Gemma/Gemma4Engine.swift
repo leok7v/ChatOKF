@@ -162,34 +162,6 @@ public final class Gemma4Engine {
         return out
     }
 
-    public func serialize(_ b: Bookmark) -> Data {
-        var out = Data()
-        StateBytes.putHeader(&out)
-        StateBytes.putInt(&out, b.pos)
-        StateBytes.putKeyed(&out, b.kv) { out, _, s in
-            StateBytes.putInt(&out, s.first)
-            StateBytes.putInt(&out, s.k.count)
-            for row in s.k { StateBytes.putFloats(&out, row) }
-            for row in s.v { StateBytes.putFloats(&out, row) }
-        }
-        return out
-    }
-
-    public func deserialize(_ data: Data) -> Bookmark? {
-        StateBytes.read(data) { r in
-            let pos = r.int()
-            let kv = StateBytes.keyed(&r) { r -> GemmaKV.Snapshot in
-                let first = r.int()
-                let rows = r.int()
-                var k: [[Float]] = [], v: [[Float]] = []
-                for _ in 0..<rows { k.append(r.span().array) }
-                for _ in 0..<rows { v.append(r.span().array) }
-                return GemmaKV.Snapshot(k: k, v: v, first: first)
-            }
-            return Bookmark(pos: pos, kv: kv)
-        }
-    }
-
     public struct Bookmark: @unchecked Sendable {
         let pos: Int
         let kv: [Int: GemmaKV.Snapshot]

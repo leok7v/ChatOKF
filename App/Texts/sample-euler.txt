@@ -1,0 +1,1 @@
+Using Euler's formula e^(ix) = cos(x) + i*sin(x) and your calculator, explore: e^i (one radian around the unit circle), Euler's identity e^(i*pi) + 1 = 0, i^i, sqrt(i), and ln(-1). Compute each and explain briefly what it means geometrically.

@@ -211,6 +211,7 @@ public enum MetalGolden {
         for hd in [256, 512] {
             let nH = 2, nKV = 1, T = 40, P = 8
             let pool = MetalKVPool(device: ctx.device, P: P, kvDim: hd * nKV)
+            try pool.attachTemp()
             pool.appendBatch(T)
             let src = fill(2 * T * hd, seed: 40)
             for t in 0..<T {

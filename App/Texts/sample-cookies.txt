@@ -1,0 +1,1 @@
+Bakers weigh every ingredient as a percentage of the flour weight. In my cookie recipe, butter is 65% of the flour. I have 350 grams of flour. Use the calculator to find how many grams of butter I need.

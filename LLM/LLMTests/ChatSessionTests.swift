@@ -19,6 +19,15 @@ private final class MockBackend: AgentBackend, @unchecked Sendable {
     // When set, the next extend throws EngineError.stopped once (mid-prefill
     // Stop), so a test can exercise the turn rollback.
     var stopNextExtend = false
+    var stopBetweenChunks = false
+    var stopOnExtendCall = 0
+    private(set) var extendCalls = 0
+
+    func shouldStop() -> Bool {
+        let out = stopBetweenChunks
+        stopBetweenChunks = false
+        return out
+    }
 
     init(scripts: [[Int32]], vocab: [Int32: [UInt8]], cycle: Bool = false) {
         self.scripts = scripts
@@ -55,7 +64,8 @@ private final class MockBackend: AgentBackend, @unchecked Sendable {
     }
 
     func extend(_ ids: [Int32]) async throws -> Int32 {
-        if stopNextExtend {
+        extendCalls += 1
+        if stopNextExtend || extendCalls == stopOnExtendCall {
             stopNextExtend = false
             throw EngineError.stopped
         }
@@ -72,11 +82,14 @@ private final class MockBackend: AgentBackend, @unchecked Sendable {
 
     func mark() async throws { savedMark = pos }
 
+    private(set) var lastRewindTo = -1
+
     func rewind() async throws {
         rewinds += 1
         round += 1
         cursor = 1
         pos = savedMark
+        lastRewindTo = pos
         freshTurn = false
     }
 
@@ -88,13 +101,13 @@ private final class MockBackend: AgentBackend, @unchecked Sendable {
         return out
     }
 
-    struct State: BackendState { let pos: Int; let mark: Int }
+    struct State: BackendState { let pos: Int }
     func saveState() async throws -> any BackendState {
         freshTurn = true
-        return State(pos: pos, mark: savedMark)
+        return State(pos: pos)
     }
     func loadState(_ state: any BackendState) async throws {
-        if let s = state as? State { pos = s.pos; savedMark = s.mark }
+        if let s = state as? State { pos = s.pos }
     }
 }
 
@@ -254,20 +267,38 @@ private final class TapeBackend: AgentBackend, @unchecked Sendable {
         }
     }
 
-    // Byte state for the precook tests: the tape + mark round-trip
-    // losslessly, the offline stand-in for Engine.serialize/deserialize.
     private struct Blob: Codable { let tape: [Int32]; let marked: Int }
-    func serializeState(_ state: any BackendState) async -> Data {
-        var out = Data()
-        if let s = state as? State {
-            out = (try? JSONBytes.reproducible(
-                Blob(tape: s.tape, marked: s.marked))) ?? Data()
-        }
-        return out
+
+    func attach(_ dir: URL) async throws {}
+
+    private func write(_ dir: URL, _ meta: Data) throws {
+        try FileManager.default.createDirectory(
+            at: dir, withIntermediateDirectories: true)
+        try JSONBytes.reproducible(Blob(tape: tape, marked: marked))
+            .write(to: dir.appendingPathComponent("state.bin"))
+        try meta.write(to: dir.appendingPathComponent("meta.json"))
     }
-    func deserializeState(_ data: Data) async throws -> any BackendState {
-        let b = try JSONDecoder().decode(Blob.self, from: data)
-        return State(tape: b.tape, marked: b.marked)
+
+    func park(to dir: URL, meta: Data) async throws {
+        freshTurn = true
+        try write(dir, meta)
+    }
+
+    func precook(to cooked: URL, meta: Data) async throws {
+        freshTurn = true
+        try write(cooked, meta)
+    }
+
+    func resume(from dir: URL) async throws -> Data {
+        let b = try JSONDecoder().decode(Blob.self, from: Data(
+            contentsOf: dir.appendingPathComponent("state.bin")))
+        tape = b.tape
+        marked = b.marked
+        return try Data(contentsOf: dir.appendingPathComponent("meta.json"))
+    }
+
+    func prime(from cooked: URL, into live: URL) async throws -> Data {
+        try await resume(from: cooked)
     }
 }
 
@@ -781,6 +812,8 @@ final class ChatSessionTests: XCTestCase {
             .map { sha in base.appendingPathComponent(sha)
                 .appendingPathComponent("chat_template.jinja") }
             .first { url in fm.fileExists(atPath: url.path) }
+            ?? TestWeights.clone("Qwen/Qwen3.5-0.8B", "chat_template.jinja")
+                .map { path in URL(fileURLWithPath: path) }
         return try tmplURL.map { url in
             try String(contentsOf: url, encoding: .utf8)
         }
@@ -933,6 +966,7 @@ final class ChatSessionTests: XCTestCase {
             vocabSize: 256)
         _ = await drain(session.reply("A first"))     // conversation A
         let ctxA = try await session.park()
+        let endA = await backend.position
         await session.reset()                          // conversation B
         _ = await drain(session.reply("B first"))
         let rewindsBefore = backend.rewinds
@@ -940,6 +974,8 @@ final class ChatSessionTests: XCTestCase {
         _ = await drain(session.reply("A second"))     // must rewind into A
         XCTAssertGreaterThan(backend.rewinds, rewindsBefore,
             "resumed A did not continue its conversation")
+        XCTAssertEqual(backend.lastRewindTo, endA,
+            "the turn after a resume rewound to B's mark, not A's state")
     }
 
     // A <think>...</think> reply routes reasoning to the onReasoning callback
@@ -994,23 +1030,28 @@ final class ChatSessionTests: XCTestCase {
         var text: String { lock.lock(); defer { lock.unlock() }; return acc }
     }
 
-    // Precooked-prompt cache: save a conversation to a file with a content
+    private func stateDir(_ tag: String) -> URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(tag)_\(UUID().uuidString)")
+    }
+
     func testSaveLoadContextStamped() async throws {
         let fm = FileManager.default
-        let url = fm.temporaryDirectory
-            .appendingPathComponent("ctx_\(UUID().uuidString).bin")
-        let saver = MockBackend(scripts: [[1]], vocab: vocab([(1, "a-one")]))
+        let url = stateDir("ctx")
+        let saver = TapeBackend(scripts: [[1001]],
+                                vocab: vocab([(1001, "a-one")]))
         let s1 = ChatSession(backend: saver, template: template,
                              system: "You are a bot.", vocabSize: 256)
         _ = await drain(s1.reply("hello"))
-        try await s1.saveContext(to: url, stamp: "v1")
+        try await s1.park(to: url, stamp: "v1")
 
-        let loader = MockBackend(scripts: [[2]], vocab: vocab([(2, "next")]))
+        let loader = TapeBackend(scripts: [[1002]],
+                                 vocab: vocab([(1002, "next")]))
         let s2 = ChatSession(backend: loader, template: template,
                              system: "You are a bot.", vocabSize: 256)
-        let hit = try await s2.loadContext(from: url, stamp: "v1")
+        let hit = try await s2.resume(from: url, stamp: "v1")
         XCTAssertTrue(hit, "matching stamp did not load")
-        let miss = try await s2.loadContext(from: url, stamp: "v2")
+        let miss = try await s2.resume(from: url, stamp: "v2")
         XCTAssertFalse(miss, "changed stamp loaded a stale context")
 
         let before = loader.rewinds
@@ -1020,10 +1061,124 @@ final class ChatSessionTests: XCTestCase {
         try? fm.removeItem(at: url)
     }
 
+    func testStopDuringADocumentKeepsWhatWasReadAndAnswers() async throws {
+        let backend = MockBackend(scripts: [[1]],
+                                  vocab: vocab([(1, "Read it.")]))
+        let session = ChatSession(
+            backend: backend, template: template, system: "You are a bot.",
+            vocabSize: 256)
+        let doc = String(repeating: "x", count: 3000)
+        let prompt = "paper.txt:\n```\n" + doc + "\n```\n\nSummarize it."
+        backend.stopBetweenChunks = true
+        let answer = await drain(session.reply(prompt, stoppable: doc))
+        XCTAssertEqual(answer, "Read it.")
+        let outcome = await session.turnOutcome
+        XCTAssertEqual(outcome, .answered, "a Stop inside a document is "
+                       + "not a rollback")
+        let fraction = await session.lastMetrics.readFraction
+        XCTAssertGreaterThan(fraction, 0.2)
+        XCTAssertLessThan(fraction, 0.5)
+        XCTAssertLessThan(backend.extendedTokens, 2000,
+                          "the unread part of the document was laid")
+        let committed = await session.committedCount
+        XCTAssertGreaterThan(committed, ChatSession.prefillChunk,
+                             "the read part and the tail are committed")
+        let inside = MockBackend(scripts: [[1]],
+                                 vocab: vocab([(1, "Read it.")]))
+        let engineCut = ChatSession(
+            backend: inside, template: template, system: "You are a bot.",
+            vocabSize: 256)
+        inside.stopOnExtendCall = 2
+        let answered = await drain(engineCut.reply(prompt, stoppable: doc))
+        XCTAssertEqual(answered, "Read it.", "a stop the engine raises "
+                       + "inside a chunk cuts there and answers")
+        let insideOutcome = await engineCut.turnOutcome
+        XCTAssertEqual(insideOutcome, .answered)
+        let cancelled = MockBackend(scripts: [[1]],
+                                    vocab: vocab([(1, "Read it.")]))
+        let plain = ChatSession(
+            backend: cancelled, template: template, system: "You are a bot.",
+            vocabSize: 256)
+        cancelled.stopBetweenChunks = true
+        _ = await drain(plain.reply(prompt))
+        let rolled = await plain.turnOutcome
+        XCTAssertEqual(rolled, .stopped, "with no stoppable span a Stop "
+                       + "mid-prefill still cancels")
+    }
+
+    func testMemoryFloorCutsADocumentReadAndAnswers() async throws {
+        let backend = MockBackend(scripts: [[1]],
+                                  vocab: vocab([(1, "Read it.")]))
+        let session = ChatSession(
+            backend: backend, template: template, system: "You are a bot.",
+            vocabSize: 256, readGuard: { "12 MB left" })
+        let doc = String(repeating: "x", count: 3000)
+        let prompt = "paper.txt:\n```\n" + doc + "\n```\n\nSummarize it."
+        let answer = await drain(session.reply(prompt, stoppable: doc))
+        XCTAssertEqual(answer, "Read it.")
+        let outcome = await session.turnOutcome
+        XCTAssertEqual(outcome, .answered, "a starved read is not a rollback")
+        let m = await session.lastMetrics
+        XCTAssertEqual(m.readStop, "memory")
+        XCTAssertGreaterThan(m.readFraction, 0.2)
+        XCTAssertLessThan(m.readFraction, 0.5)
+        XCTAssertLessThan(backend.extendedTokens, 2000,
+                          "the read went on past the floor")
+        XCTAssertTrue(ChatSession.readingStopped(0.3, "memory")
+                        .contains("ran out of memory"))
+        XCTAssertTrue(ChatSession.readingStopped(0.3, "user")
+                        .contains("by the user"))
+        let fed = MockBackend(scripts: [[1]], vocab: vocab([(1, "Read it.")]))
+        let whole = ChatSession(
+            backend: fed, template: template, system: "You are a bot.",
+            vocabSize: 256, readGuard: { nil })
+        _ = await drain(whole.reply(prompt, stoppable: doc))
+        let full = await whole.lastMetrics
+        XCTAssertEqual(full.readStop, "")
+        XCTAssertEqual(full.readFraction, 1, "a guard that stays quiet "
+                       + "must not cut")
+    }
+
+    func testParkToFileSavesAtTheMarkAndResumes() async throws {
+        let fm = FileManager.default
+        let url = stateDir("park")
+        let saver = TapeBackend(scripts: [[1001, 1002]],
+                                vocab: vocab([(1001, "one "), (1002, "two")]))
+        let s1 = ChatSession(backend: saver, template: template,
+                             system: "You are a bot.", vocabSize: 256)
+        _ = await drain(s1.reply("hello"))
+        let answered = await saver.position
+        let rewinds = saver.rewinds
+        try await s1.park(to: url, stamp: "v1")
+        XCTAssertEqual(saver.rewinds, rewinds + 1, "park rewinds to the mark")
+        let parkedAt = await saver.position
+        XCTAssertLessThan(parkedAt, answered,
+                          "the answer is not in the parked state")
+        let saved = await s1.lastSaved
+        let committed = await s1.committedCount
+        XCTAssertEqual(saved?.tokens, committed)
+        let loader = TapeBackend(scripts: [[1003]],
+                                 vocab: vocab([(1003, "next")]))
+        let s2 = ChatSession(backend: loader, template: template,
+                             system: "You are a bot.", vocabSize: 256)
+        let hit = try await s2.resume(from: url, stamp: "v1")
+        XCTAssertTrue(hit)
+        let restored = await s2.committedCount
+        XCTAssertEqual(restored, committed)
+        let ctx = await s2.lastMetrics.ctx
+        let position = await loader.position
+        XCTAssertEqual(ctx, position)
+        let before = loader.rewinds
+        let answer = await drain(s2.reply("again"))
+        XCTAssertFalse(answer.isEmpty)
+        XCTAssertGreaterThan(loader.rewinds, before,
+                             "the resumed conversation did not continue")
+        try? fm.removeItem(at: url)
+    }
+
     // Precook + prime: cooking persists the prefilled system+tools prefix; a
     func testPrecookPrimeKVMatchesPlain() async throws {
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("precook_\(UUID().uuidString).ctx")
+        let url = stateDir("precook")
         let voc = vocab([(1001, "Hi there.")])
         let plainB = TapeBackend(scripts: [[1001]], vocab: voc)
         let plain = ChatSession(backend: plainB, template: chatml,
@@ -1041,6 +1196,7 @@ final class ChatSessionTests: XCTestCase {
         let primed = ChatSession(backend: primeB, template: chatml,
                                  system: "You are a bot.",
                                  systemTail: "\nNow: T2", vocabSize: 256)
+        try await primed.attach(live: stateDir("live"))
         let hit = await primed.prime(from: url)
         XCTAssertTrue(hit, "stable prefix did not prime")
         _ = await drain(primed.reply("hello"))
@@ -1123,8 +1279,7 @@ final class ChatSessionTests: XCTestCase {
         let runner = SafeToolRunner(slugsPath: nil, wikipedia: false,
                                     network: false)
         for effort in ["low", "xhigh", "medium"] {
-            let url = FileManager.default.temporaryDirectory
-                .appendingPathComponent("precook_\(UUID().uuidString).ctx")
+            let url = stateDir("precook")
             let cook = ChatSession(
                 backend: TapeBackend(scripts: [[1001]], vocab: voc),
                 template: effortTemplate, system: "You are a bot.",
@@ -1138,6 +1293,7 @@ final class ChatSessionTests: XCTestCase {
                 template: effortTemplate, system: "You are a bot.",
                 systemTail: "\nNow: T2", vocabSize: 256,
                 enableThinking: true, reasoningEffort: effort, runner: runner)
+            try await primed.attach(live: stateDir("live"))
             let hit = await primed.prime(from: url)
             XCTAssertTrue(hit, "effort=\(effort) did not prime")
             try? FileManager.default.removeItem(at: url)
@@ -1172,8 +1328,7 @@ final class ChatSessionTests: XCTestCase {
         let voc = vocab([(1001, "ok")])
         var bytes: [String: Int] = [:]
         for effort in ["low", "xhigh"] {
-            let url = FileManager.default.temporaryDirectory
-                .appendingPathComponent("precook_\(UUID().uuidString).ctx")
+            let url = stateDir("precook")
             let cook = ChatSession(
                 backend: TapeBackend(scripts: [[1001]], vocab: voc),
                 template: effortTemplate, system: "You are a bot.",
@@ -1184,9 +1339,11 @@ final class ChatSessionTests: XCTestCase {
                 template: effortTemplate, system: "You are a bot.",
                 vocabSize: 256, enableThinking: true,
                 reasoningEffort: effort == "low" ? "xhigh" : "low")
+            try await other.attach(live: stateDir("live"))
             let crossed = await other.prime(from: url)
             XCTAssertFalse(crossed, "\(effort) primed the other level's file")
-            bytes[effort] = (try? Data(contentsOf: url))?.count ?? 0
+            bytes[effort] = (try? Data(contentsOf: url
+                .appendingPathComponent("state.bin")))?.count ?? 0
             try? FileManager.default.removeItem(at: url)
         }
         XCTAssertNotEqual(bytes["low"], bytes["xhigh"],
@@ -1196,8 +1353,7 @@ final class ChatSessionTests: XCTestCase {
     // A changed system prompt misses the stamp: prime returns false and the
     // session is untouched (a plain fresh first turn follows).
     func testPrimeMissesOnChangedPrompt() async throws {
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("precook_\(UUID().uuidString).ctx")
+        let url = stateDir("precook")
         let voc = vocab([(1001, "ok")])
         let cook = ChatSession(
             backend: TapeBackend(scripts: [[1001]], vocab: voc),
@@ -1206,6 +1362,7 @@ final class ChatSessionTests: XCTestCase {
         let other = ChatSession(
             backend: TapeBackend(scripts: [[1001]], vocab: voc),
             template: chatml, system: "You are a DOG.", vocabSize: 256)
+        try await other.attach(live: stateDir("live"))
         let hit = await other.prime(from: url)
         XCTAssertFalse(hit, "a changed prompt must miss the stamp")
         try? FileManager.default.removeItem(at: url)
@@ -1213,8 +1370,7 @@ final class ChatSessionTests: XCTestCase {
 
     // A backend whose byte serialization is a no-op (MockBackend keeps the
     func testPrimeRejectsStatelessBackend() async throws {
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("precook_\(UUID().uuidString).ctx")
+        let url = stateDir("precook")
         let voc = vocab([(1, "ok")])
         let cook = ChatSession(
             backend: MockBackend(scripts: [[1]], vocab: voc),
@@ -1230,8 +1386,7 @@ final class ChatSessionTests: XCTestCase {
 
     // A send DURING the cook must wait it out, not interleave: the cook's
     func testSendDuringCookWaitsForGate() async throws {
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("precook_\(UUID().uuidString).ctx")
+        let url = stateDir("precook")
         let voc = vocab([(1001, "ok")])
         let plainB = TapeBackend(scripts: [[1001]], vocab: voc)
         let plain = ChatSession(backend: plainB, template: chatml,
@@ -1244,6 +1399,7 @@ final class ChatSessionTests: XCTestCase {
         raceB.extendDelayMs = 50
         let raced = ChatSession(backend: raceB, template: chatml,
                                 system: "You are a bot.", vocabSize: 256)
+        try await raced.attach(live: stateDir("live"))
         await raced.primeOrCook(at: url)          // cook path: no file yet
         let answer = await drain(raced.reply("hello"))
         XCTAssertEqual(answer, "ok")
@@ -1258,8 +1414,7 @@ final class ChatSessionTests: XCTestCase {
         guard let tmpl = try realQwenTemplate() else {
             throw XCTSkip("no Qwen3.5-0.8B set on disk")
         }
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("precook_\(UUID().uuidString).ctx")
+        let url = stateDir("precook")
         let voc = vocab([(1001, "Four.")])
         let plainB = TapeBackend(scripts: [[1001]], vocab: voc)
         let plain = ChatSession(backend: plainB, template: tmpl,
@@ -1277,6 +1432,7 @@ final class ChatSessionTests: XCTestCase {
         let primed = ChatSession(backend: primeB, template: tmpl,
                                  system: "You are a bot.",
                                  systemTail: "\nNow: T2", vocabSize: 256)
+        try await primed.attach(live: stateDir("live"))
         let hit = await primed.prime(from: url)
         XCTAssertTrue(hit, "real-template prefix did not prime")
         _ = await drain(primed.reply("2+2?"))

@@ -26,12 +26,17 @@ public struct DocRef: Hashable, Sendable {
     public let bytes: Int
     public let short: Bool
     public let total: Int
+    public let read: Int
+    public let cut: String
 
-    public init(url: URL, bytes: Int, short: Bool, total: Int) {
+    public init(url: URL, bytes: Int, short: Bool, total: Int,
+                read: Int? = nil, cut: String = "") {
         self.url = url
         self.bytes = bytes
         self.short = short
         self.total = total
+        self.read = read ?? bytes
+        self.cut = cut
     }
 }
 

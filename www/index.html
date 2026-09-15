@@ -850,6 +850,16 @@ footer {
             recovered from the trash for thirty days.</p>
           </div>
         </li>
+        <li>
+          <span class="no">07</span>
+          <div>
+            <h3>Ask it to remember</h3>
+            <p>Tell it to remember something and it writes a note, and
+            the chat says what it wrote. From then on every question is
+            checked against your notes first, whichever model is
+            answering.</p>
+          </div>
+        </li>
       </ol>
     </div>
   </section>
@@ -965,8 +975,36 @@ footer {
     </div>
   </section>
 
+  <section class="sec" id="remember">
+    <div class="tag">05<b>What it keeps</b></div>
+    <div>
+      <h2>Notes that outlive the model that wrote them.</h2>
+      <p>Ask ChatOKF to remember something and it writes a short note in
+      Google's <a href="https://github.com/GoogleCloudPlatform/open-knowledge-format/blob/main/SPEC.md">Open
+      Knowledge Format</a>: a plain text file on your device, with a
+      title, a one-line description and links to the notes it relates
+      to. Nothing is kept behind your back: the conversation names each
+      note as it lands, and the Memories tab in the sidebar lists them
+      all, to read or to delete.</p>
+      <p>Before answering, the app looks through your notes for the ones
+      that fit the question and reads them in silently. The model can
+      also search and open them itself, and you see each of those steps
+      in the conversation, the same way you see a web search.</p>
+      <p>The notes are text, and the index over them is built by a small
+      encoder that is not the chat model. So what one model learns, the
+      next one knows. On our Mac, Gemma 4 12B read a 53-page paper and
+      split it into six notes. A fresh conversation on Qwen3.5 9B, asked
+      what we remember about the paper's subject, found three of them on
+      its own, opened the one it needed and answered from it. Change the
+      model whenever you like; the memory stays with you.</p>
+      <p class="dim">One switch controls all of it, Total Recall, under
+      Intelligence in Settings. Off means the notes are neither read nor
+      written, and none are deleted.</p>
+    </div>
+  </section>
+
   <section class="sec" id="speed">
-    <div class="tag">05<b>How fast</b></div>
+    <div class="tag">06<b>How fast</b></div>
     <div>
       <h2>Measured against llama.cpp on the same machine.</h2>
       <p>Tokens per second on a MacBook Air (M3, 24 GB): reading a
@@ -996,6 +1034,7 @@ footer {
         <tr><th>Device</th><th>Model</th><th>Read</th><th>Write</th><th><span class="long">Write, drafted</span><span class="short">Drafted</span></th></tr>
         <tr><td>iPad mini A17 Pro</td><td>Gemma 4 E4B</td><td>123</td><td>13.8</td><td>20.6</td></tr>
         <tr><td>iPhone 15 Pro</td><td>Gemma 4 E4B</td><td>134</td><td>13.7</td><td>20.9</td></tr>
+        <tr><td>iPhone 16e</td><td>Gemma 4 E4B</td><td>100</td><td>12.8</td><td>17.0</td></tr>
         <tr><td>iPhone 12 mini</td><td>Gemma 4 E2B</td><td>93</td><td>16.2</td><td></td></tr>
       </table>
       </div>

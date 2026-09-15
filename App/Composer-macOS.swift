@@ -20,8 +20,7 @@ struct AttachButton: View {
                 .frame(width: 22, height: 22)
         }
         .buttonStyle(.plain)
-        .foregroundStyle(model.hasAttachments ? Color.accentColor
-                                              : Color.secondary)
+        .foregroundStyle(Color.accentColor)
         .disabled(model.busy)
         .help(model.attachHelp)
         .fileImporter(isPresented: $showImporter,

@@ -2,6 +2,7 @@ import Chat
 import LLM
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
 
 final class AppDelegate: NSObject, UIApplicationDelegate {
     nonisolated(unsafe) static var completion: (() -> Void)?
@@ -47,6 +48,15 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
 
 @MainActor func quitApp() { exit(0) }
 
-func setClipboard(_ s: String) { UIPasteboard.general.string = s }
+func setClipboard(_ plain: String, html: String? = nil) {
+    if let html {
+        UIPasteboard.general.items = [[
+            UTType.utf8PlainText.identifier: plain,
+            UTType.html.identifier: html,
+        ]]
+    } else {
+        UIPasteboard.general.string = plain
+    }
+}
 
 var isOS: Bool { return true }

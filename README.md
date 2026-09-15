@@ -122,6 +122,37 @@ than reconstructing it per request:
   system plus tools prefix is precooked to disk once and restored at launch,
   skipping most of the time-to-first-token.
 
+## Memories, shared across models
+
+What you ask the app to remember is kept as plain notes on the device, in
+Google's [Open Knowledge Format](https://github.com/GoogleCloudPlatform/open-knowledge-format/blob/main/SPEC.md):
+one Markdown file per note with a short frontmatter (id, title, a
+one-sentence description, tags, links), in a `memories.noindex` folder
+under the app's Application Support. Nothing is hidden: a note is kept as
+it is written, and the transcript shows one line naming it, `Remembered:
+<title>`. The Memories tab in the sidebar lists every note to read or to
+delete, grouped by area, and a delete erases the note and collapses every
+link that named it down to the words it carried, so the store is never
+left with a dangling reference; a deleted note waits thirty days in its
+own trash. The model sees five tools, `memory_search`, `memory_read`,
+`memory_create`, `memory_update` and `memory_forget`, and each call shows
+in the transcript. At the start of every turn the question is embedded
+with multilingual-e5-small, the dense pass is fused with a verbatim pass
+by reciprocal rank, and the notes that fit are read into the context
+silently. A note that restates one already on file is refused, so the
+store does not fill with duplicates. One switch governs all of it:
+Settings, Intelligence, Total Recall.
+
+The notes are text and the index is built by an encoder that is not the
+chat model, so a memory belongs to the store, not to the model that wrote
+it. Measured on 2026-09-13: gemma-4-12B-MTP read a 53-page paper and, on
+request, split it into six notes. A new conversation on
+Qwen3.5-9B was asked what we remember about the Levin research program;
+it recalled three of those notes silently, then called `memory_search`
+and `memory_read` on `science/levin_research_program` and answered from
+it. Switching models keeps everything the app has learned: a model is a
+reader, the notes are the knowledge.
+
 ## Layout
 
 - `LLM/` - the engine: `Base`, `Qwen`, `Gemma`, `Quantize`, `Slugs`, `TTS`

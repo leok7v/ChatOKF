@@ -416,6 +416,11 @@ func benchIds(_ encode: (String) -> [Int32]) -> [Int32] {
         maxReasoning: maxReasoning, softReasoningCap: softReasoning,
         overthink: overthink, seed: seedVal, runner: toolRunner)
     await session.setSuppressReasoning(suppressReasoning)
+    let live = FileManager.default.temporaryDirectory
+        .appendingPathComponent("chatokf-live-\(UUID().uuidString)")
+    if (try? await session.attach(live: live)) == nil {
+        err("[state] this backend keeps no state on disk\n")
+    }
     if let pkVal { try await primeOrCook(session, pkVal) }
     err("[chat] thinking \(enableThinking), template reasons "
         + "\(templateSupportsThinking(loaded.template)), soft tokens "

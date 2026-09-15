@@ -964,11 +964,9 @@ struct ContentView: View {
                     tailAt: peek.anchor.minX + 24 - (geo.size.width - width) / 2,
                     tailOnBottom: !below)
                 ZStack {
-                    if isOS {
-                        Color.black.opacity(0.001)
-                            .contentShape(Rectangle())
-                            .onTapGesture { peek.close() }
-                    }
+                    Color.black.opacity(0.001)
+                        .contentShape(Rectangle())
+                        .onTapGesture { peek.close() }
                     ToolRoundDetail(round: round, size: peekTextSize,
                                     k: peekScale)
                         .padding(below ? .top : .bottom, Callout.tailHeight)
@@ -978,9 +976,6 @@ struct ContentView: View {
                         .onGeometryChange(for: CGSize.self, of: { g in
                             g.size
                         }, action: { s in calloutSize = s })
-                        .onHover { inside in
-                            if inside { peek.keep() } else { peek.fade() }
-                        }
                         .opacity(calloutSize.height > 0 ? 1 : 0)
                         .position(x: geo.size.width / 2,
                                   y: clampedCalloutY(below, geo.size.height))
@@ -1077,6 +1072,10 @@ struct ContentView: View {
                 // round raises `prefilling` again and would blink it away.
                 if let answer = answerText(m) {
                     answerBubble(m, answer)
+                    if !m.fromUser, !isLive(m) {
+                        AnswerActions(text: answer,
+                                      title: model.transcriptTitle)
+                    }
                 } else if !m.fromUser, isPrefilling(m) {
                     prefillWhimsical
                 } else if m.loopStopped {
@@ -1443,14 +1442,12 @@ private let transcriptSpace = "transcript"
     private(set) var messageId: UUID?
     private(set) var roundId = 0
     private(set) var anchor: CGRect = .zero
-    @ObservationIgnored private var dismiss: Task<Void, Never>?
 
     func showing(_ message: UUID, _ round: Int) -> Bool {
         messageId == message && roundId == round
     }
 
     func show(_ message: UUID, _ round: Int, at frame: CGRect) {
-        dismiss?.cancel()
         messageId = message
         roundId = round
         anchor = frame
@@ -1468,19 +1465,8 @@ private let transcriptSpace = "transcript"
         if showing(message, round) { anchor = frame }
     }
 
-    func keep() { dismiss?.cancel() }
-
     func close() {
-        dismiss?.cancel()
         messageId = nil
-    }
-
-    func fade() {
-        dismiss?.cancel()
-        dismiss = Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(300))
-            if !Task.isCancelled { messageId = nil }
-        }
     }
 
 }
@@ -1560,14 +1546,6 @@ private struct ToolCallStrip: View {
             frames[round.id] = frame
             peek.track(messageId, round.id, at: frame)
         })
-        .onHover { inside in
-            if inside {
-                peek.show(messageId, round.id,
-                          at: frames[round.id] ?? .zero)
-            } else {
-                peek.fade()
-            }
-        }
         .onTapGesture {
             peek.toggle(messageId, round.id, at: frames[round.id] ?? .zero)
         }

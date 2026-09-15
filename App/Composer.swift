@@ -57,6 +57,9 @@ struct Composer: View {
             ForEach(model.attachedImages) { img in imageChip(img) }
             ForEach(model.attachedClips) { clip in clipChip(clip) }
             ForEach(model.attachedDocs) { doc in docChip(doc) }
+            ForEach(model.convertingNames, id: \.self) { name in
+                convertingChip(name)
+            }
             if model.heldSend != nil { heldNotes }
             if !model.remembered.isEmpty { rememberedNotes }
             if let warning = model.attachmentWarning { warningBanner(warning) }
@@ -210,11 +213,15 @@ struct Composer: View {
         .accessibilityLabel(label)
     }
 
+    private var controlGap: CGFloat { isOS ? slotSize * 1.6 : 8 }
+
     private var standardControls: some View {
         HStack(spacing: 8) {
-            AttachButton(model: model)
-            accessButton
-            thinkingButton
+            HStack(spacing: controlGap) {
+                AttachButton(model: model)
+                thinkingButton
+                accessButton
+            }
             Spacer()
             if model.speech.available { speakerButton }
             micButton
@@ -238,16 +245,16 @@ struct Composer: View {
     }
 
     private var micButton: some View {
-        Button(action: model.voice) {
-            Image(systemName: model.listening
-                  ? "microphone.fill" : "microphone")
-                .foregroundStyle(model.listening ? Color.orange : .secondary)
+        let on = model.listening || model.voiceReady || model.speech.engaged
+        return Button(action: model.toggleMic) {
+            Image(systemName: on ? "microphone.fill" : "microphone")
+                .foregroundStyle(on ? Color.orange : .secondary)
                 .frame(width: slotSize, height: slotSize)
                 .symbolEffect(.pulse, isActive: model.listening)
         }
         .buttonStyle(.plain)
         .disabled(!model.canAttachAudio || (model.busy && !model.listening))
-        .help(model.listening ? "Stop and send" : "Speak")
+        .help(on ? "Turn the microphone off" : "Speak")
     }
 
     private var accessButton: some View {
@@ -387,35 +394,16 @@ struct Composer: View {
     }
 
     private var rememberedNotes: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 6) {
-                Image(systemName: "brain").frame(width: 24, height: 24)
-                Text("Remembered from this chat, as drafts until you keep "
-                    + "them.")
-                    .lineLimit(2)
-                Spacer()
-            }
-            .foregroundStyle(.tertiary)
-            ForEach(model.remembered) { note in rememberedNote(note) }
+        HStack(spacing: 6) {
+            Image(systemName: "brain").frame(width: 24, height: 24)
+            Text("Remembered: " + model.remembered.map { note in note.title }
+                .joined(separator: ", "))
+                .lineLimit(2)
+                .truncationMode(.tail)
+            Spacer()
         }
         .appFont(.caption)
         .foregroundStyle(.secondary)
-    }
-
-    private func rememberedNote(_ note: Memories.Remembered) -> some View {
-        HStack(spacing: 6) {
-            Image(systemName: "square.and.pencil")
-                .frame(width: 24, height: 24)
-            Text(note.title).lineLimit(1).truncationMode(.middle)
-            Text(note.id).foregroundStyle(.tertiary)
-            Spacer()
-            Button("Keep") { model.keepRemembered(note.id) }
-                .buttonStyle(.plain)
-                .foregroundStyle(Color.accentColor)
-            Button("Forget") { model.forgetRemembered(note.id) }
-                .buttonStyle(.plain)
-                .foregroundStyle(.red)
-        }
     }
 
     private var answerLabel: String {
@@ -450,6 +438,17 @@ struct Composer: View {
     private static func readCost(_ seconds: Double) -> String {
         seconds < 1.5 ? "about a second"
                       : "about \(Int(seconds.rounded())) seconds"
+    }
+
+    private func convertingChip(_ name: String) -> some View {
+        HStack(spacing: 6) {
+            ProgressView().controlSize(.small).frame(width: 24, height: 24)
+            Text(name).lineLimit(1).truncationMode(.middle)
+            Text("reading the file").foregroundStyle(.tertiary)
+            Spacer()
+        }
+        .appFont(.caption)
+        .foregroundStyle(.secondary)
     }
 
     private func docChip(_ doc: Doc) -> some View {
@@ -524,11 +523,15 @@ struct Composer: View {
 
     private var noteText: String {
         let text: String
-        if let progress = model.prefillProgress {
+        if model.stopAsked && model.prefilling {
+            text = "Answering from what was read\u{2026}"
+        } else if model.busy, !model.listening, !model.speech.engaged,
+                  model.session.metaTaskRunning {
+            text = model.thinkStatus + "\u{2026}"
+        } else if let progress = model.prefillProgress {
             text = "Reading \(progress.done.formatted(.number)) of "
                 + "\(progress.total.formatted(.number)) tokens, "
                 + Composer.timeLeft(progress.secondsLeft)
-                + ". Stop cancels."
         } else if model.listening {
             text = listeningNote
         } else if model.speech.paused {

@@ -71,15 +71,122 @@ public final class QwenMetalEngine {
         bFfnGate = ctx.makeF32(c.nFF)
         bFfnUp = ctx.makeF32(c.nFF)
         bLogits = ctx.makeF32(c.nVocab)
+        let pages = MetalKVPool.pagesFor(model.gguf, P: pageP)
         for il in 0..<c.nLayer {
             if c.isRecurrent(il) {
                 gdnConv[il] = ctx.makeF32(c.convDim * (c.dConv - 1))
                 gdnRec[il] = ctx.makeF32(c.nVHead * c.dState * c.dState)
             } else {
-                kvPool[il] = MetalKVPool(device: ctx.device, P: pageP,
-                                         kvDim: c.headDim * c.nHeadKV)
+                let pool = MetalKVPool(device: ctx.device, P: pageP,
+                                       kvDim: c.headDim * c.nHeadKV,
+                                       capacity: pages)
+                pool.starved = { [stopSignal] in stopSignal.raise() }
+                kvPool[il] = pool
             }
         }
+    }
+
+    private var pools: [Int: MetalKVPool] {
+        var out = kvPool
+        if let d = mtp { out[-1] = d.pool }
+        return out
+    }
+
+    public func attach(_ dir: URL) throws {
+        var at = 0
+        var shift = 0
+        var slot = 0
+        var origin = 0
+        var lens: [Int: Int] = [:]
+        let header = dir.appendingPathComponent("state")
+        if let data = try? Data(contentsOf: header, options: .mappedIfSafe) {
+            let read: Void? = StateBytes.read(data) { r in
+                at = r.int()
+                shift = r.int()
+                slot = r.int()
+                for dict in [gdnConv, gdnRec] {
+                    let blocks = StateBytes.keyed(&r) { r in r.bytes() }
+                    for (il, b) in dict {
+                        if let src = blocks[il], src.count == b.length {
+                            _ = memcpy(b.contents(), src.baseAddress!, b.length)
+                        }
+                    }
+                }
+                lens = StateBytes.keyed(&r) { r in r.int() }
+                origin = r.int()
+                if let prev = bSpecPrev {
+                    r.bytes(into: prev.contents(), count: prev.length)
+                } else {
+                    _ = r.bytes()
+                }
+            }
+            if read == nil { at = 0; shift = 0; slot = 0; origin = 0; lens = [:] }
+        }
+        if at == 0 { reset() }
+        for (il, pool) in pools {
+            try pool.attach(dir.appendingPathComponent("pool.\(il)"),
+                            len: lens[il] ?? 0)
+        }
+        mtp?.adopt(origin: origin)
+        stopSignal.clear()
+        specQueue.removeAll()
+        pos = at
+        ropeShift = shift
+        recSlot = slot
+    }
+
+    public func export(_ dir: URL) throws {
+        try FileManager.default.createDirectory(
+            at: dir, withIntermediateDirectories: true)
+        for (il, pool) in pools {
+            pool.export(dir.appendingPathComponent("pool.\(il)"))
+        }
+        try header().write(to: dir.appendingPathComponent("state"),
+                           options: .atomic)
+    }
+
+    private func header() -> Data {
+        var out = Data()
+        StateBytes.putHeader(&out)
+        StateBytes.putInt(&out, pos)
+        StateBytes.putInt(&out, ropeShift)
+        StateBytes.putInt(&out, recSlot)
+        for dict in [gdnConv, gdnRec] {
+            StateBytes.putKeyed(&out, dict) { out, _, b in
+                StateBytes.putRaw(&out, b.contents(), b.length)
+            }
+        }
+        var lens: [Int: Int] = [:]
+        for (il, pool) in pools { lens[il] = pool.len }
+        StateBytes.putKeyed(&out, lens) { out, _, len in
+            StateBytes.putInt(&out, len)
+        }
+        StateBytes.putInt(&out, mtp?.origin ?? 0)
+        if let prev = bSpecPrev {
+            StateBytes.putRaw(&out, prev.contents(), prev.length)
+        } else {
+            StateBytes.putInt(&out, 0)
+        }
+        return out
+    }
+
+    public func flush(_ dir: URL) throws {
+        for (_, pool) in pools { pool.writeBack() }
+        try header().write(to: dir.appendingPathComponent("state"),
+                           options: .atomic)
+    }
+
+    public func detach() {
+        for (_, pool) in pools { pool.detach() }
+        reset()
+    }
+
+    public var stateBytes: Int {
+        let fixed = (Array(gdnConv.values) + Array(gdnRec.values))
+            .reduce(0) { sum, b in
+            sum + b.length
+        }
+        return pools.values.reduce(fixed) { sum, pool in sum + pool.liveBytes }
     }
 
     public func reset() {
@@ -601,74 +708,6 @@ public final class QwenMetalEngine {
         }
     }
 
-    public func serialize(_ b: Bookmark) -> Data {
-        var out = Data()
-        StateBytes.putInt(&out, b.pos)
-        StateBytes.putInt(&out, b.ropeShift)
-        for dict in [b.conv, b.rec] {
-            StateBytes.putKeyed(&out, dict) { out, _, v in
-                StateBytes.putFloats(&out, v)
-            }
-        }
-        StateBytes.putKeyed(&out, b.kv) { out, il, s in
-            let pool = kvPool[il]!
-            StateBytes.putInt(&out, s.len)
-            StateBytes.putFloats(&out, pool.flatten(s.kPages, len: s.len))
-            StateBytes.putFloats(&out, pool.flatten(s.vPages, len: s.len))
-        }
-        StateBytes.putInt(&out, b.specOrigin)
-        StateBytes.putFloats(&out, b.prev)
-        var rows = 0
-        var kRows: [Float] = []
-        var vRows: [Float] = []
-        if let d = mtp, let s = b.drafter {
-            rows = s.len
-            kRows = d.pool.flatten(s.kPages, len: s.len)
-            vRows = d.pool.flatten(s.vPages, len: s.len)
-        }
-        StateBytes.putInt(&out, rows)
-        StateBytes.putFloats(&out, kRows)
-        StateBytes.putFloats(&out, vRows)
-        return out
-    }
-
-    // Pages are re-chunked at this engine's pageP.
-
-    public func deserialize(_ data: Data) -> Bookmark? {
-        StateBytes.read(data, named: false) { r in
-            let pos = r.int()
-            let ropeShift = r.int()
-            let conv = StateBytes.keyed(&r) { r in r.span().array }
-            let rec = StateBytes.keyed(&r) { r in r.span().array }
-            let kv = StateBytes.keyed(&r) { r -> MetalKVPool.Snapshot in
-                let len = r.int()
-                let k = r.span()
-                let v = r.span()
-                let pool = MetalKVPool(device: ctx.device, P: pageP,
-                                       kvDim: cfg.headDim * cfg.nHeadKV)
-                pool.fill(k: k, v: v, count: len)
-                return pool.snapshot()
-            }
-            let specOrigin = r.int()
-            let prev = r.span().array
-            let len = r.int()
-            let k = r.span()
-            let v = r.span()
-            let kvDim = cfg.headDim * cfg.nHeadKV
-            var drafter: MetalKVPool.Snapshot? = nil
-            if len > 0 && k.count == len * kvDim && v.count == k.count {
-                let pool = MetalKVPool(device: ctx.device, P: pageP,
-                                       kvDim: kvDim)
-                pool.fill(k: k, v: v, count: len)
-                drafter = pool.snapshot()
-            }
-            return Bookmark(pos: pos, ropeShift: ropeShift,
-                            recSlot: recSlot, conv: conv, rec: rec, kv: kv,
-                            drafter: drafter, specOrigin: specOrigin,
-                            prev: prev)
-        }
-    }
-
     private func copyIn(_ a: [Float], _ b: MTLBuffer) {
         a.withUnsafeBytes { raw in
             _ = memcpy(b.contents(), raw.baseAddress!, raw.count)
@@ -869,6 +908,7 @@ public final class QwenMetalEngine {
         let t0 = Date()
         cb.commit()
         cb.waitUntilCompleted()
+        for (_, pool) in pools { pool.touch() }
         if let err = cb.error { fatalError("metal \(tag): \(err)") }
         if QwenMetalEngine.timing {
             let wall = Date().timeIntervalSince(t0) * 1000
@@ -1001,7 +1041,9 @@ public final class QwenMetalEngine {
             let c = cfg
             let width = drafts + 1
             specN = drafts
-            mtp = QwenMetalMTP(model, w, ctx: ctx, pageP: pageP)
+            let drafter = QwenMetalMTP(model, w, ctx: ctx, pageP: pageP)
+            drafter.pool.starved = { [stopSignal] in stopSignal.raise() }
+            mtp = drafter
             let prev = ctx.makeF32(c.nEmbd)
             memset(prev.contents(), 0, prev.length)
             bSpecPrev = prev

@@ -1,5 +1,6 @@
 import XCTest
 @testable import Chat
+@testable import ChatOKF
 @testable import LLM
 
 @MainActor final class MemoriesTests: XCTestCase {
@@ -133,15 +134,15 @@ import XCTest
             ToolArg(name: "tags", value: "garden, private"),
             ToolArg(name: "body", value: "Pinch weekly.")])
         XCTAssertTrue(made.contains("created garden/basil"), made)
-        XCTAssertTrue(made.contains("draft"), made)
+        XCTAssertFalse(made.contains("draft"), made)
         let text = try String(contentsOf: m.root.appendingPathComponent(
             "garden/basil.md"), encoding: .utf8)
-        XCTAssertTrue(text.contains("status: draft"), text)
+        XCTAssertFalse(text.contains("status: draft"), text)
         XCTAssertTrue(text.contains("generated: { by: model"), text)
         XCTAssertTrue(text.contains("tags: [garden, private]"), text)
-        XCTAssertEqual(m.takeDrafts().map { note in note.id },
+        XCTAssertEqual(m.takeNoted().map { note in note.id },
                        ["garden/basil"])
-        XCTAssertTrue(m.takeDrafts().isEmpty)
+        XCTAssertTrue(m.takeNoted().isEmpty)
         let restated = await runner.execute("memory_create", [
             ToolArg(name: "id", value: "tech/mesh-network"),
             ToolArg(name: "type", value: "Note"),
@@ -164,12 +165,9 @@ import XCTest
         try? FileManager.default.removeItem(at: m.root)
     }
 
-    func testUpdateOfAKeptNoteIsADraftAndForgetRestoresIt() async throws {
+    func testUpdateReplacesTheNoteInPlace() async throws {
         let m = try await opened()
         let path = m.root.appendingPathComponent("tech/wifi-mesh.md")
-        m.confirm("tech/wifi-mesh")
-        let kept = try String(contentsOf: path, encoding: .utf8)
-        XCTAssertTrue(kept.contains("verified: { by: human:user"), kept)
         let runner = MemoryToolRunner(inner: SafeToolRunner(), memories: m)
         let updated = await runner.execute("memory_update", [
             ToolArg(name: "id", value: "tech/wifi-mesh"),
@@ -179,17 +177,138 @@ import XCTest
             ToolArg(name: "body", value: "One per floor and one in the "
                     + "garage.")])
         XCTAssertTrue(updated.contains("updated tech/wifi-mesh"), updated)
-        var text = try String(contentsOf: path, encoding: .utf8)
-        XCTAssertTrue(text.contains("status: draft"), text)
+        let text = try String(contentsOf: path, encoding: .utf8)
+        XCTAssertFalse(text.contains("status: draft"), text)
         XCTAssertFalse(text.contains("verified:"), text)
         XCTAssertEqual(text.components(separatedBy: "generated:").count, 2)
         XCTAssertTrue(text.contains("generated: { by: model"), text)
-        XCTAssertEqual(m.takeDrafts().map { note in note.id },
+        XCTAssertTrue(text.contains("Four Deco X55 units."), text)
+        XCTAssertEqual(m.takeNoted().map { note in note.id },
                        ["tech/wifi-mesh"])
-        m.discard("tech/wifi-mesh")
-        text = try String(contentsOf: path, encoding: .utf8)
-        XCTAssertEqual(text, kept)
         XCTAssertNotNil(m.note("tech/wifi-mesh"))
+        try? FileManager.default.removeItem(at: m.root)
+    }
+}
+
+@MainActor final class MemoryTrashTests: XCTestCase {
+
+    private let source = UUID()
+
+    private func opened() async throws -> Memories {
+        guard let url = BertEmbedder.bundledMultilingual,
+              let embedder = BertEmbedder.load(ggufPath: url.path) else {
+            throw XCTSkip("no bundled e5-small.gguf")
+        }
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("memtrash-" + UUID().uuidString,
+                                    isDirectory: true)
+        let store = Store(root: root, embedder: embedder)
+        _ = try store.write(
+            id: "tech/wifi-mesh", type: "Note", title: "The mesh wifi setup",
+            description: "Three TP-Link Deco X55 units.", tags: ["tech"],
+            body: "One per floor.",
+            adding: ["sources:",
+                     "  - resource: chatokf://conversation/"
+                         + source.uuidString])
+        _ = try store.write(
+            id: "house/wiring", type: "Note", title: "The house wiring",
+            description: "Cat6 to every floor.", tags: ["house", "private"],
+            body: "The run feeds [the mesh setup](/tech/wifi-mesh.md) "
+                + "upstairs.")
+        let memories = Memories(root: root)
+        memories.enabled = true
+        await memories.awaitOpen()
+        return memories
+    }
+
+    func testTrashCollapsesTheLinkAndRestorePutsItBack() async throws {
+        let m = try await opened()
+        let wiring = m.root.appendingPathComponent("house/wiring.md")
+        XCTAssertEqual(m.list.count, 2)
+        XCTAssertEqual(m.store?.concept("house/wiring")?.links,
+                       ["tech/wifi-mesh"])
+        m.trash("tech/wifi-mesh")
+        XCTAssertEqual(m.list.map { row in row.id }, ["house/wiring"])
+        XCTAssertEqual(m.trashed.map { row in row.id }, ["tech/wifi-mesh"])
+        XCTAssertNil(m.note("tech/wifi-mesh"))
+        XCTAssertFalse(m.recall("Deco X55", also: [], pp: 400,
+                                excluding: [])?.ids
+            .contains("tech/wifi-mesh") ?? false)
+        var text = try String(contentsOf: wiring, encoding: .utf8)
+        XCTAssertTrue(text.contains("feeds the mesh setup upstairs."), text)
+        XCTAssertFalse(text.contains("wifi-mesh.md"), text)
+        XCTAssertEqual(m.store?.concept("house/wiring")?.links, [])
+        m.restore("tech/wifi-mesh")
+        XCTAssertEqual(m.trashed.count, 0)
+        XCTAssertNotNil(m.note("tech/wifi-mesh"))
+        text = try String(contentsOf: wiring, encoding: .utf8)
+        XCTAssertTrue(
+            text.contains("[the mesh setup](/tech/wifi-mesh.md)"), text)
+        XCTAssertEqual(m.store?.concept("house/wiring")?.links,
+                       ["tech/wifi-mesh"])
+        try? FileManager.default.removeItem(at: m.root)
+    }
+
+    func testDeleteForeverAndEmptyTrashLeaveNoFile() async throws {
+        let m = try await opened()
+        m.trash("tech/wifi-mesh")
+        let kept = m.root.appendingPathComponent(
+            Memories.trashFolder + "/tech/wifi-mesh.md")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: kept.path))
+        m.deleteForever("tech/wifi-mesh")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: kept.path))
+        XCTAssertEqual(m.trashed.count, 0)
+        m.trash("house/wiring")
+        XCTAssertEqual(m.trashed.count, 1)
+        m.emptyTrash()
+        XCTAssertEqual(m.trashed.count, 0)
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: m.root.appendingPathComponent(
+                Memories.trashFolder).path))
+        XCTAssertTrue(m.list.isEmpty)
+        try? FileManager.default.removeItem(at: m.root)
+    }
+
+    func testRowsCarryTheAreaThePrivateTagAndTheSourceChat() async throws {
+        let m = try await opened()
+        let wiring = m.list.first { row in row.id == "house/wiring" }
+        let mesh = m.list.first { row in row.id == "tech/wifi-mesh" }
+        XCTAssertEqual(wiring?.area, "house")
+        XCTAssertEqual(wiring?.isPrivate, true)
+        XCTAssertEqual(mesh?.isPrivate, false)
+        XCTAssertEqual(mesh?.source, source)
+        XCTAssertNil(wiring?.source)
+        XCTAssertEqual(m.notes(from: source).map { row in row.id },
+                       ["tech/wifi-mesh"])
+        XCTAssertEqual(m.notes(from: UUID()).count, 0)
+        try? FileManager.default.removeItem(at: m.root)
+    }
+
+    func testTrashSurvivesAReopenAndAreasGroupEveryNote() async throws {
+        let m = try await opened()
+        m.trash("tech/wifi-mesh")
+        m.reopen()
+        await m.awaitOpen()
+        XCTAssertEqual(m.trashed.map { row in row.id }, ["tech/wifi-mesh"])
+        XCTAssertEqual(m.list.map { row in row.id }, ["house/wiring"])
+        let areas = Sidebar.byArea(m.list).map { group in group.area }
+        XCTAssertEqual(areas, ["house"])
+        XCTAssertEqual(Sidebar.areaTitle("house"), "House")
+        XCTAssertEqual(Sidebar.areaTitle("."), "Loose")
+        try? FileManager.default.removeItem(at: m.root)
+    }
+
+    func testSearchRanksTheTitleOverTheDescription() async throws {
+        let m = try await opened()
+        XCTAssertTrue(MemorySearch.active("mesh"))
+        XCTAssertFalse(MemorySearch.active("m"))
+        XCTAssertEqual(MemorySearch.rank(m.list, "mesh").map { r in r.id },
+                       ["tech/wifi-mesh"])
+        XCTAssertEqual(MemorySearch.rank(m.list, "cat6").map { r in r.id },
+                       ["house/wiring"])
+        XCTAssertEqual(MemorySearch.rank(m.list, "private").map { r in r.id },
+                       ["house/wiring"])
+        XCTAssertTrue(MemorySearch.rank(m.list, "zzzz").isEmpty)
         try? FileManager.default.removeItem(at: m.root)
     }
 }
@@ -237,7 +356,7 @@ import XCTest
         XCTAssertEqual(loose.first?.tags, [])
     }
 
-    func testRememberWritesDraftsWithProvenanceAndKeepPromotes() async throws {
+    func testRememberWritesNotesWithProvenance() async throws {
         guard let url = BertEmbedder.bundledMultilingual,
               BertEmbedder.load(ggufPath: url.path) != nil else {
             throw XCTSkip("no bundled e5-small.gguf")
@@ -261,30 +380,26 @@ import XCTest
         XCTAssertTrue(seen.isEmpty, "a note this chat already saw")
         let path = root.appendingPathComponent("person/coffee.md")
         var text = try String(contentsOf: path, encoding: .utf8)
-        XCTAssertTrue(text.contains("status: draft"), text)
+        XCTAssertFalse(text.contains("status: draft"), text)
         XCTAssertTrue(text.contains("chatokf://conversation/"
                                     + source.uuidString), text)
-        memories.confirm("person/coffee")
-        text = try String(contentsOf: path, encoding: .utf8)
-        XCTAssertFalse(text.contains("status: draft"), text)
-        XCTAssertTrue(text.contains("verified: { by: human:user"), text)
         XCTAssertTrue(text.contains("generated: { by: model"), text)
         let again = memories.remember([Memories.Draft(
             id: "person/coffee", type: "Note", title: "Coffee again",
             description: "Restated.", tags: [], body: "Restated.")],
             source: source, excluding: [])
-        XCTAssertTrue(again.isEmpty, "a kept note is never re-drafted")
-        memories.confirm("person/coffee")
+        XCTAssertEqual(again.map { note in note.id }, ["person/coffee"],
+                       "a later extraction updates the note in place")
         text = try String(contentsOf: path, encoding: .utf8)
-        XCTAssertEqual(text.components(separatedBy: "verified:").count, 2)
-        XCTAssertTrue(text.contains("title: Coffee\n"), text)
+        XCTAssertTrue(text.contains("title: Coffee again\n"), text)
         let restated = memories.remember([Memories.Draft(
             id: "person/morning-coffee", type: "Note",
             title: "Morning coffee",
-            description: "Drinks two espressos before nine each morning.",
-            tags: [], body: "Never after lunch.")], source: source,
+            description: "Restated.",
+            tags: [], body: "Restated.")], source: source,
             excluding: [])
-        XCTAssertTrue(restated.isEmpty, "a restated kept note is not new")
+        XCTAssertEqual(restated.map { note in note.id }, ["person/coffee"],
+                       "a restated note lands under the id on file")
         XCTAssertNil(memories.note("person/morning-coffee"))
         let tea = memories.remember([Memories.Draft(
             id: "person/tea", type: "Note", title: "Tea",
@@ -301,10 +416,8 @@ import XCTest
         let known = Memories.extractionInstruction(
             known: [("person/coffee", "Coffee")])
         XCTAssertTrue(known.contains("person/coffee (Coffee)"), known)
-        XCTAssertEqual(memories.coverage("espresso before nine").known.first?
-                           .id, "person/coffee")
-        memories.discard("person/coffee")
-        XCTAssertFalse(FileManager.default.fileExists(atPath: path.path))
+        XCTAssertEqual(memories.coverage("Restated").known.first?.id,
+                       "person/coffee")
         try? FileManager.default.removeItem(at: root)
     }
 }

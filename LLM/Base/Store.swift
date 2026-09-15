@@ -136,6 +136,18 @@ public struct GrepHit {
     public let text: String
 }
 
+public struct RemovedLink: Sendable {
+    public let referrer: String
+    public let markup: String
+    public let label: String
+
+    public init(referrer: String, markup: String, label: String) {
+        self.referrer = referrer
+        self.markup = markup
+        self.label = label
+    }
+}
+
 public struct Proposal {
     public let kind: Kind
     public let score: Float
@@ -1242,6 +1254,89 @@ public final class Store {
             throw StoreError.noSuchConcept(id)
         }
         return referrers
+    }
+
+    public func unlink(_ id: String) throws -> [RemovedLink] {
+        var out: [RemovedLink] = []
+        if let target = concept(id) {
+            for referrer in target.backlinks {
+                if var source = concept(referrer) {
+                    let cut = Store.collapse(source.body, to: id,
+                                             from: referrer)
+                    if !cut.removed.isEmpty {
+                        source.body = cut.body
+                        source.links = Store.parseLinks(cut.body,
+                                                        from: referrer)
+                        try Frontmatter.emit(source).write(
+                            to: source.path, atomically: true,
+                            encoding: .utf8)
+                        out += cut.removed.map { link in
+                            RemovedLink(referrer: referrer,
+                                        markup: link.markup,
+                                        label: link.label)
+                        }
+                    }
+                }
+            }
+        } else {
+            throw StoreError.noSuchConcept(id)
+        }
+        return out
+    }
+
+    public func relink(_ removed: [RemovedLink]) {
+        var byReferrer: [String: [RemovedLink]] = [:]
+        for link in removed {
+            byReferrer[link.referrer, default: []].append(link)
+        }
+        for (referrer, links) in byReferrer {
+            if var source = concept(referrer) {
+                var body = source.body
+                for link in links
+                where !link.label.isEmpty && !body.contains(link.markup) {
+                    if let at = body.range(of: link.label) {
+                        body.replaceSubrange(at, with: link.markup)
+                    }
+                }
+                if body != source.body {
+                    source.body = body
+                    source.links = Store.parseLinks(body, from: referrer)
+                    try? Frontmatter.emit(source).write(
+                        to: source.path, atomically: true, encoding: .utf8)
+                }
+            }
+        }
+    }
+
+    static func collapse(_ body: String, to id: String, from referrer: String)
+        -> (body: String, removed: [(markup: String, label: String)]) {
+        let range = NSRange(body.startIndex..<body.endIndex, in: body)
+        let matches = linkPattern.matches(in: body, options: [], range: range)
+        var out = ""
+        var removed: [(markup: String, label: String)] = []
+        var cursor = body.startIndex
+        for match in matches {
+            let whole = Range(match.range, in: body)
+            let target = Range(match.range(at: 1), in: body)
+            if let whole, let target,
+               Store.resolve(String(body[target]), from: referrer) == id {
+                let markup = String(body[whole])
+                let label = Store.linkLabel(markup)
+                out += String(body[cursor..<whole.lowerBound]) + label
+                cursor = whole.upperBound
+                removed.append((markup, label))
+            }
+        }
+        return (out + String(body[cursor...]), removed)
+    }
+
+    static func linkLabel(_ markup: String) -> String {
+        var out = markup
+        if markup.hasPrefix("["), let close = markup.firstIndex(of: "]") {
+            out = String(
+                markup[markup.index(after: markup.startIndex)..<close])
+        }
+        return out
     }
 
     enum Change: String {

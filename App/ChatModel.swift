@@ -309,6 +309,10 @@ import UniformTypeIdentifiers
 
     var memoriesSupported: Bool { Memories.supported }
 
+    var hasMemories: Bool {
+        !session.memories.list.isEmpty || !session.memories.trashed.isEmpty
+    }
+
     struct OfferedNote: Identifiable {
         let id: String
         let title: String
@@ -320,6 +324,7 @@ import UniformTypeIdentifiers
         let prompt: String
         let display: String
         let docs: [DocRef]
+        let stoppable: String?
         let stage: Whimsical.Stage
         var notes: [OfferedNote]
     }
@@ -355,7 +360,8 @@ import UniformTypeIdentifiers
                     + "\n\n---\n\n" + prompt
             }
             submitText(prompt: prompt, display: held.display,
-                       docs: held.docs, stage: held.stage)
+                       docs: held.docs, stoppable: held.stoppable,
+                       stage: held.stage)
         }
     }
 
@@ -370,6 +376,36 @@ import UniformTypeIdentifiers
     func forgetAllMemories() {
         session.memories.forgetAll()
         flashHUD("Memories forgotten")
+    }
+
+    var memoriesOn: Bool { session.memories.active }
+
+    var memoryList: [MemoryRow] { session.memories.list }
+
+    var memoryTrash: [MemoryRow] { session.memories.trashed }
+
+    func memoryNote(_ id: String) -> MemoryNote? {
+        session.memories.note(detail: id)
+    }
+
+    func memories(from conversation: UUID) -> [MemoryRow] {
+        session.memories.notes(from: conversation)
+    }
+
+    func forgetMemory(_ id: String) {
+        session.memories.trash(id)
+    }
+
+    func restoreMemory(_ id: String) {
+        session.memories.restore(id)
+    }
+
+    func deleteMemoryForever(_ id: String) {
+        session.memories.deleteForever(id)
+    }
+
+    func emptyMemoriesTrash() {
+        session.memories.emptyTrash()
     }
 
     enum Access { case offline, wikipedia, full }
@@ -418,7 +454,10 @@ import UniformTypeIdentifiers
         webAccess = web
         session.pushTools()
     }
-    var thinking = true
+    var thinking: Bool = UserDefaults.standard
+        .object(forKey: "thinking") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(thinking, forKey: "thinking") }
+    }
     var systemPrompt: String = UserDefaults.standard
         .string(forKey: "systemPrompt") ?? ChatModel.defaultSystemPrompt {
         didSet {
@@ -434,6 +473,13 @@ import UniformTypeIdentifiers
         didSet {
             UserDefaults.standard.set(imageBudget.rawValue,
                                       forKey: "imageBudget")
+        }
+    }
+    var exportReasoning: Bool = UserDefaults.standard
+        .bool(forKey: ConversationExport.reasoningKey) {
+        didSet {
+            UserDefaults.standard.set(exportReasoning,
+                                      forKey: ConversationExport.reasoningKey)
         }
     }
     var renderMarkdown: Bool = UserDefaults.standard
@@ -541,11 +587,16 @@ import UniformTypeIdentifiers
         modelName: ChatModel.startModel(),
         systemPrompt: UserDefaults.standard.string(forKey: "systemPrompt")
             ?? ChatModel.defaultSystemPrompt)
-    private var genTask: Task<Void, Never>?
+    var genTask: Task<Void, Never>?
     private static let benchPrompt = Flags.value("bench-prompt") ?? ""
     private static let benchTokens = Flags.int("bench-tokens") ?? 128
     private static let benchCool = Flags.int("bench-cool") ?? 90
     @ObservationIgnored private var benchTask: Task<Void, Never>?
+    private static let readFiles = Flags.values("read-file")
+    private static let readPrompt = Flags.value("read-prompt") ?? ""
+    @ObservationIgnored private var readTask: Task<Void, Never>?
+    private static let script = Flags.values("prompt")
+    @ObservationIgnored private var scriptTask: Task<Void, Never>?
     @ObservationIgnored private var benchPieces = 0
     @ObservationIgnored private var benchMetrics: TurnMetrics?
     // The last NON-ZERO rates: the ticker samples every 400ms from turn start,
@@ -598,7 +649,7 @@ import UniformTypeIdentifiers
         }
     }
 
-    private func sessionConfig() -> Session.SessionConfig {
+    func sessionConfig() -> Session.SessionConfig {
         Session.SessionConfig(
             thinking: thinking,
             reasoningEffortRaw: reasoningEffort.rawValue.lowercased(),
@@ -626,10 +677,92 @@ import UniformTypeIdentifiers
                 status = ""
             }
             session.primeSession(thinkingActive: thinkingActive)
+            session.pruneParked(
+                keeping: Set(ConversationStore.shared.list.map { c in c.id }))
             if !Self.benchPrompt.isEmpty, benchTask == nil {
                 benchTask = Task { @MainActor in await self.runBench() }
             }
+            if !Self.readFiles.isEmpty, readTask == nil {
+                readTask = Task { @MainActor in await self.runReadFiles() }
+            }
+            if !Self.script.isEmpty, scriptTask == nil {
+                scriptTask = Task { @MainActor in await self.runScript() }
+            }
         }
+    }
+
+    private func settled() async {
+        await genTask?.value
+        while session.metaTaskRunning {
+            try? await Task.sleep(for: .milliseconds(200))
+        }
+        await session.awaitPrimed()
+    }
+
+    private func runScript() async {
+        await readTask?.value
+        await session.awaitPrimed()
+        var step = 0
+        for line in Self.script {
+            step += 1
+            let began = Date()
+            if line == "new" {
+                newChat()
+            } else if line == "reopen" {
+                if let id = ConversationStore.shared.list.first?.id {
+                    openConversation(id)
+                }
+            } else {
+                input = line
+                caret = input.utf16.count
+                send()
+            }
+            await settled()
+            Diag.shared.report(.turn, String(
+                format: "[script] %d %@ in %.1fs: ctx %@, %d message(s)",
+                step, String(line.prefix(40)).debugDescription,
+                Date().timeIntervalSince(began),
+                statsLabel.isEmpty ? "-" : statsLabel, messages.count))
+        }
+        Diag.shared.report(.turn, "[script] done")
+        scriptTask = nil
+    }
+
+    static func cachedFile(_ name: String) -> URL {
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent(name)
+    }
+
+    private func runReadFiles() async {
+        await session.awaitPrimed()
+        let budget = docBudget
+        docBudget = .UL
+        var first = true
+        for file in Self.readFiles {
+            if !first {
+                newChat()
+                await settled()
+            }
+            first = false
+            let url = ChatModel.cachedFile(file)
+            let name = url.lastPathComponent
+            let text = Self.docExts.contains(url.pathExtension.lowercased())
+                ? try? String(contentsOf: url, encoding: .utf8)
+                : await ChatModel.markdown(of: url)
+            if let text {
+                Diag.shared.report("[read-file] \(name): \(text.utf8.count) bytes")
+                attachDoc(name, text, at: 0, from: ChatModel.keep(url, name))
+                input += Self.readPrompt.isEmpty ? "Summarize this document."
+                                                 : Self.readPrompt
+                caret = input.utf16.count
+                send()
+                await settled()
+            } else {
+                Diag.shared.report("[read-file] cannot read \(url.path)")
+            }
+        }
+        docBudget = budget
+        readTask = nil
     }
 
     private func runBench() async {
@@ -742,7 +875,7 @@ import UniformTypeIdentifiers
     private func commitSwitch(_ name: String) {
         commitCurrent()
         genTask?.cancel()
-        session.releaseSession()
+        session.releaseSession(parking: liveConversation)
         for img in attachedImages {
             input = AttachmentRefs.scrub(img.name, from: input)
         }
@@ -793,12 +926,14 @@ import UniformTypeIdentifiers
         }
     }
 
-    private func recordTrace(_ e: TraceEvent) {
+    func recordTrace(_ e: TraceEvent) {
         traceEvents.append(e)
         if traceEvents.count > Self.traceCap {
             traceEvents.removeFirst(traceEvents.count - Self.traceCap)
         }
     }
+
+    var liveConversation: UUID? { readOnly ? nil : currentConversationId }
 
     func newChat() {
         Footprint.report(.load, "newChat begin")
@@ -809,6 +944,7 @@ import UniformTypeIdentifiers
         lastTurnSpoken = false
         speech.stopSpeaking()
         commitCurrent()
+        let leaving = liveConversation
         readOnly = false
         currentConversationId = nil
         generatedTitle = nil
@@ -823,6 +959,7 @@ import UniformTypeIdentifiers
                 running?.cancel()
                 _ = await running?.value
             }
+            if let leaving { await session.parkCurrent(leaving) }
             await session.newChatEngine(sessionConfig()) { [weak self] e in
                 self?.recordTrace(e)
             }
@@ -868,16 +1005,6 @@ import UniformTypeIdentifiers
 
     var remembered: [Memories.Remembered] = []
     var extractedAt: Date?
-
-    func keepRemembered(_ id: String) {
-        session.memories.confirm(id)
-        remembered.removeAll { note in note.id == id }
-    }
-
-    func forgetRemembered(_ id: String) {
-        session.memories.discard(id)
-        remembered.removeAll { note in note.id == id }
-    }
 
     var suggestFollowups: Bool = UserDefaults.standard
         .object(forKey: "suggestFollowups") as? Bool ?? true {
@@ -1051,14 +1178,17 @@ import UniformTypeIdentifiers
         return wrote ? to : nil
     }
 
+    private(set) var convertingNames: [String] = []
+
     private func convertDoc(_ from: URL, _ name: String) {
         if let kept = ChatModel.keep(from, name) {
             converting += 1
-            flashHUD("Reading \(name)")
+            convertingNames.append(name)
             let t0 = Date()
             Task { @MainActor in
                 let text = await ChatModel.markdown(of: kept)
                 converting -= 1
+                convertingNames.removeAll { seen in seen == name }
                 ChatModel.read(name, text, t0,
                                docBudgetBytes)
                 if let text {
@@ -1207,9 +1337,7 @@ import UniformTypeIdentifiers
             case .UL: return Int.max
             }
         }
-        static var offered: [DocBudget] {
-            allCases.filter { size in size != .UL || !isOS }
-        }
+        static var offered: [DocBudget] { allCases }
     }
 
     static let answerReserveTokens = 8192
@@ -1396,6 +1524,22 @@ import UniformTypeIdentifiers
     }
 
     private func endListening() {
+        stopListening(send: true)
+    }
+
+    func toggleMic() {
+        if listening {
+            stopListening(send: false)
+            lastTurnSpoken = false
+        } else if voiceReady || speech.engaged {
+            speech.stopSpeaking()
+            lastTurnSpoken = false
+        } else {
+            beginListening()
+        }
+    }
+
+    private func stopListening(send: Bool) {
         endOfTurn?.cancel()
         endOfTurn = nil
         micPhrases?.cancel()
@@ -1413,11 +1557,14 @@ import UniformTypeIdentifiers
         let secs = Double(heard.samples) / max(rateInUse, 1)
         Diag.shared.report(.voice, String(
             format: "[mic] stopped: %.1fs captured, %d utterance(s), "
-                + "%.1fs of speech, bar %.5f, peak %.6f, rms %.6f, %@",
-            secs, said.count,
+                + "%.1fs of speech, bar %.5f, peak %.6f, rms %.6f, send=%@, "
+                + "%@", secs, said.count,
             said.reduce(0.0) { sum, u in sum + u.seconds }, bar,
-            heard.peak, heard.rms, AudioSession.describe()))
-        if said.isEmpty {
+            heard.peak, heard.rms, send ? "yes" : "no",
+            AudioSession.describe()))
+        if !send {
+            flashHUD("Microphone off")
+        } else if said.isEmpty {
             flashHUD(secs < 0.5 ? "No audio from the microphone"
                                 : "Nothing was said")
         } else {
@@ -1427,9 +1574,22 @@ import UniformTypeIdentifiers
         }
     }
 
+    var readingDocument: Bool {
+        prefilling && activePrefillStage == .documents
+            && (prefillProgress != nil || stopAsked)
+    }
+
+    private(set) var stopAsked = false
+
     func stop() {
         speech.stopSpeaking()
-        session.stop()
+        if readingDocument {
+            session.requestStop()
+            stopAsked = true
+            prefillProgress = nil
+        } else {
+            session.stop()
+        }
     }
 
     func factoryReset() {
@@ -1441,6 +1601,7 @@ import UniformTypeIdentifiers
         let fm = FileManager.default
         try? fm.removeItem(at: Session.attachments)
         try? fm.removeItem(at: Bundle.modelStore())
+        Session.eraseParked()
         Memories.erase()
         Diag.eraseCaches()
         quitApp()
@@ -1499,11 +1660,27 @@ import UniformTypeIdentifiers
     }
 
     private func sendSpoken(_ said: [SpeechGate.Utterance]) {
-        if canRunTurn, let (asked, events) = session.sendSpoken(
-            said: said, thinkTokenCap: thinkTokenCap,
-            thinkingActive: thinkingActive) {
-            beginTurn(asked, spoken: true, cue: .thinking, stage: .vision,
-                     events: events)
+        if canRunTurn {
+            let typed = promptFor(input)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let images = attachedImages
+            let clips = attachedClips
+            let docs = Session.refs(attachedDocs)
+            input = ""
+            caret = 0
+            attachedImages = []
+            attachedClips = []
+            attachedDocs = []
+            if let (asked, events) = session.sendSpoken(
+                said: said,
+                typed: typed.isEmpty ? Session.spokenPrompt : typed,
+                images: images, clips: clips, docs: docs,
+                budget: imageBudget.tokens, thinkTokenCap: thinkTokenCap,
+                thinkingActive: thinkingActive) {
+                beginTurn(asked, spoken: true,
+                          cue: images.isEmpty ? .thinking : .looking,
+                          stage: .vision, events: events)
+            }
         }
     }
 
@@ -1514,24 +1691,28 @@ import UniformTypeIdentifiers
         spokenTurn = spoken
         lastTurnSpoken = spoken
         prefilling = true
+        stopAsked = false
         activePrefillStage = stage
         messages.append(asked)
         messages.append(Message(fromUser: false, text: ""))
         let idx = messages.count - 1
         resetLiveBuffers()
         speech.beginTurn(cue: cue)
+        KeepAwake.hold(true)
         let phrases = phraseCycler()
         genTask = Task { @MainActor in
             for await event in events {
                 self.apply(event, at: idx)
             }
             phrases.cancel()
+            KeepAwake.hold(false)
             self.genTask = nil
             self.prefilling = false
             self.prefillProgress = nil
             self.consulting = false
             self.watching = false
             self.lookingAt = nil
+            if self.session.metaTaskRunning { _ = self.phraseCycler() }
         }
     }
 
@@ -1582,8 +1763,8 @@ import UniformTypeIdentifiers
         }
     }
 
-    private func adoptDrafts() {
-        let written = session.memories.takeDrafts()
+    private func adoptNoted() {
+        let written = session.memories.takeNoted()
         if !written.isEmpty {
             remembered.removeAll { note in
                 written.contains { draft in draft.id == note.id }
@@ -1595,7 +1776,7 @@ import UniformTypeIdentifiers
     private func finishTurn(_ outcome: ChatSession.TurnOutcome,
                             _ metrics: TurnMetrics, _ idx: Int) {
         if benchTask != nil { benchMetrics = metrics }
-        adoptDrafts()
+        adoptNoted()
         if outcome == .stopped {
             if messages.count >= 2 { messages.removeLast(2) }
         } else {
@@ -1605,9 +1786,41 @@ import UniformTypeIdentifiers
                                    textEmpty: messages[idx].text.isEmpty) {
                 messages[idx].loopStopped = true
             }
+            if metrics.readFraction < 1, messages.indices.contains(idx - 1) {
+                messages[idx - 1].docs = ChatModel.readUpTo(
+                    metrics.readFraction, messages[idx - 1].docs,
+                    cut: metrics.readStop)
+                if metrics.readStop == "memory" {
+                    flashHUD("Out of memory: answered from what was read",
+                             prominent: true, seconds: 5)
+                }
+            }
             commitCurrent()
             if benchTask == nil { runMetaTurns() }
         }
+    }
+
+    static func readUpTo(_ fraction: Double, _ docs: [DocRef],
+                         cut: String) -> [DocRef] {
+        let total = docs.reduce(0) { sum, doc in sum + doc.bytes }
+        var left = Int(Double(total) * fraction)
+        return docs.map { doc in
+            let read = min(doc.bytes, left)
+            left -= read
+            return DocRef(url: doc.url, bytes: doc.bytes, short: doc.short,
+                          total: doc.total, read: read, cut: cut)
+        }
+    }
+
+    static func stoppableSpan(_ prompt: String, _ docs: [Doc]) -> String? {
+        var out: String? = nil
+        if let first = docs.first, let last = docs.last,
+           let head = prompt.range(of: first.content),
+           let tail = prompt.range(of: last.content, options: .backwards),
+           head.lowerBound < tail.upperBound {
+            out = String(prompt[head.lowerBound..<tail.upperBound])
+        }
+        return out
     }
 
     private func applyToolRound(_ event: ToolRoundEvent, at idx: Int) {
@@ -1646,6 +1859,7 @@ import UniformTypeIdentifiers
             input = ""
             caret = 0
             let docs = Session.refs(attachedDocs)
+            let stoppable = ChatModel.stoppableSpan(prompt, attachedDocs)
             attachedDocs = []
             let recall = session.recall(
                 display, also: [followupHint, generatedTitle ?? ""])
@@ -1656,19 +1870,22 @@ import UniformTypeIdentifiers
                         OfferedNote(id: id, title: rest.0, seconds: rest.1)
                     }
                 heldSend = HeldSend(prompt: prompt, display: display,
-                                    docs: docs, stage: stage, notes: notes)
+                                    docs: docs, stoppable: stoppable,
+                                    stage: stage, notes: notes)
             } else {
                 if let recall { prompt = recall.block + prompt }
                 submitText(prompt: prompt, display: display, docs: docs,
-                           stage: stage)
+                           stoppable: stoppable, stage: stage)
             }
         }
     }
 
     private func submitText(prompt: String, display: String,
-                            docs: [DocRef], stage: Whimsical.Stage) {
+                            docs: [DocRef], stoppable: String?,
+                            stage: Whimsical.Stage) {
         if let (asked, events) = session.sendText(
             prompt: prompt, display: display, docs: docs,
+            stoppable: stoppable,
             thinkTokenCap: thinkTokenCap, thinkingActive: thinkingActive) {
             beginTurn(asked, spoken: false, cue: .thinking, stage: stage,
                      events: events)
@@ -1678,7 +1895,8 @@ import UniformTypeIdentifiers
     private func applyStats(_ t: TurnMetrics) {
         if t.pp > 0 { lastPP = t.pp }
         if t.tg > 0 { lastTG = t.tg }
-        if prefilling, t.prefillTotal > 0, t.prefillDone < t.prefillTotal {
+        if prefilling, !stopAsked, activePrefillStage == .documents,
+           t.prefillTotal > 0, t.prefillDone < t.prefillTotal {
             let left = Double(t.prefillTotal - t.prefillDone)
             prefillProgress = PrefillProgress(
                 done: t.prefillDone, total: t.prefillTotal,
@@ -1745,6 +1963,8 @@ import UniformTypeIdentifiers
         let out: Whimsical.Stage
         if listening {
             out = .listening
+        } else if genTask == nil && session.metaTaskRunning {
+            out = .remembering
         } else if consulting {
             out = .consulting
         } else if prefilling {
@@ -1844,36 +2064,15 @@ import UniformTypeIdentifiers
         UserDefaults.standard.double(forKey: timeKey(phase, name))
     }
 
-    static let sampleResearch =
-        "Using Simple English Wikipedia as your primary source, " +
-        "research Dark Matter and Dark Energy. Provide a highly factual, " +
-        "structured summary of the current state of the art in the field. " +
-        "Breakdown the explanation into: " +
-        "1. Core Definitions, 2. Key Differences, and " +
-        "3. Current Scientific Evidence. " +
-        "Keep the language simple, direct, and free " +
-        "of introductory or concluding remarks."
-    static let sampleStory = "Describe everything you see in this "
-        + "picture, then write a story based on it."
-    static let sampleClip = "Describe what happens in this video."
-    static let sampleEuler = "Using Euler's formula e^(ix) = cos(x) + "
-        + "i*sin(x) and your calculator, explore: e^i (one radian around "
-        + "the unit circle), Euler's identity e^(i*pi) + 1 = 0, i^i, "
-        + "sqrt(i), and ln(-1). Compute each and explain briefly what it "
-        + "means geometrically."
-    static let sampleInterest = "A savings account starts with $1,000 and "
-        + "earns 5% interest each year, so every year its balance "
-        + "multiplies by 1.05. Use the calculator to find the balance "
-        + "after 22 years."
-    static let sampleCookies = "Bakers weigh every ingredient as a "
-        + "percentage of the flour weight. In my cookie recipe, butter "
-        + "is 65% of the flour. I have 350 grams of flour. Use the "
-        + "calculator to find how many grams of butter I need."
-
+    static let sampleResearch = Texts.text("sample-research")
+    static let sampleStory = Texts.text("sample-story")
+    static let sampleClip = Texts.text("sample-clip")
+    static let sampleEuler = Texts.text("sample-euler")
+    static let sampleInterest = Texts.text("sample-interest")
+    static let sampleCookies = Texts.text("sample-cookies")
     var calcSampleIsInterest: Bool { modelName != Models.fallback }
 
-    static let benchText = "The town sits where the river slows and widens before it reaches the sea, and for most of its history that bend was the whole reason for the place. Barges could come no farther upstream, so grain, timber and wool from the valleys were unloaded on the stone quay, weighed in the long shed that still stands, and sold on to the coastal ships that waited below the bridge. The bridge itself has been rebuilt three times. The first was wood and burned in a winter fire that also took the mill; the second was stone with five arches, and it carried carts for two centuries until a flood pushed the middle pier off its footing; the third is the iron one that stands today, painted green every seven years by a crew that works from a floating platform and takes most of the summer to finish. Along the north bank the warehouses have become flats, workshops and one small museum, and the cranes that once swung sacks out of the holds are kept as ornaments, oiled but never used. The south bank was always the quieter side. Fishermen kept their boats there, drawn up on the shingle, and the row of low cottages behind the sea wall belonged to their families for as long as anyone kept records. A path runs from the last cottage along the top of the wall to the point, where a squat lighthouse marks the shoals, and from the point on a clear day the hills on the far side of the bay look close enough to walk to, though the ferry takes an hour. The market is held on the square on Wednesdays and Saturdays. Stalls sell vegetables from the terraces above the town, cheese from the two farms that still keep goats, bread from the bakery that opens before dawn, and, in season, the small striped fish that are eaten whole, grilled over charcoal, with nothing but salt and a squeeze of lemon. Visitors come for the fish and stay for the light, which painters have been trying to catch since the railway arrived and made the journey from the city a matter of hours rather than days. The station is at the top of the hill, and the walk down to the quay passes the church, the old school that is now the library, and a terrace of tall houses whose balconies face the water. In the evening the light comes low across the bay and turns the wet sand to copper, the gulls settle on the ridge of the shed, and the last ferry sounds its horn twice before it pulls away from the pier. Describe, in as much detail as you can, a full day in this town from the first bakery light to the last ferry, naming the people who work each part of it and what each of them does hour by hour."
-
+    static let benchText = Texts.text("bench-512")
     static let samplePicture: Data? = Bundle.main
         .url(forResource: "dogs-beach", withExtension: "jpg")
         .flatMap { url in try? Data(contentsOf: url) }
@@ -1884,10 +2083,7 @@ import UniformTypeIdentifiers
         VisionPreprocess.thumbnail(data, maxPx: 128)
     }
 
-    static let sampleReport =
-        "Which block gives the most fruit per tree, and what makes that "
-        + "surprising?"
-
+    static let sampleReport = Texts.text("sample-report")
     static let samplePdf: URL? = Bundle.main
         .url(forResource: "harvest-report", withExtension: "pdf")
 
@@ -1932,7 +2128,8 @@ import UniformTypeIdentifiers
     }
 
     var showSamples: Bool {
-        ready && !busy && messages.isEmpty
+        ready && !busy && messages.isEmpty && input.isEmpty
+            && !hasAttachments && !listening && converting == 0
             && applicableSampleIds.contains { id in showSample(id) }
     }
 

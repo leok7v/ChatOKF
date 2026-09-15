@@ -1,7 +1,8 @@
 import Foundation
 import LLM
+import Observation
 
-@MainActor public final class Memories {
+@MainActor @Observable public final class Memories {
 
     public struct Recall {
         public let titles: [String]
@@ -32,11 +33,7 @@ import LLM
     static let bytesPerToken = 3.5
     static let recallLimit = 3
     static let smallStore = 40
-    static let gateBytes: UInt64 = 7_945_689_498
-
-    public static var supported: Bool {
-        !isOS || ProcessInfo.processInfo.physicalMemory >= gateBytes
-    }
+    public static var supported: Bool { true }
 
     public static let defaultRoot: URL = {
         let fm = FileManager.default
@@ -65,8 +62,11 @@ import LLM
     }
 
     private var embedder: BertEmbedder?
-    private var store: Store?
+    private(set) var store: Store?
     private var opening: Task<Void, Never>?
+
+    public internal(set) var list: [MemoryRow] = []
+    public internal(set) var trashed: [MemoryRow] = []
 
     public init(root: URL = Memories.defaultRoot) {
         let d = UserDefaults.standard
@@ -75,9 +75,13 @@ import LLM
         backup = d.bool(forKey: Memories.backupKey)
     }
 
-    public var active: Bool { Memories.supported && enabled }
+    public var active: Bool {
+        Memories.supported && enabled && Flags.on("memories")
+    }
 
     public var isOpen: Bool { store != nil }
+
+    public var count: Int { list.count }
 
     public func open() {
         if store == nil, opening == nil, active {
@@ -90,6 +94,8 @@ import LLM
                 if let self, let opened, !Task.isCancelled {
                     self.embedder = opened.embedder
                     self.store = opened.store
+                    self.purgeExpired()
+                    self.refresh()
                     Diag.shared.report(.load, String(
                         format: "[memories] %d concepts, re-embedded %d, "
                             + "%.2fs at %@", opened.store.concepts.count,
@@ -135,6 +141,8 @@ import LLM
         opening?.cancel()
         opening = nil
         store = nil
+        list = []
+        trashed = []
         open()
     }
 
@@ -216,8 +224,6 @@ import LLM
         }
         return out
     }
-
-    static let draft = "draft"
 
     public struct Draft {
         public let id: String
@@ -333,17 +339,16 @@ import LLM
     }
 
     public private(set) var seenIds: Set<String> = []
-    public private(set) var drafts: [Remembered] = []
-    private var replaced: [String: String] = [:]
+    public private(set) var noted: [Remembered] = []
 
     public func forgetSeen() {
         seenIds = []
-        drafts = []
+        noted = []
     }
 
-    public func takeDrafts() -> [Remembered] {
-        let out = drafts
-        drafts = []
+    public func takeNoted() -> [Remembered] {
+        let out = noted
+        noted = []
         return out
     }
 
@@ -375,43 +380,19 @@ import LLM
                     wrote = try? store.write(
                         id: id, type: draft.type, title: draft.title,
                         description: draft.description, tags: draft.tags,
-                        body: draft.body, status: Memories.draft,
+                        body: draft.body, status: "",
                         adding: existing == nil ? lines : [])
                 }
                 if wrote != nil {
                     out.append(Remembered(id: id, title: draft.title))
                 }
             }
-            if !out.isEmpty { store.load() }
-        }
-        return out
-    }
-
-    public func confirm(_ id: String) {
-        replaced[id] = nil
-        if let store, let concept = store.concept(id) {
-            let line = "verified: { by: human:user, at: "
-                + Store.iso.string(from: Date()) + " }"
-            _ = try? store.write(
-                id: id, type: concept.type, title: concept.title,
-                description: concept.description, tags: concept.tags,
-                body: concept.body, status: "",
-                adding: concept.trust == .human ? [] : [line])
-            store.load()
-        }
-    }
-
-    public func discard(_ id: String) {
-        if let store {
-            if let prior = replaced.removeValue(forKey: id),
-               let concept = store.concept(id) {
-                try? prior.write(to: concept.path, atomically: true,
-                                 encoding: .utf8)
+            if !out.isEmpty {
                 store.load()
-            } else if (try? store.purge(id: id)) != nil {
-                store.load()
+                refresh()
             }
         }
+        return out
     }
 
     static func generatedLine(_ by: String) -> String {
@@ -488,25 +469,19 @@ import LLM
                     + "adds something new\n"
             } else {
                 do {
-                    let concept = store.concept(id)
-                    if let concept, concept.trust == .human,
-                       replaced[id] == nil {
-                        replaced[id] = try? String(contentsOf: concept.path,
-                                                   encoding: .utf8)
-                    }
                     _ = try store.write(
                         id: id, type: type, title: title,
                         description: description, tags: tags,
                         body: MemoryTools.arg(args, "body") ?? "",
-                        status: Memories.draft,
+                        status: "",
                         adding: [Memories.generatedLine(modelName)],
                         dropping: found ? ["generated", "verified"] : [])
                     store.load()
+                    refresh()
                     seenIds.insert(id)
-                    drafts.removeAll { note in note.id == id }
-                    drafts.append(Remembered(id: id, title: title))
+                    noted.removeAll { note in note.id == id }
+                    noted.append(Remembered(id: id, title: title))
                     out = StoreText.saved(store, id: id, existed: found)
-                        + "Saved as a draft for the user to confirm.\n"
                 } catch {
                     out = "error: write failed: \(error)"
                 }
@@ -521,6 +496,7 @@ import LLM
             do {
                 let referrers = try store.deprecate(id: id)
                 store.load()
+                refresh()
                 out = StoreText.retired(store, id: id, referrers: referrers)
             } catch {
                 out = "\(error)"
@@ -533,6 +509,8 @@ import LLM
         opening?.cancel()
         opening = nil
         store = nil
+        list = []
+        trashed = []
         try? FileManager.default.removeItem(at: root)
     }
 

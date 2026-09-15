@@ -78,6 +78,15 @@ enum Credits {
                    + "questions and the assistant's memories into vectors on "
                    + "this device, so the memory that fits a question can be "
                    + "found without the question leaving."),
+        Credit(name: "Open Knowledge Format",
+               author: "Google Cloud",
+               terms: "Apache-2.0",
+               source: "https://github.com/GoogleCloudPlatform/"
+                   + "open-knowledge-format/blob/main/SPEC.md",
+               changed: "The shape of the assistant's memories: one note "
+                   + "per file, a short header and plain links, as the "
+                   + "specification reads them. The search over them, the "
+                   + "drafts and the Keep step are this app's own."),
         Credit(name: "Parallel",
                author: "Parallel Web Systems",
                terms: "Commercial service",
