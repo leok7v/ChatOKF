@@ -97,7 +97,7 @@ public enum Models {
             if let one = qwen38(gb) { band.insert(one) }
             band.insert("Ternary-Bonsai-27B")
             band.insert("Ternary-Bonsai-1.7B")
-            band.insert("gemma-4-E4B")
+            band.insert(e4bMTP)
             if gb >= 16 { band.insert("gemma-4-12B-MTP") }
         }
         let keep = band.union(downloaded)
@@ -115,7 +115,8 @@ public enum Models {
     public static var start: String {
         let list = all
         var out = list.contains(fallback) ? fallback : (list.first ?? fallback)
-        let preferred = [e2b, e4b, isOS ? gemmaRung(installedGB) : nil]
+        let preferred = [e2b, e4b,
+                         isOS ? gemmaRung(installedGB) : e4bMTP]
         for name in preferred.compactMap({ n in n }) where list.contains(name) {
             out = name
         }
@@ -124,6 +125,7 @@ public enum Models {
 
     private static let e2b = "gemma-4-E2B"
     private static let e4b = "gemma-4-E4B"
+    private static let e4bMTP = "gemma-4-E4B-MTP"
 
     private static func family(_ name: String) -> String {
         var out = name

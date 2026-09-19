@@ -54,6 +54,7 @@ public struct TurnMetrics: Sendable {
     public let contentTokens: Int
     public let pp: Double
     public let tg: Double
+    public let tgGPU: Double
     public let endReason: String
     public let overrun: Int
     public let stopToken: Int32?
@@ -62,7 +63,8 @@ public struct TurnMetrics: Sendable {
     public let readFraction: Double
     public let readStop: String
     public init(ctx: Int, thinkTokens: Int, contentTokens: Int,
-                pp: Double = 0, tg: Double = 0, endReason: String = "",
+                pp: Double = 0, tg: Double = 0, tgGPU: Double = 0,
+                endReason: String = "",
                 overrun: Int = 0, stopToken: Int32? = nil,
                 prefillDone: Int = 0, prefillTotal: Int = 0,
                 readFraction: Double = 1, readStop: String = "") {
@@ -71,6 +73,7 @@ public struct TurnMetrics: Sendable {
         self.contentTokens = contentTokens
         self.pp = pp
         self.tg = tg
+        self.tgGPU = tgGPU
         self.endReason = endReason
         self.overrun = overrun
         self.stopToken = stopToken
@@ -98,6 +101,8 @@ public protocol AgentBackend: Sendable {
     func shouldStop() -> Bool
     func queuedCount() async -> Int
     func drainSpecTurn() -> SpecTurn?
+    func drainGPUSeconds() -> Double
+    var gpuSeconds: Double { get }
     func useSpeculation(_ on: Bool)
     // `ids` carries every span's placeholder already expanded to its block;
     // `spans` lays the tower rows over those positions.
@@ -128,6 +133,8 @@ public extension AgentBackend {
     func shouldStop() -> Bool { false }
     func queuedCount() async -> Int { 0 }
     func drainSpecTurn() -> SpecTurn? { nil }
+    func drainGPUSeconds() -> Double { 0 }
+    var gpuSeconds: Double { 0 }
     func useSpeculation(_ on: Bool) {}
     func supportsVision() async -> Bool { false }
     func supportsSoftTokens() async -> Bool { false }

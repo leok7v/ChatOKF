@@ -196,6 +196,9 @@ public final class Gemma4MetalEngine {
 
     public var hasAssist: Bool { assist != nil }
 
+    public func drainGPUSeconds() -> Double { ctx.clock.drain() }
+    public var gpuSeconds: Double { ctx.clock.elapsed }
+
     public func drainSpecTurn() -> SpecTurn? {
         var out: SpecTurn? = nil
         if specCycles > 0 {
@@ -689,6 +692,7 @@ public final class Gemma4MetalEngine {
             il = end
         }
         queued[queued.count - 1].waitUntilCompleted()
+        for cb in queued { ctx.clock.add(cb) }
         for (_, pool) in kv { pool.touch() }
         let fault = queued.compactMap { cb in cb.error }.first
         if let fault {
@@ -1088,6 +1092,7 @@ public final class Gemma4MetalEngine {
         let t0 = Date()
         cb.commit()
         cb.waitUntilCompleted()
+        ctx.clock.add(cb)
         for (_, pool) in kv { pool.touch() }
         if let err = cb.error {
             Diag.shared.report("[metal] \(tag): \(err)")

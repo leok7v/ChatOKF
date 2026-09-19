@@ -908,6 +908,7 @@ public final class QwenMetalEngine {
         let t0 = Date()
         cb.commit()
         cb.waitUntilCompleted()
+        ctx.clock.add(cb)
         for (_, pool) in pools { pool.touch() }
         if let err = cb.error { fatalError("metal \(tag): \(err)") }
         if QwenMetalEngine.timing {
@@ -1015,6 +1016,9 @@ public final class QwenMetalEngine {
     public private(set) var specAccepted = 0
 
     public var mtpReady: Bool { mtp != nil }
+
+    public func drainGPUSeconds() -> Double { ctx.clock.drain() }
+    public var gpuSeconds: Double { ctx.clock.elapsed }
 
     public func drainSpecTurn() -> SpecTurn? {
         var out: SpecTurn? = nil
@@ -1209,6 +1213,7 @@ public final class QwenMetalEngine {
         let t0 = Date()
         cb.commit()
         cb.waitUntilCompleted()
+        ctx.clock.add(cb)
         if QwenMetalEngine.timing {
             let wall = Date().timeIntervalSince(t0) * 1000
             let gpu = (cb.gpuEndTime - cb.gpuStartTime) * 1000

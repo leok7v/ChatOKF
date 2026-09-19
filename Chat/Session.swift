@@ -211,6 +211,7 @@ public enum TurnEvent: Sendable {
             } else {
                 let c = try QwenMetalChat(ggufPath: path)
                 c.engine.loadMTP(drafts: c.mtpDrafts)
+                Session.draftCount = c.mtpDrafts
                 let backend = c.backend()
                 built = HeavyBuild(
                     backend: backend, template: c.chatTemplate,
@@ -266,7 +267,9 @@ public enum TurnEvent: Sendable {
         return failure
     }
 
-    private static func tgKey(_ name: String) -> String { "tg.\(name)" }
+    nonisolated(unsafe) static var draftCount = 0
+
+    nonisolated static func tgKey(_ name: String) -> String { "tg.\(name)" }
 
     private static func ppKey(_ name: String) -> String { "pp.\(name)" }
 
@@ -687,8 +690,7 @@ public enum TurnEvent: Sendable {
         return out
     }
 
-    private func specDigest() -> String {
-        let turn = ggufBackend?.drainSpecTurn()
+    private func specDigest(_ turn: SpecTurn?) -> String {
         var out = ""
         if let turn {
             out = String(
@@ -702,12 +704,24 @@ public enum TurnEvent: Sendable {
                            _ outcome: ChatSession.TurnOutcome,
                             _ thinkingActive: Bool, _ cap: Int,
                             _ since: Date) {
+        let spec = ggufBackend?.drainSpecTurn()
+        MTPTuning.shared.fold(MTPSample(
+            model: modelName,
+            revision: ModelCatalog.source(modelName)?.revision ?? "",
+            drafts: Session.draftCount, bucket: ThermalBucket.current,
+            tokens: m.thinkTokens + m.contentTokens,
+            seconds: m.tg > 0
+                ? Double(m.thinkTokens + m.contentTokens) / m.tg : 0,
+            accepted: spec?.acceptRate ?? 0,
+            gpuSeconds: ggufBackend?.drainGPUSeconds() ?? 0,
+            wallSeconds: Date().timeIntervalSince(since),
+            gpuRate: m.tgGPU))
         Diag.shared.report(.turn, String(
             format: "[turn] %@ thinking=%@ cap=%d outcome=%@ end=%@ tools=%@ "
                 + "think=%d content=%d ctx=%d %.1fs%@",
             modelName, thinkingActive ? "on" : "off", cap, outcome.rawValue,
             m.endReason, toolDigest(), m.thinkTokens, m.contentTokens,
-            m.ctx, Date().timeIntervalSince(since), specDigest()))
+            m.ctx, Date().timeIntervalSince(since), specDigest(spec)))
     }
 
     private func makeHooks(_ cont: AsyncStream<TurnEvent>.Continuation)
@@ -763,6 +777,7 @@ public enum TurnEvent: Sendable {
         if let session {
             await drainMeta()
             let began = Date()
+            _ = ggufBackend?.drainGPUSeconds()
             currentToolRounds = []
             let hooks = makeHooks(cont)
             let ticker = statsTicker(session, cont)

@@ -1452,6 +1452,7 @@ public actor ChatSession {
         var stop = false
         var thinkRescues = 0
         let g0 = Date()
+        let gpu0 = backend.gpuSeconds
         lastMetrics = TurnMetrics(ctx: startCtx, thinkTokens: tally.think,
                                   contentTokens: tally.content, pp: pp, tg: 0,
                                   readFraction: readFraction,
@@ -1764,9 +1765,12 @@ public actor ChatSession {
         let ctx = await backend.position
         let tgSec = Date().timeIntervalSince(g0)
         let tg = tgSec > 0 ? Double(steps) / tgSec : 0
+        let gpuSec = backend.gpuSeconds - gpu0
+        let tgGPU = gpuSec > 0 ? Double(steps) / gpuSec : 0
         lastMetrics = TurnMetrics(ctx: ctx, thinkTokens: tally.think + think,
                                   contentTokens: tally.content + content,
-                                  pp: pp, tg: tg, endReason: reason,
+                                  pp: pp, tg: tg, tgGPU: tgGPU,
+                                  endReason: reason,
                                   overrun: ctx - fed, stopToken: cur,
                                   readFraction: readFraction,
                                   readStop: readStop)

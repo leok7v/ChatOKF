@@ -11,6 +11,8 @@ public protocol TextEngine: AnyObject {
     func requestStop()
     func shouldStop() -> Bool
     func drainSpecTurn() -> SpecTurn?
+    func drainGPUSeconds() -> Double
+    var gpuSeconds: Double { get }
     func setSpeculation(_ on: Bool)
     func bookmark() -> Bookmark
     func restore(_ b: Bookmark)
@@ -28,6 +30,8 @@ public extension TextEngine {
     func requestStop() {}
     func shouldStop() -> Bool { false }
     func drainSpecTurn() -> SpecTurn? { nil }
+    func drainGPUSeconds() -> Double { 0 }
+    var gpuSeconds: Double { 0 }
     func setSpeculation(_ on: Bool) {}
     func attach(_ dir: URL) throws { throw EngineError.missingModel("state") }
     func flush(_ dir: URL) throws {}
@@ -90,6 +94,8 @@ public class EngineBackend<E: TextEngine, T: Tokenizing>: AgentBackend,
     public func shouldStop() -> Bool { engine.shouldStop() }
     public func queuedCount() async -> Int { engine.queued }
     public func drainSpecTurn() -> SpecTurn? { engine.drainSpecTurn() }
+    public func drainGPUSeconds() -> Double { engine.drainGPUSeconds() }
+    public var gpuSeconds: Double { engine.gpuSeconds }
     public func useSpeculation(_ on: Bool) { engine.setSpeculation(on) }
 
     public func supportsSoftTokens() async -> Bool { false }

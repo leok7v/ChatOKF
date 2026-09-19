@@ -10,9 +10,36 @@ struct WeightRef {
     }
 }
 
+final class GPUClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var seconds = 0.0
+
+    func add(_ cb: MTLCommandBuffer) {
+        let span = cb.gpuEndTime - cb.gpuStartTime
+        lock.lock()
+        if span > 0 { seconds += span }
+        lock.unlock()
+    }
+
+    var elapsed: Double {
+        lock.lock()
+        defer { lock.unlock() }
+        return seconds
+    }
+
+    func drain() -> Double {
+        lock.lock()
+        let out = seconds
+        seconds = 0
+        lock.unlock()
+        return out
+    }
+}
+
 public final class MetalContext {
     let device: MTLDevice
     let queue: MTLCommandQueue
+    let clock = GPUClock()
     private let library: MTLLibrary
     private var pipelines: [String: MTLComputePipelineState] = [:]
     // Apple7 (A14 / M1) and up. Building a simdgroup-matrix kernel on an older
