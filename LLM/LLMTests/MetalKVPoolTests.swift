@@ -23,6 +23,11 @@ final class MetalKVPoolTests: XCTestCase {
         b.contents().assumingMemoryBound(to: Float16.self) + slot * kvDim
     }
 
+    private func allocated(_ url: URL) -> Int {
+        var s = stat()
+        return stat(url.path, &s) == 0 ? Int(s.st_blocks) * 512 : 0
+    }
+
     func testEvictionKeepsTheWindowAndTheFloorsWindow() throws {
         let fresh = try pool(window: 4)
         fresh.appendBatch(20)
@@ -102,16 +107,13 @@ final class MetalKVPoolTests: XCTestCase {
             row(p.vPages[i], 0, 2048)[0] = 1
         }
         p.sync()
+        let before = allocated(url)
         p.evict(floor: 0)
         XCTAssertEqual(p.livePages, 1)
-        let h = try FileHandle(forReadingFrom: url)
-        try h.seek(toOffset: 0)
-        let punched = try h.read(upToCount: 2)
-        try h.seek(toOffset: UInt64(4 * p.pageBytes))
-        let kept = try h.read(upToCount: 2)
-        try h.close()
-        XCTAssertEqual(punched, Data([0, 0]), "page 0 was not punched")
-        XCTAssertNotEqual(kept, Data([0, 0]), "the window page was lost")
+        let after = allocated(url)
+        XCTAssertLessThan(after, before, "eviction returned no blocks")
+        XCTAssertNotEqual(Float(row(p.kPages[4], 0, 2048)[0]), 0,
+                          "the window page was lost")
         p.detach()
         try? FileManager.default.removeItem(at: url)
     }
