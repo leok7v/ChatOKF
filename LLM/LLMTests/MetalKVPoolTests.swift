@@ -111,6 +111,7 @@ final class MetalKVPoolTests: XCTestCase {
         p.evict(floor: 0)
         XCTAssertEqual(p.livePages, 1)
         let after = allocated(url)
+        try XCTSkipIf(before == 0, "this volume accounts no file blocks")
         XCTAssertLessThan(after, before, "eviction returned no blocks")
         XCTAssertNotEqual(Float(row(p.kPages[4], 0, 2048)[0]), 0,
                           "the window page was lost")
