@@ -459,7 +459,8 @@ public enum TurnEvent: Sendable {
                 reasoningEffort: modelSupportsReasoningEffort ? wire : nil,
                 maxReasoning: config.thinkTokenCap * 2,
                 softReasoningCap: config.thinkTokenCap,
-                overthink: Session.overthinkLambda, runner: toolRunner,
+                overthink: Session.overthinkLambda,
+                seed: Flags.uint64("seed") ?? 0, runner: toolRunner,
                 readGuard: Session.memoryGuard)
             hookTrace(thinkingActive: thinkingActive, onEvent: onEvent)
         }
@@ -708,7 +709,8 @@ public enum TurnEvent: Sendable {
         MTPTuning.shared.fold(MTPSample(
             model: modelName,
             revision: ModelCatalog.source(modelName)?.revision ?? "",
-            drafts: Session.draftCount, bucket: ThermalBucket.current,
+            drafts: spec == nil ? 0 : Session.draftCount,
+            bucket: ThermalBucket.current,
             tokens: m.thinkTokens + m.contentTokens,
             seconds: m.tg > 0
                 ? Double(m.thinkTokens + m.contentTokens) / m.tg : 0,

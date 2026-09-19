@@ -134,6 +134,10 @@ public enum Flags {
         Knob(name: "bench-cool", takesValue: true, help:
             "seconds idle between the bench arms", scope: .diagnostic,
             defaultValue: "90"),
+        Knob(name: "bench-thinking", takesValue: false, help:
+            "reason during the bench arms; off so a run is not inherited "
+            + "from whatever the app last had on screen",
+            scope: .diagnostic, defaultValue: "0"),
         Knob(name: "memories", takesValue: false, help:
             "the memory store; --no-memories runs a turn on the context "
             + "alone, neither recalling nor writing a note",

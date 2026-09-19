@@ -289,7 +289,11 @@ import UniformTypeIdentifiers
 
     var modelSupportsThinking: Bool { session.modelSupportsThinking }
 
-    var thinkingActive: Bool { thinking && modelSupportsThinking }
+    var thinkingActive: Bool { benchOrUserThinking && modelSupportsThinking }
+
+    private var benchOrUserThinking: Bool {
+        Self.benchPrompt.isEmpty ? thinking : Self.benchThinking
+    }
 
     var downloadSizeText: String {
         let bytes = downloadName.flatMap { name in
@@ -604,6 +608,7 @@ import UniformTypeIdentifiers
     private static let benchPrompt = Flags.value("bench-prompt") ?? ""
     private static let benchTokens = Flags.int("bench-tokens") ?? 128
     private static let benchCool = Flags.int("bench-cool") ?? 90
+    private static let benchThinking = Flags.on("bench-thinking")
     @ObservationIgnored private var benchTask: Task<Void, Never>?
     private static let readFiles = Flags.values("read-file")
     private static let readPrompt = Flags.value("read-prompt") ?? ""
@@ -664,7 +669,7 @@ import UniformTypeIdentifiers
 
     func sessionConfig() -> Session.SessionConfig {
         Session.SessionConfig(
-            thinking: thinking,
+            thinking: benchOrUserThinking,
             reasoningEffortRaw: reasoningEffort.rawValue.lowercased(),
             reasoningEffortSlot:
                 ReasoningEffort.allCases.firstIndex(of: reasoningEffort) ?? 0,

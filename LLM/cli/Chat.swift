@@ -551,10 +551,21 @@ func benchIds(_ encode: (String) -> [Int32]) -> [Int32] {
 
 // The drafter is blk.<nLayer> of the SAME GGUF; --mtp-verify proves the spec
 // stream token-identical to plain greedy, --mtp-bench times it.
+@MainActor private func mtpSampler(_ chat: QwenMetalChat) -> Sampler? {
+    var out: Sampler? = nil
+    if rawArgs.contains("--mtp-sampled") {
+        var cfg = chat.samplingPresets.select(thinking: false, vision: false)
+        cfg.seed = seedVal != 0 ? seedVal : 1
+        out = Sampler(vocabSize: chat.tokenizer.vocabCount, config: cfg)
+    }
+    return out
+}
+
 @MainActor func runMetalMTP(_ path: String, verify: Bool) throws {
     let chat = try QwenMetalChat(ggufPath: path)
     let eng = chat.engine
     let n = specNVal ?? 2
+    let sampled = rawArgs.contains("--mtp-sampled")
     eng.loadMTP(drafts: n)
     if !eng.mtpReady {
         err("\(path) carries no nextn drafter\n")
@@ -567,9 +578,11 @@ func benchIds(_ encode: (String) -> [Int32]) -> [Int32] {
     // Both arms warm before either is timed: plain runs first and would
     // otherwise pay the cold cache alone.
     eng.reset()
+    eng.sampler = mtpSampler(chat)
     var warm = eng.extend(ids)
     for _ in 0 ..< 8 { warm = eng.decode(warm) }
     eng.reset()
+    eng.sampler = mtpSampler(chat)
     var plain: [Int32] = []
     var next = eng.extend(ids)
     let g0 = Date()
@@ -581,6 +594,7 @@ func benchIds(_ encode: (String) -> [Int32]) -> [Int32] {
     }
     let plainSec = Date().timeIntervalSince(g0)
     eng.reset()
+    eng.sampler = mtpSampler(chat)
     var spec: [Int32] = []
     var cur = eng.extend(ids)
     let s0 = Date()
@@ -610,9 +624,10 @@ func benchIds(_ encode: (String) -> [Int32]) -> [Int32] {
         print("PLAIN ids: " + plain.map { id in String(id) }
             .joined(separator: " "))
     } else {
-        print(String(format: "Metal/GPU  tg%d %.1f t/s  |  MTP n=%d %.1f t/s",
-                     gen, Double(gen) / plainSec, n,
-                     Double(gen) / specSec))
+        print(String(
+            format: "Metal/GPU  tg%d %.1f t/s  |  MTP n=%d %.1f t/s  [%@]",
+            gen, Double(gen) / plainSec, n, Double(gen) / specSec,
+            sampled ? "sampled seed \(seedVal != 0 ? seedVal : 1)" : "greedy"))
     }
     print(String(format: "  %.2f tok/cycle over %d cycles, accept %.0f%%",
                  tpc, cycles, acc * 100))

@@ -63,7 +63,8 @@ public enum Models {
     public static var every: [String] {
         isOS
             ? ["gemma-4-E2B", "gemma-4-E2B-MTP",
-               "gemma-4-E4B", "gemma-4-E4B-MTP", "Ternary-Bonsai-1.7B"]
+               "gemma-4-E4B", "gemma-4-E4B-MTP", "Qwen3.5-4B",
+               "Ternary-Bonsai-1.7B"]
             : ["Qwen3.5-4B", "Qwen3.5-9B",
                "Qwen3.8-27B-IQ1_S", "Qwen3.8-27B-IQ2_XXS",
                "Qwen3.8-27B-IQ3_XXS", "Qwen3.8-27B-IQ4_XS",
@@ -90,6 +91,7 @@ public enum Models {
         var band: Set<String> = []
         if isOS {
             if let rung = gemmaRung(gb) { band.insert(rung) }
+            if gb >= 7 { band.insert("Qwen3.5-4B") }
             if gb <= 3 { band.insert("Ternary-Bonsai-1.7B") }
         } else {
             if gb >= 8 { band.insert("Qwen3.5-4B") }
