@@ -423,11 +423,10 @@ public enum TurnEvent: Sendable {
         traceFile?.note("=== \(modelName) thinking=\(thinkingActive) "
             + "wiki=\(wikipedia) web=\(webAccess) \(Date())")
         let s = session
-        Task {
-            await s?.setTrace { [weak self] e in
-                Task { @MainActor in self?.recordTrace(e, onEvent: onEvent) }
-            }
+        let sink: @Sendable (TraceEvent) -> Void = { [weak self] e in
+            Task { @MainActor in self?.recordTrace(e, onEvent: onEvent) }
         }
+        Task { await s?.setTrace(sink) }
         Tools.setDiagSink { [weak self] msg in
             Task { @MainActor in
                 self?.recordTrace(TraceEvent(

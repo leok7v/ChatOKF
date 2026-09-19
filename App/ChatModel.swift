@@ -165,6 +165,19 @@ import UniformTypeIdentifiers
     var downloadDone: Int64 = 0
     var downloadTotal: Int64 = 0
     @ObservationIgnored private var downloadBase: Int64 = -1
+    var downloadFailure: String? = nil
+    @ObservationIgnored private var downloadFallback: String? = nil
+    @ObservationIgnored private var fetchTask: Task<Void, Never>?
+
+    var downloadFailed: Bool {
+        get { downloadFailure != nil }
+        set {
+            if !newValue {
+                downloadFailure = nil
+                restorePrior()
+            }
+        }
+    }
 
     func observeDownload(_ s: HubFetch.Status, set: URL) {
         if downloadBase < 0 {
@@ -809,6 +822,8 @@ import UniformTypeIdentifiers
 
     func confirmDownload() {
         if let name = downloadName, let src = ModelCatalog.source(name) {
+            downloadFallback = Session.isOnDisk(modelName)
+                ? modelName : downloadedFallback()
             commitSwitch(name)
             downloadName = nil
             downloading = true
@@ -819,7 +834,7 @@ import UniformTypeIdentifiers
             status = "downloading \(name)…"
             let dest = Bundle.modelStore().appendingPathComponent(name)
             let setDir = dest.appendingPathComponent(src.revision)
-            Task { @MainActor in
+            fetchTask = Task { @MainActor in
                 let failure = await session.fetch(name: name) { s in
                     Task { @MainActor in self.observeDownload(s, set: setDir) }
                 }
@@ -831,11 +846,12 @@ import UniformTypeIdentifiers
                         name, in: Bundle.modelStore()) {
                         await self.loadReady(name: name, path: path)
                     } else {
-                        self.status = failure ?? "download failed, check "
-                            + "your connection"
+                        self.downloadFailure = "\(Models.display(name)): "
+                            + "download failed, check your connection"
                     }
-                } else {
-                    self.status = failure!
+                } else if !Task.isCancelled {
+                    self.downloadFailure = "\(Models.display(name)): "
+                        + failure!
                 }
             }
         }
@@ -860,6 +876,22 @@ import UniformTypeIdentifiers
             commitSwitch(fallback)
             status = "loading model…"
             load(name: fallback)
+        }
+    }
+
+    var canAbortDownload: Bool { downloadFallback != nil }
+
+    func abortDownload() {
+        fetchTask?.cancel()
+        restorePrior()
+    }
+
+    private func restorePrior() {
+        if let back = downloadFallback, Session.isOnDisk(back) {
+            downloadName = nil
+            commitSwitch(back)
+            status = "loading model…"
+            load(name: back)
         }
     }
 
@@ -953,6 +985,9 @@ import UniformTypeIdentifiers
         statsLabel = ""
         attachmentSerials = [:]
         let running = genTask
+        let onEvent: @MainActor (TraceEvent) -> Void = { [weak self] e in
+            self?.recordTrace(e)
+        }
         genTask = Task { @MainActor in
             if running != nil {
                 session.requestStop()
@@ -960,9 +995,7 @@ import UniformTypeIdentifiers
                 _ = await running?.value
             }
             if let leaving { await session.parkCurrent(leaving) }
-            await session.newChatEngine(sessionConfig()) { [weak self] e in
-                self?.recordTrace(e)
-            }
+            await session.newChatEngine(sessionConfig(), onEvent: onEvent)
             genTask = nil
             Footprint.report(.load, "newChat end")
         }

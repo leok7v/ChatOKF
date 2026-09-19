@@ -2,8 +2,8 @@ name: ChatOKF
 options:
   bundleIdPrefix: io.github.leok7v
   # Pin LastUpgradeCheck to the running Xcode (encoded major/minor/patch, e.g.
-  # 26.6.0 -> "2660").
-  xcodeVersion: "2660"
+  # 27.0.0 -> "2700").
+  xcodeVersion: "2700"
   deploymentTarget:
     macOS: "15.0"
     iOS: "18.0"
@@ -21,6 +21,9 @@ settings:
     # No "Apple Vision (Designed for iPad)" destination -- nothing is validated
     # on visionOS.
     SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD: "NO"
+    # Xcode's recommended setting; it holds only while no target carries a
+    # run-script phase (see SWIFT_INSTALL_OBJC_HEADER on the libraries).
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
 targets:
   # The pure-Swift engine as a native static library, so it inherits the
   # project arch settings. Kernels.metal rides with each product, not here.
@@ -53,6 +56,10 @@ targets:
         SWIFT_VERSION: "6.0"
         SWIFT_STRICT_CONCURRENCY: complete
         SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
+        # Swift-only, used from Swift only. Left on, xcodegen adds a "Copy
+        # Swift Objective-C Interface Header" ditto phase, and ditto's temp
+        # file beside the declared output is denied by the script sandbox.
+        SWIFT_INSTALL_OBJC_HEADER: "NO"
         # Binds cblas_sgemm$NEWLAPACK.
         OTHER_SWIFT_FLAGS: -Xcc -DACCELERATE_NEW_LAPACK
       configs:
@@ -78,6 +85,8 @@ targets:
         SWIFT_VERSION: "6.0"
         SWIFT_STRICT_CONCURRENCY: complete
         SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
+        # As in LLM: no ditto header phase under the script sandbox.
+        SWIFT_INSTALL_OBJC_HEADER: "NO"
   # The session driver: model load/switch, the ChatSession lifecycle, one
   # turn's run, and conversation persistence.
   Chat:
@@ -96,6 +105,8 @@ targets:
         SWIFT_VERSION: "6.0"
         SWIFT_STRICT_CONCURRENCY: complete
         SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
+        # As in LLM: no ditto header phase under the script sandbox.
+        SWIFT_INSTALL_OBJC_HEADER: "NO"
       configs:
         Debug:
           SWIFT_OPTIMIZATION_LEVEL: "-O"
@@ -209,6 +220,10 @@ targets:
         TEST_HOST[sdk=iphoneos*]: $(BUILT_PRODUCTS_DIR)/ChatOKF.app/ChatOKF
         TEST_HOST[sdk=iphonesimulator*]: $(BUILT_PRODUCTS_DIR)/ChatOKF.app/ChatOKF
         BUNDLE_LOADER: $(TEST_HOST)
+        # Ad hoc on macOS like the app and the CLI tool, so a Mac without the
+        # team's "Mac Development" certificate still builds and runs the tests.
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY[sdk=macosx*]: "-"
   # UNHOSTED: hosting inside ChatOKF.app inherits its App Sandbox, which
   # cannot read ~/Models, so every weight-gated test would SKIP SILENTLY.
   LLMTests:
@@ -230,6 +245,9 @@ targets:
         SWIFT_STRICT_CONCURRENCY: complete
         SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
         GENERATE_INFOPLIST_FILE: YES
+        # Ad hoc on macOS, as in ChatOKFTests.
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY[sdk=macosx*]: "-"
   # UNHOSTED for the same reason as LLMTests.
   MDTests:
     type: bundle.unit-test
@@ -244,6 +262,9 @@ targets:
         SWIFT_STRICT_CONCURRENCY: complete
         SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
         GENERATE_INFOPLIST_FILE: YES
+        # Ad hoc on macOS, as in ChatOKFTests.
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY[sdk=macosx*]: "-"
 schemes:
   ChatOKF:
     build:

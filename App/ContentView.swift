@@ -95,6 +95,11 @@ struct ContentView: View {
                     model.load(name: model.modelName)
                 }
             }
+            .alert("Download Failed", isPresented: $model.downloadFailed) {
+                Button("OK") { }
+            } message: {
+                Text(model.downloadFailure ?? "")
+            }
     }
 
     @ViewBuilder
@@ -524,6 +529,12 @@ struct ContentView: View {
             }
             if let eta = model.downloadETA {
                 Text(eta).appFont(.caption).foregroundStyle(.tertiary)
+            }
+            if model.canAbortDownload {
+                Button("Cancel") { model.abortDownload() }
+                    .controlSize(.large)
+                    .keyboardShortcut(.cancelAction)
+                    .padding(.top, 8)
             }
         }
         .padding(32)

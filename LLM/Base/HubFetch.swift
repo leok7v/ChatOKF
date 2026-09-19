@@ -24,7 +24,8 @@ public struct HubFetch: Sendable {
 
     static let host = "https://huggingface.co"
     static let sentinel = ".complete"
-    static let retries = 5
+    static let retries = 8
+    static let backoff = 30
     static let chunk = 1 << 20
     static let span: Int64 = 32 << 20
     static let lanes = 4
@@ -167,6 +168,7 @@ public struct HubFetch: Sendable {
         var verified: URL? = nil
         var last: Error? = nil
         while attempt < retries && verified == nil {
+            let had = size(part)
             do {
                 Diag.memoryDetail?("fetch start \(e.path)")
                 if background {
@@ -187,7 +189,15 @@ public struct HubFetch: Sendable {
             } catch {
                 last = error
             }
-            attempt += 1
+            if verified == nil {
+                attempt = size(part) > had ? 1 : attempt + 1
+                Diag.shared.report(.net, "fetch \(e.path) attempt \(attempt) "
+                    + "at \(size(part)): \(last.map { err in "\(err)" } ?? "")")
+                if attempt < retries {
+                    try await Task.sleep(
+                        for: .seconds(min(backoff, 1 << (attempt - 1))))
+                }
+            }
         }
         let file = try need(verified, e.path, last)
         try? fm.removeItem(at: dst)
@@ -205,6 +215,7 @@ public struct HubFetch: Sendable {
         }
         var have = try assemble(part)
         while have < e.size && !BackgroundGate.shared.parked {
+            try Task.checkCancellation()
             let wave = Wave(base: have, onBytes: onBytes)
             var pieces: [(Int, URL)] = []
             try await withThrowingTaskGroup(of: (Int, URL).self) { group in
