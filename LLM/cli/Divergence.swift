@@ -200,3 +200,228 @@ func logSumExp(_ logits: UnsafePointer<Float>, _ len: Int) -> Float {
     vDSP_sve(shifted, 1, &sum, n)
     return peak + log(sum)
 }
+
+struct PplitTurn {
+    let prompt: String
+    let response: String
+}
+
+func parsePplitCorpus(_ text: String) -> [[PplitTurn]] {
+    let conv = "<|@CONV@|>", ask = "<|@PROMPT@|>", reply = "<|@RESPONSE@|>"
+    let multi = text.contains(conv + "\n")
+    var convs: [[PplitTurn]] = []
+    var cur: [PplitTurn] = []
+    var prompt = "", response = ""
+    var at = 0
+    for raw in text.split(separator: "\n", omittingEmptySubsequences: false) {
+        let line = String(raw)
+        let have = !prompt.isEmpty && !response.isEmpty
+        if line == conv {
+            if have { cur.append(PplitTurn(prompt: prompt, response: response)) }
+            if !cur.isEmpty { convs.append(cur) }
+            cur = []; prompt = ""; response = ""; at = 0
+        } else if line == ask {
+            if have { cur.append(PplitTurn(prompt: prompt, response: response)) }
+            if have && !multi { convs.append(cur); cur = [] }
+            prompt = ""; response = ""; at = 1
+        } else if line == reply {
+            at = 2
+        } else if at == 1 {
+            prompt += prompt.isEmpty ? line : "\n" + line
+        } else if at == 2 {
+            response += response.isEmpty ? line : "\n" + line
+        }
+    }
+    if !prompt.isEmpty && !response.isEmpty {
+        cur.append(PplitTurn(prompt: prompt, response: response))
+    }
+    if !cur.isEmpty { convs.append(cur) }
+    return convs
+}
+
+func pplitMessages(_ conv: [PplitTurn], upto: Int) -> [AgentMessage] {
+    var out: [AgentMessage] = []
+    for i in 0...upto {
+        out.append(AgentMessage(role: "user", content: conv[i].prompt))
+        if i < upto {
+            out.append(AgentMessage(role: "assistant", content: conv[i].response))
+        }
+    }
+    return out
+}
+
+struct PplitScorer {
+    let vocab: Int
+    let render: ([PplitTurn], Int) throws -> String
+    let framed: (String) -> [Int32]
+    let plain: (String) -> [Int32]
+    let score: ([Int32], Int, (Int, Int32, UnsafePointer<Float>) -> Void) -> Void
+}
+
+func pplitScorer(_ path: String) throws -> PplitScorer {
+    let out: PplitScorer
+    if Gemma4Model.isGemma4(path: path) {
+        let chat = try GemmaChat(ggufPath: path)
+        let engine = try Gemma4MetalEngine(chat.model)
+        out = PplitScorer(
+            vocab: chat.vocabCount,
+            render: { conv, upto in
+                try renderPrompt(template: chat.chatTemplate,
+                                 messages: pplitMessages(conv, upto: upto),
+                                 tools: [], addGenerationPrompt: true,
+                                 enableThinking: false, bosToken: chat.bosToken)
+            },
+            framed: { s in chat.encode(s) },
+            plain: { s in chat.encodeRaw(s) },
+            score: { ids, from, sink in engine.chunkCost(ids, from: from, want: sink) })
+    } else {
+        let chat = try QwenMetalChat(ggufPath: path)
+        out = PplitScorer(
+            vocab: chat.tokenizer.vocabCount,
+            render: { conv, upto in
+                try renderPrompt(template: chat.chatTemplate,
+                                 messages: pplitMessages(conv, upto: upto),
+                                 tools: [], addGenerationPrompt: true,
+                                 enableThinking: false)
+            },
+            framed: { s in chat.tokenizer.encode(s, addSpecial: true) },
+            plain: { s in chat.tokenizer.encode(s, addSpecial: false) },
+            score: { ids, from, sink in chat.engine.chunkCost(ids, from: from, want: sink) })
+    }
+    return out
+}
+
+struct PplitTotals {
+    var nll = 0.0
+    var n = 0
+    var top1 = 0
+    var top5 = 0
+    var top10 = 0
+    var ranks: [Int32] = []
+    var turns = 0
+    var skipped = 0
+
+    var ppl: Double { n > 0 ? exp(nll / Double(n)) : 0 }
+
+    mutating func add(_ lp: UnsafePointer<Float>, _ vocab: Int, _ want: Int32) {
+        nll += cost(lp, vocab, want)
+        let w = lp[Int(want)]
+        var r: Int32 = 0
+        var i = 0
+        while i < vocab {
+            if lp[i] > w { r += 1 }
+            i += 1
+        }
+        top1 += r == 0 ? 1 : 0
+        top5 += r < 5 ? 1 : 0
+        top10 += r < 10 ? 1 : 0
+        ranks.append(r)
+        n += 1
+    }
+
+    func line(_ name: String, convs: Int) -> String {
+        let sorted = ranks.sorted()
+        let last = Double(max(sorted.count - 1, 0))
+        let d = Double(max(n, 1))
+        let pad = name.count < 30 ? String(repeating: " ", count: 30 - name.count) : ""
+        return name + pad + String(
+            format: " ppl %8.4f  top1 %6.2f%%  top5 %6.2f%%  top10 %6.2f%%  "
+                + "rank p50 %d p90 %d   over %d tokens, %d turns, %d convs",
+            ppl, 100 * Double(top1) / d, 100 * Double(top5) / d,
+            100 * Double(top10) / d,
+            sorted.isEmpty ? 0 : Int(sorted[Int(0.5 * last)]),
+            sorted.isEmpty ? 0 : Int(sorted[Int(0.9 * last)]), n, turns, convs)
+    }
+}
+
+func pplitScore(_ s: PplitScorer, _ convs: [[PplitTurn]], ctx: Int, cap: Int,
+                dump: String?, against: String?,
+                progress: (Int, Int, Double) -> Void) throws
+    -> (PplitTotals, Divergence?) {
+    var teacher = Data()
+    if let against {
+        teacher = try Data(contentsOf: URL(fileURLWithPath: against))
+        let head = teacher.withUnsafeBytes { raw in
+            (raw.loadUnaligned(fromByteOffset: 0, as: UInt32.self),
+             raw.loadUnaligned(fromByteOffset: 4, as: UInt32.self))
+        }
+        if head.0 != TopK.magic || Int(head.1) != TopK.k {
+            throw NSError(domain: "pplit", code: 2, userInfo: [
+                NSLocalizedDescriptionKey: "\(against) is not a top-\(TopK.k) dump"])
+        }
+    }
+    var sink = Data()
+    if dump != nil {
+        sink.append(contentsOf: withUnsafeBytes(of: TopK.magic) { b in Array(b) })
+        sink.append(contentsOf: withUnsafeBytes(of: UInt32(TopK.k)) { b in Array(b) })
+    }
+    var totals = PplitTotals()
+    var tally = Divergence()
+    for (c, conv) in convs.enumerated() {
+        for t in 0..<conv.count {
+            let rendered = try s.render(conv, t)
+            let pid = s.framed(rendered)
+            var rid = s.plain(conv[t].response)
+            if cap > 0, rid.count > cap { rid = Array(rid.prefix(cap)) }
+            let ids = pid + rid
+            if rendered.isEmpty || rid.count < 2 || ids.count > ctx {
+                totals.skipped += 1
+            } else {
+                s.score(ids, pid.count) { _, want, lp in
+                    totals.add(lp, s.vocab, want)
+                    if dump != nil || against != nil {
+                        let top = rank(lp, s.vocab)
+                        if dump != nil { append(&sink, want, lp, top, s.vocab) }
+                        if against != nil {
+                            tally.add(lp, s.vocab, teacher, top)
+                            tally.tokens += 1
+                        }
+                    }
+                }
+                totals.turns += 1
+            }
+        }
+        progress(c + 1, convs.count, totals.ppl)
+    }
+    if let dump { try sink.write(to: URL(fileURLWithPath: dump)) }
+    return (totals, against == nil ? nil : tally)
+}
+
+func pplitCorpusBeside(_ file: String = #filePath) -> String {
+    URL(fileURLWithPath: file)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .appendingPathComponent("LLM/fixtures/pplit/pplit-corpus.txt").path
+}
+
+func runPplit(_ path: String, _ args: CommandArgs) throws {
+    let given = args.value("--pplit") ?? ""
+    let corpus = given.isEmpty ? pplitCorpusBeside() : given
+    let text = (try? String(contentsOfFile: corpus, encoding: .utf8)) ?? ""
+    if text.isEmpty {
+        err("no corpus at \(corpus)\n"
+            + "usage: chatokf <model.ggxf> --pplit [pplit-corpus.txt] "
+            + "[--pplit-ctx 8192] [--items N] [--cap 320] "
+            + "[--kld-dump <top.bin> | --kld <top.bin>]\n")
+        exit(2)
+    }
+    var convs = parsePplitCorpus(text)
+    if let items = args.int("--items"), items > 0, convs.count > items {
+        convs = Array(convs.prefix(items))
+    }
+    let t0 = Date()
+    let scorer = try pplitScorer(path)
+    let (totals, kl) = try pplitScore(
+        scorer, convs, ctx: args.int("--pplit-ctx") ?? 8192,
+        cap: args.int("--cap") ?? 320, dump: args.value("--kld-dump"),
+        against: args.value("--kld")) { done, total, ppl in
+        err(String(format: "\r[pplit] %d/%d  ppl %.4f   ", done, total, ppl))
+    }
+    err("\n")
+    print(totals.line((path as NSString).lastPathComponent, convs: convs.count))
+    if let kl { print(String(repeating: " ", count: 30) + kl.line) }
+    err(String(format: "[pplit] %d turns scored, %d skipped, %.0fs\n",
+               totals.turns, totals.skipped, Date().timeIntervalSince(t0)))
+    exit(0)
+}

@@ -91,6 +91,9 @@ if isModelFile(arg1), args.flag("--replay-make") {
 if isModelFile(arg1), args.flag("--replay") {
     try runReplayScore(arg1, args)
 }
+if isModelFile(arg1), rawArgs.contains("--pplit") {
+    try runPplit(arg1, args)
+}
 if isModelFile(arg1), rawArgs.contains("--kld")
     || rawArgs.contains("--kld-dump") { try runDivergence(arg1, args) }
 if args.flag("--puzzle-rescore") { runPuzzleRescore(args) }

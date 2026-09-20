@@ -1,0 +1,17 @@
+Corpus for chat-framed perplexity (chatokf --pplit, LLM/cli/Divergence.swift).
+
+From https://github.com/leok7v/pplit, file pplit-corpus.txt, under the
+Open Data Commons Attribution License v1.0 (ODC-BY 1.0), which permits
+redistribution with attribution. That licence is why this copy can live
+here at all, and why this file must stay beside it.
+
+  https://github.com/leok7v/pplit/blob/main/pplit-corpus.txt
+  https://opendatacommons.org/licenses/by/1-0/
+
+It is prompt/response pairs marked up with <|@PROMPT@|> and
+<|@RESPONSE@|>. It is vendored rather than referenced so that --pplit
+works in a clean checkout instead of needing a second repository, the
+same reason the Tatoeba audio beside it is vendored.
+
+Re-fetch it from the URL above rather than editing it here: a local edit
+would silently change every perplexity this repo has ever reported.

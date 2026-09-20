@@ -1,1 +1,2 @@
 LLM/Base/e5-small.gguf filter=lfs diff=lfs merge=lfs -text
+LLM/fixtures/pplit/pplit-corpus.txt filter=lfs diff=lfs merge=lfs -text

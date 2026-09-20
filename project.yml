@@ -234,6 +234,11 @@ targets:
         excludes:
           - okf-data
           - okf-reference.txt
+      # The perplexity, KL and pplit scoring live with the CLI; the gated
+      # tests drive the same code rather than a copy.
+      - path: LLM/cli/Args.swift
+      - path: LLM/cli/Perplexity.swift
+      - path: LLM/cli/Divergence.swift
       # The Metal kernel tests need a default.metallib of their own -- see
       # the LLM target comment; the same trap applies to a test bundle.
       - path: LLM/metal
