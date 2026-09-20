@@ -1,6 +1,7 @@
 import Chat
 import CoreTransferable
 import Foundation
+import LLM
 import MD
 import SwiftUI
 import UniformTypeIdentifiers
@@ -51,15 +52,76 @@ enum ConversationExport {
     static func document(_ convo: ConversationStore.Convo)
         -> Markdown.Document {
         let stream = MarkdownStream()
-        for m in convo.messages {
+        for (i, m) in convo.messages.enumerated() {
             stream.append(block(fromUser: m.fromUser, text: m.text,
                                 reasoning: m.reasoning))
+            stream.append(attached(m, i))
         }
         return stream.finish()
     }
 
+    private static func attachURL(_ i: Int, _ kind: String,
+                                  _ j: Int) -> URL {
+        URL(string: "chatokf://attachment/\(i)/\(kind)/\(j)")!
+    }
+
+    private static func attached(_ m: ConversationStore.Msg,
+                                 _ i: Int) -> String {
+        var out = ""
+        for j in m.images.indices {
+            out += "![Picture \(j + 1)](\(attachURL(i, "image", j)))\n\n"
+        }
+        for j in (m.posters ?? []).indices {
+            out += "![Video \(j + 1)](\(attachURL(i, "video", j)))\n\n"
+            out += "_Video_\n\n"
+        }
+        for doc in m.docs ?? [] {
+            out += "_" + trace(doc) + "_\n\n"
+        }
+        return out
+    }
+
+    static func trace(_ doc: ConversationStore.StoredDoc) -> String {
+        let name = doc.path.split(separator: "/").last.map(String.init)
+            ?? doc.path
+        let total = doc.total ?? doc.bytes
+        var out = name + " \u{2014} " + size(total)
+        if let read = doc.read, read < total {
+            out = name + " \u{2014} read " + size(read) + " of "
+                + size(total)
+        }
+        if let cut = doc.cut, !cut.isEmpty {
+            out += cut == "memory" ? ", stopped: out of memory"
+                                   : ", stopped by the user"
+        }
+        return out
+    }
+
+    private static func size(_ bytes: Int) -> String {
+        ByteCountFormatter.string(fromByteCount: Int64(bytes),
+                                  countStyle: .file)
+    }
+
+    static func blobs(_ convo: ConversationStore.Convo) -> [URL: Data] {
+        var out: [URL: Data] = [:]
+        for (i, m) in convo.messages.enumerated() {
+            for (j, data) in m.images.enumerated() {
+                out[attachURL(i, "image", j)] = data
+            }
+            for (j, data) in (m.posters ?? []).enumerated() {
+                out[attachURL(i, "video", j)] = data
+            }
+        }
+        return out
+    }
+
     static func pdf(_ convo: ConversationStore.Convo) async -> Data? {
-        await MarkdownPDF.export(document(convo), title: convo.title)
+        var decoded: [URL: CGImage] = [:]
+        for (url, data) in blobs(convo) {
+            if let cg = VisionPreprocess.image(data) { decoded[url] = cg }
+        }
+        return MarkdownPDF.data(document(convo), title: convo.title,
+                                images: decoded)
     }
 
     static func document(text: String) -> Markdown.Document {

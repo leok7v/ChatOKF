@@ -53,8 +53,7 @@ public enum Models {
         let out: String?
         switch gb {
         case ..<4: out = nil
-        case ..<6: out = "gemma-4-E2B"
-        case ..<7: out = "gemma-4-E2B-MTP"
+        case ..<7: out = "gemma-4-E2B"
         default: out = "gemma-4-E4B-MTP"
         }
         return out
@@ -62,15 +61,14 @@ public enum Models {
 
     public static var every: [String] {
         isOS
-            ? ["gemma-4-E2B", "gemma-4-E2B-MTP",
-               "gemma-4-E4B", "gemma-4-E4B-MTP", "Qwen3.5-4B",
-               "Ternary-Bonsai-1.7B"]
+            ? ["gemma-4-E2B", "gemma-4-E4B", "gemma-4-E4B-MTP",
+               "Qwen3.5-4B", "Ternary-Bonsai-1.7B"]
             : ["Qwen3.5-4B", "Qwen3.5-9B",
                "Qwen3.8-27B-IQ1_S", "Qwen3.8-27B-IQ2_XXS",
                "Qwen3.8-27B-IQ3_XXS", "Qwen3.8-27B-IQ4_XS",
                "Qwen3.8-27B-Q4_K_S",
                "Ternary-Bonsai-27B", "Ternary-Bonsai-1.7B",
-               "gemma-4-E2B", "gemma-4-E2B-MTP",
+               "gemma-4-E2B",
                "gemma-4-E4B", "gemma-4-E4B-MTP",
                "gemma-4-12B", "gemma-4-12B-MTP"]
     }
