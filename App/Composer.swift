@@ -104,14 +104,14 @@ struct Composer: View {
         if hinting {
             Text(model.followupHint)
                 .font(editorFont)
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(.secondary)
                 .lineLimit(2)
                 .padding(.top, 2)
                 .allowsHitTesting(false)
         } else if model.input.isEmpty {
             Text("Write a message…")
                 .font(editorFont)
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(.secondary)
                 .padding(.top, 2)
                 .allowsHitTesting(false)
         }
@@ -510,15 +510,13 @@ struct Composer: View {
     }
 
     private var footnote: some View {
-        let quiet = model.listening || model.speech.speaking
-        return Text(noteText)
-            .appFont(.caption2)
-            .foregroundStyle(quiet ? .secondary : .tertiary)
+        Text(noteText)
+            .appFont(.caption)
+            .foregroundStyle(.primary)
+            .lineLimit(1)
+            .minimumScaleFactor(0.85)
             .frame(maxWidth: .infinity)
-            // The colour fades; the STRING must not, or the animation
-            // cross-fades the old sentence over the new one.
             .contentTransition(.identity)
-            .animation(.easeInOut(duration: 0.2), value: quiet)
     }
 
     private var noteText: String {
