@@ -24,7 +24,7 @@ public final class Gemma4MetalEngine {
     public private(set) var specCommitted = 0
     public private(set) var specDrafted = 0
     public private(set) var specAccepted = 0
-    public static let specN = max(1, Flags.int("spec-n") ?? 3)
+    public let specN: Int
 
     private let bx, bNormed, bContrib: MTLBuffer
     private let bQ, bK, bV, bAttnOut, bGateNull: MTLBuffer
@@ -123,6 +123,8 @@ public final class Gemma4MetalEngine {
         // a block that does not fit cannot be attended correctly at all.
         let widest = cfg.blockwiseVision
             ? (model.gguf.int("gemma4.vision.max_soft_tokens") ?? 0) : 0
+        specN = max(1, Flags.int("spec-n")
+                       ?? Gemma4MetalEngine.draftWidth(model.gguf))
         let B = ctx.matrixUnits
             ? max(Gemma4MetalEngine.defaultBatch, widest) : 1
         capacity = B
@@ -195,6 +197,14 @@ public final class Gemma4MetalEngine {
     }
 
     public var hasAssist: Bool { assist != nil }
+
+    static func draftWidth(_ g: GGUF) -> Int {
+        let gb = Double(g.mapSize) / 1_073_741_824
+        let ram = (ProcessInfo.processInfo.physicalMemory + (1 << 29)) >> 30
+        var out = 1
+        if gb >= 4, gb < 6 { out = ram >= 16 ? 3 : 2 }
+        return out
+    }
 
     public func drainGPUSeconds() -> Double { ctx.clock.drain() }
     public var gpuSeconds: Double { ctx.clock.elapsed }
@@ -401,8 +411,8 @@ public final class Gemma4MetalEngine {
     }
 
     public func decode(_ token: Int32) -> Int32 {
-        let ready = assist != nil && Gemma4MetalEngine.specN > 1
-            && !plainDecode && capacity >= Gemma4MetalEngine.specN
+        let ready = assist != nil && specN > 1
+            && !plainDecode && capacity >= specN
             && sampler?.logitMask == nil
         var out: Int32
         if !specQueue.isEmpty {
@@ -438,7 +448,7 @@ public final class Gemma4MetalEngine {
     private func specCycle(_ token: Int32) -> [Int32] {
         let c = cfg
         let p0 = pos
-        let drafts = assistDraft(token, count: Gemma4MetalEngine.specN - 1)
+        let drafts = assistDraft(token, count: specN - 1)
         var fed: [Int32] = [token]
         fed.append(contentsOf: drafts)
         let width = fed.count

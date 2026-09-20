@@ -5,6 +5,8 @@ public final class Gemma4MetalBackend:
 
     public var ctx: MetalContext { engine.ctx }
 
+    public var draftWidth: Int { engine.specN }
+
     public override func supportsSoftTokens() async -> Bool { ctx.matrixUnits }
 
     public override func extendSoft(_ ids: [Int32],

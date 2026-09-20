@@ -77,7 +77,7 @@ func runAssistBench(_ path: String, _ args: CommandArgs) throws {
         let acc = Double(engine.specAccepted)
             / Double(max(engine.specDrafted, 1))
         print(chat.decode(spec))
-        print("VERIFY-ASSIST (n=\(Gemma4MetalEngine.specN), gen=\(gen)): "
+        print("VERIFY-ASSIST (n=\(engine.specN), gen=\(gen)): "
               + (diff < 0 ? "\(gen)/\(gen) EXACT"
                           : "DIVERGES at \(diff) "
                             + "(plain \(plain[diff]) spec \(spec[diff]))"))
@@ -85,7 +85,7 @@ func runAssistBench(_ path: String, _ args: CommandArgs) throws {
                      tpc, cycles, acc * 100))
         print(String(format: "  tg%d %.2f t/s  |  assist n=%d %.2f t/s  %.2fx",
                      gen, Double(gen) / plainSec,
-                     Gemma4MetalEngine.specN, Double(gen) / specSec,
+                     engine.specN, Double(gen) / specSec,
                      plainSec / specSec))
     }
     exit(status)

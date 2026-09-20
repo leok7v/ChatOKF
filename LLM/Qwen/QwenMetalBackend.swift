@@ -124,29 +124,7 @@ public struct QwenMetalChat {
             .map { n in dir + "/" + n }
     }
 
-    public var mtpDrafts: Int {
-        var out = 0
-        if let n = Flags.int("mtp-drafts") {
-            out = n
-        } else {
-            let gb = Double(engine.model.gguf.mapSize) / 1_073_741_824
-            let trunk = QwenMetalChat.dominantType(engine.model.gguf)
-            let narrow = MetalEnc.narrowIQName(trunk) != nil || trunk == .q4_0
-            let wide = MetalEnc.fusedTypes.contains(trunk) && gb >= 5
-            out = gb < 3 || !narrow ? 0 : (wide ? 2 : 1)
-        }
-        return out
-    }
-
-    static func dominantType(_ g: GGUF) -> GGUFType {
-        var bytes: [GGUFType: Int] = [:]
-        for (name, t) in g.tensors
-        where !name.hasPrefix("v.") && !name.hasPrefix("mm.") {
-            bytes[t.type, default: 0] += t.byteCount
-        }
-        let top = bytes.max { a, b in a.value < b.value }
-        return top?.key ?? .f32
-    }
+    public var mtpDrafts: Int { Flags.int("mtp-drafts") ?? 0 }
 
     public func backend() -> QwenMetalBackend {
         QwenMetalBackend(engine: engine, tokenizer: tokenizer,

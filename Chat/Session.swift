@@ -205,7 +205,7 @@ public enum TurnEvent: Sendable {
                     backend: gpu, template: c.chatTemplate,
                     vocab: c.vocabCount, presets: c.samplingPresets,
                     shape: c.shape)
-                Session.draftCount = Gemma4MetalEngine.specN
+                Session.draftCount = gpu.draftWidth
                 if await gpu.supportsSoftTokens() {
                     loadedMedia = c.media(ctx: gpu.ctx)
                 }

@@ -54,7 +54,7 @@ public enum Models {
         switch gb {
         case ..<4: out = nil
         case ..<6: out = "gemma-4-E2B"
-        case ..<8: out = "gemma-4-E2B-MTP"
+        case ..<7: out = "gemma-4-E2B-MTP"
         default: out = "gemma-4-E4B-MTP"
         }
         return out
