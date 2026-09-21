@@ -45,7 +45,10 @@ final class GGUFWriter {
     private var written = 0
     private var headerDone = false
 
-    init(path: String, alignment: Int = 16384) throws {
+    static let defaultAlignment = 16384
+
+    init(path: String,
+         alignment: Int = GGUFWriter.defaultAlignment) throws {
         let temp = path + ".partial"
         try? FileManager.default.removeItem(atPath: temp)
         FileManager.default.createFile(atPath: temp, contents: nil)

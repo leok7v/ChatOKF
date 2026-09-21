@@ -82,6 +82,7 @@ public actor ChatSession {
         }
     }()
     static let digitsExempt = Flags.on("digit-exempt")
+    static let budgetNote = Flags.value("reasoning-note") ?? ""
     private var gate: GrammarGate?
     private var grammarVocab: GrammarVocab?
     private let toolDialectXML: Bool
@@ -560,6 +561,15 @@ public actor ChatSession {
             }
             cont.onTermination = { _ in task.cancel() }
         }
+    }
+
+    private func reasoningSeed(_ gen: String) -> String {
+        var out = gen
+        let wanted = enableThinking && !suppressReasoning && !metaTurn
+            && wire.derivedReasoning && !wire.opensReasoning(gen)
+            && !wire.closesReasoning(gen)
+        if wanted { out += wire.reasoningOpen + "\n" }
+        return out
     }
 
     static func titleSeed(_ gen: String, _ wire: ChatWire) -> String {
@@ -1065,6 +1075,7 @@ public actor ChatSession {
         var genText = fullText.hasPrefix(closedText)
             ? String(fullText.dropFirst(closedText.count)) : ""
         if metaTurn { genText += ChatSession.titleSeed(genText, wire) }
+        genText = reasoningSeed(genText)
         genStartsThink = wire.startsInReasoning(genPrompt: genText,
                                                 enabled: true)
         var encoded = backend.encode(closedText)
@@ -1436,6 +1447,7 @@ public actor ChatSession {
         let startsInThink = enableThinking && genStartsThink
         var inThinkRegion = startsInThink
         var thinkDecided = startsInThink
+        var openerPending = startsInThink
         var wsDone = !startsInThink
         var thinkSearch = 0
         var toolAt: Int? = nil
@@ -1481,6 +1493,17 @@ public actor ChatSession {
                     break
                 }
             }
+            if openerPending {
+                switch ChatSession.leadingThink(bytes, thinkOpen) {
+                case .isThink(let past):
+                    emitted = past
+                    openerPending = false
+                case .notThink:
+                    openerPending = false
+                case .pending:
+                    break
+                }
+            }
             if inThinkRegion && closeAt == nil {
                 closeAt = ChatSession.index(bytes, thinkClose,
                                             thinkSearch)
@@ -1514,7 +1537,7 @@ public actor ChatSession {
                 let hold = max(openHold, ChatSession.partialSuffix(
                     bytes, thinkClose, n))
                 let end = min(toolAt ?? Int.max, n - hold)
-                if end > emitted {
+                if end > emitted, !openerPending {
                     onReasoning?(String(decoding: bytes[emitted ..< end],
                                         as: UTF8.self))
                     emitted = end
@@ -1655,7 +1678,7 @@ public actor ChatSession {
                     // The injected close marker is found next pass, and the
                     // whitespace skip eats its newlines, so none of it streams.
                     let close = backend.encode(
-                        wire.reasoningClose + "\n\n")
+                        ChatSession.budgetNote + wire.reasoningClose + "\n\n")
                     ids.append(contentsOf: close)
                     for id in close {
                         bytes.append(contentsOf: backend.tokenBytes(id))
@@ -1938,6 +1961,7 @@ public actor ChatSession {
         var genText = fullText.hasPrefix(closedText)
             ? String(fullText.dropFirst(closedText.count)) : ""
         if metaTurn { genText += ChatSession.titleSeed(genText, wire) }
+        genText = reasoningSeed(genText)
         genStartsThink = wire.startsInReasoning(genPrompt: genText,
                                                 enabled: true)
         var seed = backend.eos

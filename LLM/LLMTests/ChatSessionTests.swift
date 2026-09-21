@@ -491,9 +491,10 @@ final class ChatSessionTests: XCTestCase {
 
     func testMetaTurnOpensATextBlockOnEveryWire() async throws {
         let gemma = try ChatSessionTests.fixture("gemma4-chat-template.jinja")
-        let voc = vocab([(1001, "The sky scatters blue light."),
+        let voc = vocab([(1000, "scattering<channel|>"),
+                         (1001, "The sky scatters blue light."),
                          (1002, "Sky Color Question\n```")])
-        let onGemma = TapeBackend(scripts: [[1001], [1002]], vocab: voc)
+        let onGemma = TapeBackend(scripts: [[1000, 1001], [1002]], vocab: voc)
         let g = ChatSession(
             backend: onGemma, template: gemma, system: "You are a bot.",
             vocabSize: 256, enableThinking: true)
@@ -581,6 +582,27 @@ final class ChatSessionTests: XCTestCase {
         XCTAssertEqual(content, "The answer.")
         XCTAssertTrue(reasoning.text.contains("planning"), reasoning.text)
         XCTAssertFalse(reasoning.text.contains("<|channel>"), reasoning.text)
+        XCTAssertFalse(reasoning.text.contains("thought"), reasoning.text)
+    }
+
+    func testARepeatedOpenerAfterAnOpenThinkPromptIsNotReasoning() async throws {
+        let openThink = "{%- for m in messages -%}"
+            + "<|im_start|>{{ m.role }}\n{{ m.content }}<|im_end|>\n"
+            + "{%- endfor -%}{%- if add_generation_prompt -%}"
+            + "<|im_start|>assistant\n<think>\n{%- endif -%}"
+        let backend = MockBackend(
+            scripts: [[9, 10, 12, 13]],
+            vocab: vocab([(9, "<thi"), (10, "nk>\nwhy"),
+                          (12, "</think>"), (13, "The answer.")]))
+        let session = ChatSession(
+            backend: backend, template: openThink, system: "You are a bot.",
+            vocabSize: 256, enableThinking: true)
+        let reasoning = Box()
+        var content = ""
+        let stream = session.reply("go", onReasoning: { r in reasoning.add(r) })
+        for await piece in stream { content += piece }
+        XCTAssertEqual(reasoning.text, "\nwhy")
+        XCTAssertEqual(content, "The answer.")
     }
 
     // CONCRETE reproduction of the observed "<think>" title (diag: makeTitle

@@ -108,7 +108,7 @@ struct Composer: View {
                 .lineLimit(2)
                 .padding(.top, 2)
                 .allowsHitTesting(false)
-        } else if model.input.isEmpty {
+        } else if model.input.isEmpty, !model.prefilling {
             Text("Write a message…")
                 .font(editorFont)
                 .foregroundStyle(.secondary)
@@ -224,7 +224,7 @@ struct Composer: View {
             }
             Spacer()
             if model.speech.available { speakerButton }
-            micButton
+            if model.canAttachAudio { micButton }
             sendButton
         }
         .font(.system(size: controlSize))
@@ -253,7 +253,7 @@ struct Composer: View {
                 .symbolEffect(.pulse, isActive: model.listening)
         }
         .buttonStyle(.plain)
-        .disabled(!model.canAttachAudio || (model.busy && !model.listening))
+        .disabled(model.busy && !model.listening)
         .help(on ? "Turn the microphone off" : "Speak")
     }
 

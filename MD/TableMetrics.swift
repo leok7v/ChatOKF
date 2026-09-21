@@ -55,6 +55,22 @@ enum TableMetrics {
         return result
     }
 
+    static func scrollingLayout(headers: [String], rows: [[String]],
+                                natural: [CGFloat], minimums: [CGFloat],
+                                available: CGFloat)
+        -> (widths: [CGFloat], wrap: Bool, scrolls: Bool) {
+        var result: (widths: [CGFloat], wrap: Bool, scrolls: Bool)
+        if minimums.reduce(0, +) > available {
+            result = (minimums, true, true)
+        } else {
+            let fit = columnLayout(headers: headers, rows: rows,
+                                   natural: natural, minimums: minimums,
+                                   available: available)
+            result = (fit.widths, fit.wrap, false)
+        }
+        return result
+    }
+
     private static func capped(_ widths: [CGFloat],
                                _ natural: [CGFloat]) -> [CGFloat] {
         var out = widths
@@ -78,8 +94,8 @@ enum TableMetrics {
         let minSum = minimums.reduce(0, +)
         let result: [CGFloat]
         if minSum >= available, minSum > 0 {
-            let scale = available / minSum
-            result = minimums.map { v in v * scale }
+            result = fairWidths(minimums: minimums, weights: weights,
+                                available: available)
         } else if sum > 0 {
             let remainder = available - minSum
             result = (0..<minimums.count).map { i in
@@ -87,6 +103,32 @@ enum TableMetrics {
             }
         } else {
             result = minimums
+        }
+        return result
+    }
+
+    private static func fairWidths(minimums: [CGFloat], weights: [CGFloat],
+                                   available: CGFloat) -> [CGFloat] {
+        var result = [CGFloat](repeating: 0, count: minimums.count)
+        var open = Array(0 ..< minimums.count)
+        var remaining = available
+        var granted: [Int] = []
+        repeat {
+            let pending = open.reduce(0) { sum, c in sum + weights[c] }
+            let room = remaining
+            granted = open.filter { c in
+                pending > 0 && minimums[c] <= room * weights[c] / pending
+            }
+            for c in granted {
+                result[c] = minimums[c]
+                remaining -= minimums[c]
+            }
+            open.removeAll { c in granted.contains(c) }
+        } while !granted.isEmpty
+        let short = open.reduce(0) { sum, c in sum + weights[c] }
+        for c in open {
+            result[c] = short > 0 ? remaining * weights[c] / short
+                                  : remaining / CGFloat(open.count)
         }
         return result
     }

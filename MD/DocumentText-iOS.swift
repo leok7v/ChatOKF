@@ -68,7 +68,7 @@ extension DocumentText {
                                           cols: cols, style: style)
                 .map { w in w + columnGap }
             let room = width > 0 ? width : natural.reduce(0, +)
-            let widths = TableMetrics.columnLayout(
+            let widths = TableMetrics.scrollingLayout(
                 headers: headers, rows: rows, natural: natural,
                 minimums: minimums, available: room).widths
             let texts = widths.map { w in max(w - columnGap, 1) }

@@ -45,12 +45,10 @@ public struct MarkdownTextView: View {
     }
 
     public var body: some View {
-        SelectableText(
-            ns: DocumentText.attributed(from: document, style: style,
-                                        images: images, width: available),
-            font: FontRole.body(style.bodySize).platformFont,
-            selectable: style.selectable, scrolls: scrolls, find: find,
-            findId: findId, speaking: speaking)
+        let need = DocumentText.minimumWidth(of: document, style: style,
+                                             formulas: false)
+        return surface(width: max(available, need),
+                       sideways: available > 0 && need > available)
             .onGeometryChange(for: CGFloat.self, of: { proxy in
                 proxy.size.width
             }, action: { w in
@@ -64,6 +62,27 @@ public struct MarkdownTextView: View {
                         platformDocumentImage(data)
                     })
             }
+    }
+
+    @ViewBuilder
+    private func surface(width: CGFloat, sideways: Bool) -> some View {
+        if sideways {
+            ScrollView(.horizontal) {
+                text(wide: true).frame(width: width, alignment: .leading)
+            }
+        } else {
+            text(wide: false)
+        }
+    }
+
+    private func text(wide: Bool) -> some View {
+        SelectableText(
+            ns: DocumentText.attributed(from: document, style: style,
+                                        images: images, width: available,
+                                        wide: wide),
+            font: FontRole.body(style.bodySize).platformFont,
+            selectable: style.selectable, scrolls: scrolls, find: find,
+            findId: findId, speaking: speaking)
     }
 
     // The narrowest this document can be drawn before a table is asked for less

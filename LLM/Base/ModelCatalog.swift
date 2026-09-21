@@ -17,6 +17,11 @@ public enum ModelCatalog {
     }
 
     public static let sources: [String: Source] = [
+        "Qwen3.5-2B": Source(
+            repo: "leok7v/Qwen3.5-2B",
+            revision: "2e65cddd43931c2be3a4e18a28ae8389cd8b4e62",
+            bytes: 1_916_698_624,
+            files: ["Qwen3.5-2B-IQ4_NL.ggxf"]),
         "Qwen3.5-4B": Source(
             repo: "leok7v/Qwen3.5-4B",
             revision: "0aa2a28b493ae1c4c480b930699661f65d9d5061",
@@ -99,6 +104,7 @@ public enum ModelCatalog {
     }
 
     public static let ggufFiles: [String: String] = [
+        "Qwen3.5-2B": "Qwen3.5-2B-IQ4_NL.ggxf",
         "Qwen3.5-4B": "Qwen3.5-4B-UD-Q4_K_XL.ggxf",
         "Qwen3.5-9B": "Qwen3.5-9B-UD-Q4_K_XL.ggxf",
         "Qwen3.8-27B-IQ1_S": "Qwen3.8-27B-IQ1_S.ggxf",

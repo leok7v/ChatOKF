@@ -27,6 +27,7 @@ let reasoningEffort = reVal.flatMap { v in
 args.consume("--seed", hasValue: true)
 args.consume("--verbosity", hasValue: true)
 args.consume("--diagnostics", hasValue: true)
+args.consume("--reasoning-note", hasValue: true)
 let seedVal = Flags.uint64("seed") ?? 0
 // Biases the curated branch-opening tokens down while thinking (arxiv
 // 2606.00206).

@@ -608,23 +608,13 @@ struct ContentView: View {
     }()
 
     private var chat: some View {
-        transcript
-            .simultaneousGesture(pinchZoom,
-                                 including: isOS ? .all : .none)
-            .modifier(Shimmer(active: ContentView.stallProbeOn))
-            .safeAreaInset(edge: .bottom, spacing: 0) {
-                if !model.readOnly {
-                    VStack(spacing: 0) {
-                        Composer(model: model, focus: $promptFocus,
-                                 editing: $promptEditing)
-                        if model.statusLine {
-                            Divider()
-                            statusLine
-                        }
-                    }
-                    .background(.bar)
-                }
-            }
+        VStack(spacing: 0) {
+            transcript
+                .simultaneousGesture(pinchZoom,
+                                     including: isOS ? .all : .none)
+                .modifier(Shimmer(active: ContentView.stallProbeOn))
+            if !model.readOnly { composerBar }
+        }
         .dropDestination(for: URL.self) { urls, _ in
             model.handleDrop(urls, at: model.caret)
             return true
@@ -639,6 +629,18 @@ struct ContentView: View {
         }
         .overlay(alignment: .top) { if findActive { findBar } }
         .animation(.easeInOut(duration: 0.2), value: findActive)
+    }
+
+    private var composerBar: some View {
+        VStack(spacing: 0) {
+            Composer(model: model, focus: $promptFocus,
+                     editing: $promptEditing)
+            if model.statusLine {
+                Divider()
+                statusLine
+            }
+        }
+        .background(.bar)
     }
 
     private var findBar: some View {

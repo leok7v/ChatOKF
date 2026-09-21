@@ -155,8 +155,10 @@ import UniformTypeIdentifiers
     var eulaAccepted = UserDefaults.standard.bool(forKey: ChatModel.eulaKey)
     var accepted = UserDefaults.standard.bool(forKey: "disclaimerAccepted")
     private static func startModel() -> String {
-        let saved = UserDefaults.standard.string(forKey: "modelName")
-            ?? Models.start
+        let asked = Flags.value("model") ?? ""
+        let saved = asked.isEmpty
+            ? UserDefaults.standard.string(forKey: "modelName") ?? Models.start
+            : asked
         return Models.all.contains(saved) ? saved : Models.start
     }
     var modelName: String = ChatModel.startModel()
@@ -472,7 +474,7 @@ import UniformTypeIdentifiers
         session.pushTools()
     }
     var thinking: Bool = UserDefaults.standard
-        .object(forKey: "thinking") as? Bool ?? true {
+        .object(forKey: "thinking") as? Bool ?? false {
         didSet { UserDefaults.standard.set(thinking, forKey: "thinking") }
     }
     var systemPrompt: String = UserDefaults.standard

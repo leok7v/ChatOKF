@@ -38,9 +38,8 @@ public enum GGUFGraft {
         }
         if !placed { merged.append(contentsOf: clip) }
 
-        let align = lhs.int("general.alignment") ?? 32
-        let writer = try GGUFWriter(path: out, alignment: align)
-        for pair in merged { writer.metaRaw(pair.0, pair.1) }
+        let writer = try GGUFWriter(path: out)
+        for pair in pageAligned(merged) { writer.metaRaw(pair.0, pair.1) }
         for name in lhsHead.order {
             let t = lhs.tensor(name)
             writer.declare(name, dims: t.dims, type: t.type)
@@ -112,9 +111,8 @@ public enum GGUFGraft {
         if !wroteCfg { merged.append((cfgKey, cfgVal)) }
         if !wroteEos && !eos.isEmpty { merged.append((eosKey, eosVal)) }
 
-        let align = g.int("general.alignment") ?? 32
-        let writer = try GGUFWriter(path: out, alignment: align)
-        for pair in merged { writer.metaRaw(pair.0, pair.1) }
+        let writer = try GGUFWriter(path: out)
+        for pair in pageAligned(merged) { writer.metaRaw(pair.0, pair.1) }
         for name in head.order {
             let t = g.tensor(name)
             writer.declare(name, dims: t.dims, type: t.type)
@@ -144,9 +142,8 @@ public enum GGUFGraft {
             leaves.contains(leafOf(name)) && rhs.maybe(name) != nil
         }
         let swap = Set(taken)
-        let align = lhs.int("general.alignment") ?? 32
-        let writer = try GGUFWriter(path: out, alignment: align)
-        for pair in head.kv { writer.metaRaw(pair.0, pair.1) }
+        let writer = try GGUFWriter(path: out)
+        for pair in pageAligned(head.kv) { writer.metaRaw(pair.0, pair.1) }
         for name in head.order {
             let t = swap.contains(name) ? rhs.tensor(name) : lhs.tensor(name)
             writer.declare(name, dims: t.dims, type: t.type)
@@ -165,6 +162,14 @@ public enum GGUFGraft {
         report.keys = head.kv.count
         report.bytes = writer.declaredBytes
         return report
+    }
+
+    static func pageAligned(_ kv: [(String, Data)]) -> [(String, Data)] {
+        let key = "general.alignment"
+        var out = kv.filter { pair in pair.0 != key }
+        out.append((key, GGUFWriter.encoded(
+            .u32(UInt32(GGUFWriter.defaultAlignment)))))
+        return out
     }
 
     static func leafOf(_ name: String) -> String {

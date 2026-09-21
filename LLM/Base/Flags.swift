@@ -135,9 +135,9 @@ public enum Flags {
             "seconds idle between the bench arms", scope: .diagnostic,
             defaultValue: "90"),
         Knob(name: "bench-thinking", takesValue: false, help:
-            "reason during the bench arms, as the app ships; "
-            + "--no-bench-thinking measures the answer channel alone",
-            scope: .diagnostic, defaultValue: "1"),
+            "reason during the bench arms; off, as the app ships, "
+            + "measures the answer channel alone",
+            scope: .diagnostic, defaultValue: "0"),
         Knob(name: "memories", takesValue: false, help:
             "the memory store; --no-memories runs a turn on the context "
             + "alone, neither recalling nor writing a note",
@@ -153,6 +153,13 @@ public enum Flags {
             "a turn the app sends at launch, repeatable and in order; "
             + "'new' leaves the conversation and 'reopen' brings it back",
             scope: .diagnostic, defaultValue: ""),
+        Knob(name: "reasoning-note", takesValue: true, help:
+            "text injected before the </think> the reasoning budget forces, "
+            + "so the cut reads as a decision rather than a truncation",
+            scope: .experiment, defaultValue: ""),
+        Knob(name: "model", takesValue: true, help:
+            "the catalog name the app selects at launch, in place of the "
+            + "one it remembers", scope: .diagnostic, defaultValue: ""),
     ]
 
     private static let byName: [String: Knob] = {

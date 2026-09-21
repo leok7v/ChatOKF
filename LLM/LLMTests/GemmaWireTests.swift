@@ -228,8 +228,6 @@ final class GemmaWireTests: XCTestCase {
         var text: String { lock.lock(); defer { lock.unlock() }; return acc }
     }
 
-    // Gemma's generation prompt is a bare "<|turn>model\n" -- the model opens
-    // its OWN <|channel>thought.
     func testReasoningChannelSplits() async throws {
         let backend = GemmaTape(
             scripts: [[1001, 1002, 1003, 1004]],
@@ -251,13 +249,16 @@ final class GemmaWireTests: XCTestCase {
                       "reasoning lost: \(reasoning.text)")
         XCTAssertFalse(content.contains("<|channel>"),
                        "raw channel markup leaked into content: \(content)")
+        XCTAssertFalse(reasoning.text.contains("<|channel>"),
+                       "the repeated opener reached Thoughts: \(reasoning.text)")
     }
 
     // The KV must carry gemma's own turn wire, and a SECOND turn must not
     func testSecondTurnDoesNotDoubleTheSystemBlock() async throws {
         let backend = GemmaTape(
-            scripts: [[1001], [1002]],
-            vocab: vocab([(1001, "First answer."),
+            scripts: [[1000, 1001], [1000, 1002]],
+            vocab: vocab([(1000, "plan<channel|>"),
+                          (1001, "First answer."),
                           (1002, "Second answer.")]))
         let session = ChatSession(
             backend: backend, template: try template(),
@@ -272,7 +273,8 @@ final class GemmaWireTests: XCTestCase {
             "the continuation delta re-laid the system turn:\n\(kv)")
         XCTAssertTrue(kv.contains("<|turn>user\nsecond<turn|>"),
                       "second user turn missing from the KV:\n\(kv)")
-        XCTAssertTrue(kv.hasSuffix("<|turn>model\nSecond answer."),
+        XCTAssertTrue(kv.hasSuffix("<|turn>model\n<|channel>thought\n"
+                                   + "plan<channel|>Second answer."),
                       "turn two did not open the answer correctly:\n\(kv)")
     }
 

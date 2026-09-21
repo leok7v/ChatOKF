@@ -151,6 +151,9 @@ targets:
         # The bundle id is the container identity; changing it factory-resets
         # every install (macOS models move by hand between containers).
         PRODUCT_BUNDLE_IDENTIFIER: io.github.leok7v.ChatOKF
+        # The shown name lives in App/en.lproj/InfoPlist.strings. This one must
+        # stay equal to the .app file name, or Launch Services takes the bundle
+        # for user-renamed and shows the file name in the Dock and switcher.
         INFOPLIST_KEY_CFBundleDisplayName: ChatOKF
         GENERATE_INFOPLIST_FILE: YES
         SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD: "NO"

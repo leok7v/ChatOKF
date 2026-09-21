@@ -8,14 +8,39 @@ import Foundation
     static func attributed(from document: Markdown.Document,
                            style: MarkdownStyle,
                            images: [URL: PlatformImage] = [:],
-                           width: CGFloat = 0)
+                           width: CGFloat = 0, wide: Bool = false)
         -> NSAttributedString {
         let m = NSMutableAttributedString()
         for item in document.items {
             m.append(render(item.block, style: style, images: images,
                             width: width))
         }
+        if wide, width > 0 { wrapProse(m, at: width) }
         return m
+    }
+
+    private static func wrapProse(_ m: NSMutableAttributedString,
+                                  at visible: CGFloat) {
+        let full = NSRange(location: 0, length: m.length)
+        m.enumerateAttribute(atomicKindKey, in: full,
+                             options: []) { kind, span, _ in
+            if kind as? String != AtomicKind.table.rawValue {
+                endLines(of: m, in: span, at: visible)
+            }
+        }
+    }
+
+    private static func endLines(of m: NSMutableAttributedString,
+                                 in span: NSRange, at visible: CGFloat) {
+        m.enumerateAttribute(.paragraphStyle, in: span,
+                             options: []) { value, range, _ in
+            let para = NSMutableParagraphStyle()
+            if let existing = value as? NSParagraphStyle {
+                para.setParagraphStyle(existing)
+            }
+            para.tailIndent = visible
+            m.addAttribute(.paragraphStyle, value: para, range: range)
+        }
     }
 
     static func render(_ block: Markdown.Block, style: MarkdownStyle,
@@ -57,37 +82,42 @@ import Foundation
     // The narrowest this document can be drawn before a table or a formula is
     // asked for less room than its content can occupy.
     static func minimumWidth(of document: Markdown.Document,
-                             style: MarkdownStyle) -> CGFloat {
+                             style: MarkdownStyle,
+                             formulas: Bool = true) -> CGFloat {
         minimumWidth(of: document.items.map { item in item.block },
-                     style: style)
+                     style: style, formulas: formulas)
     }
 
     static func minimumWidth(of blocks: [Markdown.Block],
-                             style: MarkdownStyle) -> CGFloat {
+                             style: MarkdownStyle,
+                             formulas: Bool = true) -> CGFloat {
         var widest: CGFloat = 0
         for block in blocks {
-            let w = minimumWidth(ofBlock: block, style: style)
+            let w = minimumWidth(ofBlock: block, style: style,
+                                 formulas: formulas)
             if w > widest { widest = w }
         }
         return widest
     }
 
     private static func minimumWidth(ofBlock block: Markdown.Block,
-                                     style: MarkdownStyle) -> CGFloat {
+                                     style: MarkdownStyle,
+                                     formulas: Bool) -> CGFloat {
         var result: CGFloat = 0
         switch block {
             case .table(let headers, let rows, _):
                 result = tableMinimumWidth(headers: headers, rows: rows,
                                            style: style)
             case .math(let tex):
-                result = mathMinimumWidth(tex, style: style)
+                result = formulas ? mathMinimumWidth(tex, style: style) : 0
             case .quote(let inner):
-                result = indented(minimumWidth(of: inner, style: style),
-                                  by: 18)
+                result = indented(minimumWidth(of: inner, style: style,
+                                               formulas: formulas), by: 18)
             case .list(let items, _):
                 for item in items {
                     let w = indented(minimumWidth(of: item.blocks,
-                                                  style: style), by: 20)
+                                                  style: style,
+                                                  formulas: formulas), by: 20)
                     if w > result { result = w }
                 }
             default:
@@ -130,22 +160,47 @@ import Foundation
         inner > 0 ? inner + amount : 0
     }
 
-    // Measured on the text that will be DRAWN, in the widest face a run
-    // could take, so a link or an image cell does not demand its URL's width.
-    static func longestWordWidth(_ cell: String,
-                                 font: PlatformFont) -> CGFloat {
+    static func longestWordWidth(_ cell: String, font: PlatformFont,
+                                 style: MarkdownStyle) -> CGFloat {
         var widest: CGFloat = 0
-        let faces = [platformBoldItalicFont(of: font, bold: true,
-                                            italic: true),
-                     monoFont(at: font.pointSize)]
-        for word in renderedText(of: cell).split(separator: " ") {
-            let ns = String(word) as NSString
-            for face in faces {
-                let w = ns.size(withAttributes: [.font: face]).width
-                if w > widest { widest = w }
+        let drawn = NSMutableAttributedString()
+        if let block = Markdown.parse(cell).items.first?.block {
+            switch block {
+                case .image: break
+                default: fillCell(block, text: cell, base: font, style: style,
+                                  images: [:], into: drawn)
             }
         }
+        for run in unbreakableRuns(drawn.string as NSString) {
+            let line = CTLineCreateWithAttributedString(
+                drawn.attributedSubstring(from: run))
+            let w = CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
+            if w > widest { widest = w }
+        }
         return widest
+    }
+
+    static func unbreakableRuns(_ text: NSString) -> [NSRange] {
+        var out: [NSRange] = []
+        var start = 0
+        for i in 0 ..< text.length {
+            let c = text.character(at: i)
+            let next = i + 1 < text.length ? text.character(at: i + 1) : 0
+            let space = c == 0x20 || c == 0x09 || c == 0x0A
+            let soft = [0x2D, 0x2F, 0x2013, 0x2014].contains(c)
+                && !(0x30 ... 0x39).contains(next)
+            if space || soft {
+                let end = space ? i : i + 1
+                if end > start {
+                    out.append(NSRange(location: start, length: end - start))
+                }
+                start = i + 1
+            }
+        }
+        if text.length > start {
+            out.append(NSRange(location: start, length: text.length - start))
+        }
+        return out
     }
 
     private static func renderedText(of cell: String) -> String {
@@ -169,11 +224,12 @@ import Foundation
         for c in 0..<cols {
             var widest: CGFloat = 0
             if c < headers.count {
-                let w = longestWordWidth(headers[c], font: bold)
+                let w = longestWordWidth(headers[c], font: bold,
+                                         style: style)
                 if w > widest { widest = w }
             }
             for row in rows where c < row.count {
-                let w = longestWordWidth(row[c], font: body)
+                let w = longestWordWidth(row[c], font: body, style: style)
                 if w > widest { widest = w }
             }
             out[c] = ceil(widest)

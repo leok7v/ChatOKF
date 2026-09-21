@@ -15,19 +15,22 @@ struct TableBlock: View {
         let r = rows.map { row in row.map { s in TableMetrics.normalize(s) } }
         let n = TableMetrics.columnCount(headers: h, rows: r)
         let layout = columnLayout(n, headers: h, rows: r)
-        let fitWidth: CGFloat? = layout.wrap ? max(0, available - 16) : nil
+        let fills = layout.wrap && !layout.scrolls
+        let fitWidth: CGFloat? = fills ? max(0, available - 16) : nil
         ScrollView(.horizontal, showsIndicators: false) {
             VStack(alignment: .leading, spacing: 0) {
                 if !h.isEmpty {
                     rowView(h, bold: true, shade: style.tableHeaderShade,
-                            n: n, widths: layout.widths, wrap: layout.wrap)
+                            n: n, widths: layout.widths, wrap: layout.wrap,
+                            fills: fills)
                     Divider()
                 }
                 ForEach(Array(r.enumerated()), id: \.offset) { pair in
                     rowView(pair.element, bold: false,
                             shade: pair.offset % 2 == 1
                                 ? style.tableRowShade : Color.clear,
-                            n: n, widths: layout.widths, wrap: layout.wrap)
+                            n: n, widths: layout.widths, wrap: layout.wrap,
+                            fills: fills)
                 }
             }
             .padding(8)
@@ -50,24 +53,27 @@ struct TableBlock: View {
     // column's longest word. nil until the first geometry pass lands.
     private func columnLayout(_ n: Int, headers h: [String],
                               rows r: [[String]])
-        -> (widths: [CGFloat]?, wrap: Bool) {
-        var result: (widths: [CGFloat]?, wrap: Bool) = (nil, false)
+        -> (widths: [CGFloat]?, wrap: Bool, scrolls: Bool) {
+        var result: (widths: [CGFloat]?, wrap: Bool, scrolls: Bool) =
+            (nil, false, false)
         let usable = available - CGFloat(max(n - 1, 0)) * 12 - 16
         if available > 0, n > 0 {
-            let fit = TableMetrics.columnLayout(
+            let fit = TableMetrics.scrollingLayout(
                 headers: h, rows: r,
                 natural: naturalWidths(n, headers: h, rows: r),
                 minimums: minimumWidths(n, headers: h, rows: r),
                 available: usable)
-            if !fit.widths.isEmpty { result = (fit.widths, fit.wrap) }
+            if !fit.widths.isEmpty {
+                result = (fit.widths, fit.wrap, fit.scrolls)
+            }
         }
         return result
     }
 
     private func rowView(_ cells: [String], bold: Bool, shade: Color,
                          n: Int, widths: [CGFloat]?,
-                         wrap: Bool) -> some View {
-        let fill: CGFloat? = wrap ? .infinity : nil
+                         wrap: Bool, fills: Bool) -> some View {
+        let fill: CGFloat? = fills ? .infinity : nil
         return HStack(alignment: .top, spacing: 12) {
             ForEach(0..<n, id: \.self) { i in
                 cell(i < cells.count ? cells[i] : "", bold: bold,
@@ -148,13 +154,17 @@ struct TableBlock: View {
 
     private func minimumWidths(_ n: Int, headers h: [String],
                                rows r: [[String]]) -> [CGFloat] {
-        let attrs: [NSAttributedString.Key: Any] = [
+        let body: [NSAttributedString.Key: Any] = [
             .font: FontRole.body(style.bodySize).platformFont]
+        let bold: [NSAttributedString.Key: Any] = [
+            .font: boldFont(of: FontRole.body(style.bodySize).platformFont)]
         var widths = [CGFloat](repeating: 0, count: n)
         for c in 0..<n {
-            let word = TableMetrics.longestWord(headers: h, rows: r, col: c)
-            widths[c] = ceil((word as NSString)
-                .size(withAttributes: attrs).width) + 6
+            let head = TableMetrics.longestWord(headers: h, rows: [], col: c)
+            let cell = TableMetrics.longestWord(headers: [], rows: r, col: c)
+            let hw = (head as NSString).size(withAttributes: bold).width
+            let cw = (cell as NSString).size(withAttributes: body).width
+            widths[c] = ceil(max(hw, cw)) + 6
         }
         return widths
     }
