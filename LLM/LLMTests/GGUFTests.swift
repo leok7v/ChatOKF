@@ -52,6 +52,57 @@ final class GGUFTests: XCTestCase {
         return try write(bytes, "unknown-type.gguf")
     }
 
+    private func tensorEntry(_ name: String, elements: Int,
+                             offset: Int) -> [UInt8] {
+        let n = Array(name.utf8)
+        return le(UInt64(n.count), 8) + n + le(1, 4)
+            + le(UInt64(elements), 8) + le(0, 4) + le(UInt64(offset), 8)
+    }
+
+    private func fileOf(_ names: [String]) throws -> String {
+        let each = 4096 * 4
+        var bytes = magic + le(3, 4) + le(UInt64(names.count), 8) + le(0, 8)
+        for (i, name) in names.enumerated() {
+            bytes += tensorEntry(name, elements: 4096, offset: i * each)
+        }
+        bytes += [UInt8](repeating: 0, count: (32 - bytes.count % 32) % 32)
+        bytes += [UInt8](repeating: 7, count: names.count * each)
+        return try write(bytes, "towers.gguf")
+    }
+
+    func testOnlyWhatEveryTokenReadsIsWarmed() throws {
+        let g = try GGUF(path: try fileOf([
+            "token_embd.weight", "output.weight", "blk.0.attn_q.weight",
+            "blk.1.nextn.eh_proj.weight", "assist.blk.0.attn_q.weight",
+            "per_layer_token_embd.weight", "v.blk.0.attn_q.weight",
+            "mm.input_projection.weight", "a.conv1.weight"]))
+        let plain = g.readByEveryToken(drafting: false)
+            .map { t in t.name }.sorted()
+        XCTAssertEqual(plain, ["blk.0.attn_q.weight", "output.weight"])
+        let drafting = g.readByEveryToken(drafting: true)
+            .map { t in t.name }.sorted()
+        XCTAssertEqual(drafting, ["assist.blk.0.attn_q.weight",
+                                  "blk.0.attn_q.weight",
+                                  "blk.1.nextn.eh_proj.weight",
+                                  "output.weight"])
+    }
+
+    func testATiedEmbeddingIsReadByEveryToken() throws {
+        let g = try GGUF(path: try fileOf(["token_embd.weight",
+                                           "blk.0.attn_q.weight"]))
+        XCTAssertEqual(g.readByEveryToken(drafting: false).count, 2)
+    }
+
+    func testFaultingCoversWholePagesOnceAndStaysInsideTheFile() throws {
+        let g = try GGUF(path: try fileOf(["blk.0.attn_q.weight",
+                                           "blk.0.attn_k.weight"]))
+        let page = Int(getpagesize())
+        let covered = g.fault(Array(g.tensors.values))
+        XCTAssertGreaterThanOrEqual(covered, 2 * 4096 * 4)
+        XCTAssertLessThanOrEqual(covered, g.mapSize + page)
+        XCTAssertEqual(g.fault([]), 0)
+    }
+
     func testBadMagicThrows() throws {
         XCTAssertThrowsError(try GGUF(path: try badMagic()))
     }

@@ -252,6 +252,42 @@ final class GGUF {
                     upto - from, MADV_RANDOM)
     }
 
+    func readByEveryToken(drafting: Bool) -> [GGUFTensor] {
+        let untied = tensors["output.weight"] != nil
+        return tensors.values.filter { t in
+            let head = t.name.hasPrefix("assist.")
+                || t.name.contains(".nextn.")
+            let gathered = t.name == "per_layer_token_embd.weight"
+                || (untied && t.name == "token_embd.weight")
+            return ModelShape.tower(of: t.name) == "text" && !gathered
+                && (drafting || !head)
+        }
+    }
+
+    private var pageSink: UInt8 = 0
+
+    func fault(_ picked: [GGUFTensor]) -> Int {
+        let page = Int(getpagesize())
+        let spans = picked.map { t in
+            (from: (t.base - map) / page * page,
+             upto: min((t.base - map + t.byteCount + page - 1) / page * page,
+                       mapSize))
+        }.sorted { a, b in a.from < b.from }
+        var covered = 0
+        var done = 0
+        for span in spans where span.upto > max(span.from, done) {
+            let from = max(span.from, done)
+            _ = madvise(UnsafeMutableRawPointer(mutating: map + from),
+                        span.upto - from, MADV_WILLNEED)
+            for at in stride(from: from, to: span.upto, by: page) {
+                pageSink &+= (map + at).load(as: UInt8.self)
+            }
+            covered += span.upto - from
+            done = span.upto
+        }
+        return covered
+    }
+
     func tensor(_ name: String) -> GGUFTensor {
         let t = tensors[name]
         precondition(t != nil, "missing tensor \(name)")
@@ -259,6 +295,20 @@ final class GGUF {
     }
 
     func maybe(_ name: String) -> GGUFTensor? { tensors[name] }
+}
+
+public struct WeightWarm: @unchecked Sendable {
+    public let bytes: Int
+    private let gguf: GGUF
+    private let picked: [GGUFTensor]
+
+    init(_ gguf: GGUF, drafting: Bool) {
+        self.gguf = gguf
+        picked = gguf.readByEveryToken(drafting: drafting)
+        bytes = picked.reduce(0) { sum, t in sum + t.byteCount }
+    }
+
+    public func run() -> Int { gguf.fault(picked) }
 }
 
 enum GGUFErr: Error { case io(String), parse(String) }

@@ -126,6 +126,10 @@ public struct QwenMetalChat {
 
     public var mtpDrafts: Int { Flags.int("mtp-drafts") ?? 0 }
 
+    public func weightWarm(drafting: Bool) -> WeightWarm {
+        WeightWarm(engine.model.gguf, drafting: drafting)
+    }
+
     public func backend() -> QwenMetalBackend {
         QwenMetalBackend(engine: engine, tokenizer: tokenizer,
                      mmprojPath: mmprojPath)

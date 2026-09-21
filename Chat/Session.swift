@@ -135,6 +135,7 @@ public enum TurnEvent: Sendable {
         ggufBackend = nil
         session = nil
         modelShape = nil
+        pendingWarm = nil
         media = nil
         modelSupportsReasoningEffort = false
         effortLevels = []
@@ -177,6 +178,7 @@ public enum TurnEvent: Sendable {
             ggufVocabCount = built.vocab
             activePresets = built.presets
             modelShape = built.shape
+            pendingWarm = built.warm
             media = loaded.media
             modelName = name
             failure = nil
@@ -190,6 +192,7 @@ public enum TurnEvent: Sendable {
         let vocab: Int
         let presets: SamplingPresets
         let shape: ModelShape
+        let warm: WeightWarm
     }
 
     nonisolated private static func loadHeavy(name: String, path: String)
@@ -204,7 +207,8 @@ public enum TurnEvent: Sendable {
                 built = HeavyBuild(
                     backend: gpu, template: c.chatTemplate,
                     vocab: c.vocabCount, presets: c.samplingPresets,
-                    shape: c.shape)
+                    shape: c.shape,
+                    warm: c.weightWarm(drafting: gpu.draftWidth > 1))
                 Session.draftCount = gpu.draftWidth
                 if await gpu.supportsSoftTokens() {
                     loadedMedia = c.media(ctx: gpu.ctx)
@@ -217,7 +221,8 @@ public enum TurnEvent: Sendable {
                 built = HeavyBuild(
                     backend: backend, template: c.chatTemplate,
                     vocab: c.tokenizer.vocabCount,
-                    presets: c.samplingPresets, shape: c.shape)
+                    presets: c.samplingPresets, shape: c.shape,
+                    warm: c.weightWarm(drafting: c.mtpDrafts > 0))
                 loadedMedia = backend.media()
             }
         } catch {
@@ -225,26 +230,40 @@ public enum TurnEvent: Sendable {
             built = nil
         }
         Footprint.report(.load, "loaded \(name)")
-        if built != nil { Session.warm(path: path) }
         return (built, loadedMedia)
     }
 
-    nonisolated private static func warm(path: String) {
-        let bytes = (try? FileManager.default.attributesOfItem(atPath: path))
-            .flatMap { attrs in attrs[.size] as? Int } ?? 0
-        let room = Int(ProcessInfo.processInfo.physicalMemory / 3 * 2)
-        if bytes > 0, bytes < room,
-           let file = FileHandle(forReadingAtPath: path) {
-            let t0 = Date()
-            var total = 0
-            var chunk = try? file.read(upToCount: 8 << 20)
-            while let data = chunk, !data.isEmpty {
-                total += data.count
-                chunk = try? file.read(upToCount: 8 << 20)
-            }
+    private var pendingWarm: WeightWarm?
+
+    private func warmBeside(cooking: Bool) {
+        let warm = pendingWarm
+        pendingWarm = nil
+        if let warm, cooking {
             Diag.shared.report(.load, String(
-                format: "warmed %.1f GB in %.1fs", Double(total) / 1e9,
+                format: "not warmed: the cook reads all %.2f GB itself",
+                Double(warm.bytes) / 1e9))
+        } else if let warm {
+            Task.detached { Session.run(warm) }
+        }
+    }
+
+    nonisolated private static func run(_ warm: WeightWarm) {
+        let bytes = warm.bytes
+        let room = Int(ProcessInfo.processInfo.physicalMemory / 3 * 2)
+        if !Flags.on("warm") {
+            Diag.shared.report(.load, "not warmed: --no-warm")
+        } else if bytes > 0, bytes < room {
+            let t0 = Date()
+            let covered = warm.run()
+            Diag.shared.report(.load, String(
+                format: "warmed %.2f GB in %.1fs", Double(covered) / 1e9,
                 Date().timeIntervalSince(t0)))
+            Footprint.report(.load, "warmed")
+        } else {
+            Diag.shared.report(.load, String(
+                format: "not warmed: %.2f GB is read by every token, "
+                    + "%.2f GB is the most this device warms",
+                Double(bytes) / 1e9, Double(room) / 1e9))
         }
     }
 
@@ -543,10 +562,13 @@ public enum TurnEvent: Sendable {
                                + "this run keeps no state on disk")
         }
         if stamp.isEmpty || !attached {
+            warmBeside(cooking: false)
             if reset { await s.reset() }
         } else {
             Session.ensurePrecookDir()
             let url = Session.precookURL(modelName, stamp)
+            warmBeside(cooking: !FileManager.default.fileExists(
+                atPath: url.path))
             await s.primeOrCook(at: url, resetFirst: reset)
             await s.awaitPriming()
             Session.recordParkRate(modelName, await s.lastSaved)

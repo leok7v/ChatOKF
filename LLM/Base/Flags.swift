@@ -157,6 +157,14 @@ public enum Flags {
             "text injected before the </think> the reasoning budget forces, "
             + "so the cut reads as a decision rather than a truncation",
             scope: .experiment, defaultValue: ""),
+        Knob(name: "prompt-delay", takesValue: true, help:
+            "seconds the prompt script waits before its first turn, the "
+            + "time a person spends typing", scope: .diagnostic,
+            defaultValue: "0"),
+        Knob(name: "warm", takesValue: false, help:
+            "page in what every token reads while the model loads; "
+            + "--no-warm leaves the first prompt to fault it in",
+            scope: .diagnostic, defaultValue: "1"),
         Knob(name: "model", takesValue: true, help:
             "the catalog name the app selects at launch, in place of the "
             + "one it remembers", scope: .diagnostic, defaultValue: ""),

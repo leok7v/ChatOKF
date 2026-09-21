@@ -386,6 +386,10 @@ public struct GemmaChat {
     public var shape: ModelShape { ModelShape(gguf: model.gguf) }
     public var bosToken: String { tokenizer.bosToken }
 
+    public func weightWarm(drafting: Bool) -> WeightWarm {
+        WeightWarm(model.gguf, drafting: drafting)
+    }
+
     public func backend() -> Gemma4Backend {
         Gemma4Backend(engine: engine, tokenizer: tokenizer)
     }

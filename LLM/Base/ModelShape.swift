@@ -41,18 +41,26 @@ extension ModelShape {
         var vision = 0
         var audio = 0
         for (name, t) in g.tensors {
-            if name.hasPrefix("a.") || name.hasPrefix("mm.audio") {
-                audio += t.byteCount
-            } else if name.hasPrefix("v.") || name.hasPrefix("mm.") {
-                vision += t.byteCount
-            } else {
-                text += t.byteCount
+            switch ModelShape.tower(of: name) {
+            case "audio": audio += t.byteCount
+            case "vision": vision += t.byteCount
+            default: text += t.byteCount
             }
         }
         self.init(
             towers: ModelShape.grouped(text, vision, audio) + sidecars,
             trainedContext: ModelShape.trainedContext(g),
             embedding: g.int(arch + ".embedding_length") ?? 0)
+    }
+
+    static func tower(of tensor: String) -> String {
+        var out = "text"
+        if tensor.hasPrefix("a.") || tensor.hasPrefix("mm.audio") {
+            out = "audio"
+        } else if tensor.hasPrefix("v.") || tensor.hasPrefix("mm.") {
+            out = "vision"
+        }
+        return out
     }
 
     static func trainedContext(_ g: GGUF) -> Int {

@@ -722,6 +722,7 @@ import UniformTypeIdentifiers
     private func runScript() async {
         await readTask?.value
         await session.awaitPrimed()
+        try? await Task.sleep(for: .seconds(Flags.double("prompt-delay") ?? 0))
         var step = 0
         for line in Self.script {
             step += 1
