@@ -1899,8 +1899,7 @@ import UniformTypeIdentifiers
             let docs = Session.refs(attachedDocs)
             let stoppable = ChatModel.stoppableSpan(prompt, attachedDocs)
             attachedDocs = []
-            let recall = session.recall(
-                display, also: [followupHint, generatedTitle ?? ""])
+            let recall = session.recall(display, also: [generatedTitle ?? ""])
             if let recall, !recall.silent {
                 let notes = zip(recall.ids, zip(recall.titles,
                                                 recall.readSeconds))

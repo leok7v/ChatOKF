@@ -143,13 +143,13 @@ import XCTest
         let found = await runner.execute(
             "memory_search", [ToolArg(name: "query", value: "Deco X55")])
         XCTAssertTrue(found.contains("tech/wifi-mesh"), found)
-        XCTAssertFalse(found.contains("[weak"), found)
         XCTAssertFalse(found.contains("[unrelated]"), found)
+        XCTAssertFalse(found.contains("none is about"), found)
         let foreign = await runner.execute("memory_search", [
             ToolArg(name: "query",
                     value: "explain dark matter and dark energy")])
-        XCTAssertTrue(foreign.hasPrefix("[weak"), foreign)
-        XCTAssertTrue(foreign.contains("[unrelated]"), foreign)
+        XCTAssertTrue(foreign.hasPrefix("none of the user's notes"), foreign)
+        XCTAssertFalse(foreign.contains("wifi"), foreign)
         let read = await runner.execute(
             "memory_read", [ToolArg(name: "id", value: "tech/wifi-mesh")])
         XCTAssertTrue(read.contains("One per floor."), read)

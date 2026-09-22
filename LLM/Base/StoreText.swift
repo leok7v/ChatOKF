@@ -66,18 +66,21 @@ public enum StoreText {
                 ? "no concepts indexed\n"
                 : "no concept matches that filter\n"
         }
-        for hit in result.hits {
-            var flags = flags(hit.concept)
-            if !hit.terms.isEmpty {
-                flags += " [" + hit.terms.joined(separator: " ") + "]"
-            }
-            if !store.relevant(hit) { flags += " [unrelated]" }
-            out += String(format: "%@  %.3f%@\n", hit.concept.id,
-                          hit.relevance, flags)
-            out += "  " + hit.concept.title + "\n"
-            if !hit.concept.description.isEmpty {
-                out += "  " + hit.concept.description + "\n"
-            }
+        for hit in result.hits { out += line(store, hit) }
+        return out
+    }
+
+    public static func line(_ store: Store, _ hit: Hit) -> String {
+        var flags = flags(hit.concept)
+        if !hit.terms.isEmpty {
+            flags += " [" + hit.terms.joined(separator: " ") + "]"
+        }
+        if !store.relevant(hit) { flags += " [unrelated]" }
+        var out = String(format: "%@  %.3f%@\n", hit.concept.id,
+                         hit.relevance, flags)
+        out += "  " + hit.concept.title + "\n"
+        if !hit.concept.description.isEmpty {
+            out += "  " + hit.concept.description + "\n"
         }
         return out
     }

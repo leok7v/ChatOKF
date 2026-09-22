@@ -36,11 +36,12 @@ public enum MemoryTools {
         ToolSpec(
             name: "memory_search",
             description: "Search the user's own notes by meaning AND exact "
-                + "wording; returns id, title and description per hit. Ask "
-                + "a full question, not a keyword. A hit marked [unrelated] "
-                + "does not bear on the question: ignore it and never "
-                + "mention it. [weak] means no note matches at all: answer "
-                + "from your own knowledge. Put rephrasings in `also` rather "
+                + "wording; returns id, title and description of every note "
+                + "that is about the question, and nothing else. Ask a full "
+                + "question, not a keyword. Use what comes back only when it "
+                + "answers the user's latest message; when it says no note "
+                + "is about this, answer from your own knowledge and say the "
+                + "notes do not cover it. Put rephrasings in `also` rather "
                 + "than searching again; narrow with `area` only when the "
                 + "map shows the answer is there.",
             parametersJSON: "{\"type\":\"object\",\"properties\":{"

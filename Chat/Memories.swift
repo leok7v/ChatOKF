@@ -470,9 +470,11 @@ import Observation
                 } else {
                     let found = store.search(queries, filter: filter,
                                              limit: max(1, limit))
-                    seenIds.formUnion(found.hits.map { hit in hit.concept.id })
-                    out = StoreText.search(store, queries: queries,
-                                           filter: filter, limit: max(1, limit))
+                    let shown = found.hits.filter { hit in
+                        store.relevant(hit)
+                    }
+                    seenIds.formUnion(shown.map { hit in hit.concept.id })
+                    out = Memories.searchText(store, found, shown)
                 }
             case "memory_read":
                 let id = MemoryTools.arg(args, "id") ?? ""
@@ -493,6 +495,23 @@ import Observation
                 out = retire(MemoryTools.arg(args, "id") ?? "")
             default:
                 out = "error: no tool named " + name
+            }
+        }
+        return out
+    }
+
+    static func searchText(_ store: Store, _ result: SearchResult,
+                           _ shown: [Hit]) -> String {
+        var out = ""
+        if shown.isEmpty {
+            out = "none of the user's notes is about this; answer from your "
+                + "own knowledge\n"
+        } else {
+            for hit in shown { out += StoreText.line(store, hit) }
+            let hidden = result.hits.count - shown.count
+            if hidden > 0 {
+                out += "\(hidden) other note(s) came up and none is about "
+                    + "this\n"
             }
         }
         return out
