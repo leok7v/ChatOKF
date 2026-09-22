@@ -74,9 +74,9 @@ final class CalibrationTests: XCTestCase {
                      _ question: String) -> String {
         let result = store.search([question], filter: Filter(), limit: 1)
         let top = result.hits.first
-        return String(format: "%5.2f  %.3f  %-36@ %@%@", result.standout,
-                      top?.score ?? 0, String(question.prefix(36)),
-                      top?.concept.id ?? "-",
+        return String(format: "%5.2f  %.3f %.3f  %-36@ %@%@", result.standout,
+                      top?.score ?? 0, top?.relevance ?? 0,
+                      String(question.prefix(36)), top?.concept.id ?? "-",
                       top?.terms.isEmpty == false
                           ? " [" + top!.terms.joined(separator: " ") + "]"
                           : "")
@@ -88,9 +88,9 @@ final class CalibrationTests: XCTestCase {
         store.load()
         print("[calib] \(name): \(store.concepts.count) concepts, "
               + "re-embedded \(store.embeddedCount), floor "
-              + "\(e.standoutFloor)")
-        print("[calib] standout score  question                             "
-              + "top hit")
+              + "\(e.relevanceFloor)")
+        print("[calib] standout cosine relev  question                      "
+              + "       top hit")
         for question in questions {
             print("[calib] " + row(store, e, question))
         }
@@ -217,8 +217,9 @@ final class CalibrationTests: XCTestCase {
         let result = store.search([question], filter: Filter(), limit: 2)
         let top = result.hits.first
         let second = result.hits.dropFirst().first
-        return String(format: "%5.2f  %.3f %.3f  %-40@ %@%@", result.standout,
-                      top?.score ?? 0, second?.score ?? 0,
+        return String(format: "%5.2f  %.3f %.3f  %.3f %.3f  %-40@ %@%@",
+                      result.standout, top?.score ?? 0, second?.score ?? 0,
+                      top?.relevance ?? 0, second?.relevance ?? 0,
                       String(question.prefix(40)), top?.concept.id ?? "-",
                       top?.terms.isEmpty == false
                           ? " [" + top!.terms.joined(separator: " ") + "]"
@@ -238,9 +239,9 @@ final class CalibrationTests: XCTestCase {
         }
         store.load()
         print("[leak] \(store.concepts.count) planted notes, floor "
-              + "\(e.standoutFloor)")
-        print("[leak] standout top   second question"
-              + "                                 top hit")
+              + "\(e.relevanceFloor)")
+        print("[leak] standout cosine top second relev top second question"
+              + "                    top hit")
         for question in CalibrationTests.leakQuestions {
             print("[leak] " + leakRow(store, question))
         }

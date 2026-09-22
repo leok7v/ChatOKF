@@ -5,10 +5,9 @@ public protocol Embedder: AnyObject {
     var name: String { get }
     var queryPrefix: String { get }
     var passagePrefix: String { get }
-    var standoutFloor: Float { get }
-    var cosineFloor: Float { get }
-    var verbatimFloor: Float { get }
+    var relevanceFloor: Float { get }
     func embed(_ text: String) -> [Float]
+    func states(_ text: String) -> [Float]
     func tokens(_ text: String) -> [Int32]
 }
 
@@ -32,9 +31,7 @@ public final class BertEmbedder: Embedder {
     public var dim: Int { model.dim }
     public var queryPrefix: String { multilingual ? "query: " : "" }
     public var passagePrefix: String { multilingual ? "passage: " : "" }
-    public var standoutFloor: Float { multilingual ? 3.0 : 5.0 }
-    public var cosineFloor: Float { multilingual ? 0.84 : 0.5 }
-    public var verbatimFloor: Float { multilingual ? 0.80 : 0.4 }
+    public var relevanceFloor: Float { multilingual ? 0.806 : 0.5 }
 
     public static var bundledMultilingual: URL? {
         MiniLM.bundledMultilingual
@@ -56,6 +53,8 @@ public final class BertEmbedder: Embedder {
     }
 
     public func embed(_ text: String) -> [Float] { model.embed(text) }
+
+    public func states(_ text: String) -> [Float] { model.encode(text) }
 
     public func tokens(_ text: String) -> [Int32] { model.tokenize(text) }
 }
@@ -130,6 +129,7 @@ public struct Concept {
 public struct Hit {
     public let concept: Concept
     public let score: Float
+    public let relevance: Float
     public let terms: [String]
 }
 
@@ -782,11 +782,11 @@ public final class Store {
         let admitted = order.filter { entry in
             filter.admits(concepts[entry.key])
         }
-        let hits = admitted.prefix(limit).map { entry in
+        let hits = rerank(queries, admitted.prefix(limit).map { entry in
             Hit(concept: concepts[entry.key],
-                score: best[entry.key] ?? 0,
+                score: best[entry.key] ?? 0, relevance: 0,
                 terms: (terms[entry.key] ?? []).sorted())
-        }
+        })
         return SearchResult(
             hits: hits,
             embedSeconds: embedded.timeIntervalSince(started),
@@ -795,26 +795,84 @@ public final class Store {
             standout: standout)
     }
 
-    public static let standoutFrom = 40
+    static let bodyDiscount: Float = 0.95
+    static let relevanceChars = 600
 
-    private func related(_ hit: Hit) -> Bool {
-        hit.score >= embedder.cosineFloor
-            || (!hit.terms.isEmpty && hit.score >= embedder.verbatimFloor)
+    private func tokenStates(_ prefix: String, _ text: String) -> [Float] {
+        let width = embedder.dim
+        let skip = embedder.tokens(prefix).count - 1
+        let states = embedder.states(prefix + text)
+        let kept = max(0, states.count / width - skip - 1)
+        var out = Array(states[(skip * width)..<((skip + kept) * width)])
+        for t in 0..<kept {
+            var square: Float = 0
+            for d in 0..<width {
+                square += out[t * width + d] * out[t * width + d]
+            }
+            let inverse = square > 0 ? 1 / square.squareRoot() : 0
+            for d in 0..<width { out[t * width + d] *= inverse }
+        }
+        return out
     }
 
-    private func vouched(_ result: SearchResult) -> Bool {
-        concepts.count >= Store.standoutFrom
-            && result.standout >= embedder.standoutFloor
+    private func maxSim(_ query: [Float], _ document: [Float]) -> Float {
+        let width = embedder.dim
+        let asked = query.count / width
+        let given = document.count / width
+        var total: Float = 0
+        query.withUnsafeBufferPointer { queries in
+            document.withUnsafeBufferPointer { documents in
+                for i in 0..<asked {
+                    var best: Float = -1
+                    for j in 0..<given {
+                        let dot = Store.dot(
+                            queries.baseAddress! + i * width,
+                            documents.baseAddress! + j * width, width)
+                        if dot > best { best = dot }
+                    }
+                    total += best
+                }
+            }
+        }
+        return asked > 0 && given > 0 ? total / Float(asked) : 0
     }
 
-    public func relevant(_ hit: Hit, at rank: Int,
-                         in result: SearchResult) -> Bool {
-        related(hit) || (rank == 0 && vouched(result))
+    private func relevance(_ concept: Concept,
+                           _ queries: [[Float]]) -> Float {
+        let abstract = tokenStates(embedder.passagePrefix, concept.passage)
+        let body = concept.body.isEmpty
+            ? [] : tokenStates(embedder.passagePrefix,
+                               String(concept.body.prefix(
+                                   Store.relevanceChars)))
+        var out: Float = 0
+        for query in queries {
+            let scored = max(maxSim(query, abstract),
+                             maxSim(query, body) * Store.bodyDiscount)
+            if scored > out { out = scored }
+        }
+        return out
+    }
+
+    private func rerank(_ queries: [String], _ hits: [Hit]) -> [Hit] {
+        let asked = queries.map { query in
+            tokenStates(embedder.queryPrefix, query)
+        }
+        let scored = hits.enumerated().map { rank, hit in
+            (rank, Hit(concept: hit.concept, score: hit.score,
+                       relevance: relevance(hit.concept, asked),
+                       terms: hit.terms))
+        }
+        return scored.sorted { left, right in
+            (-left.1.relevance, left.0) < (-right.1.relevance, right.0)
+        }.map { entry in entry.1 }
+    }
+
+    public func relevant(_ hit: Hit) -> Bool {
+        hit.relevance >= embedder.relevanceFloor
     }
 
     public func confident(_ result: SearchResult) -> Bool {
-        result.hits.first.map { top in relevant(top, at: 0, in: result) }
-            ?? false
+        result.hits.first.map { top in relevant(top) } ?? false
     }
 
     static func standout(_ scores: [Float]) -> Float {
@@ -839,12 +897,18 @@ public final class Store {
                             _ vector: [Float], _ width: Int) -> Float {
         var total: Float = -1
         if vector.count == width {
-            total = 0
             vector.withUnsafeBufferPointer { stored in
-                let base = stored.baseAddress!
-                for i in 0..<width { total += query[i] * base[i] }
+                total = Store.dot(query, stored.baseAddress!, width)
             }
         }
+        return total
+    }
+
+    private static func dot(_ left: UnsafePointer<Float>,
+                            _ right: UnsafePointer<Float>,
+                            _ width: Int) -> Float {
+        var total: Float = 0
+        for i in 0..<width { total += left[i] * right[i] }
         return total
     }
 

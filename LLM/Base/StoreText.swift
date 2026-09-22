@@ -66,16 +66,14 @@ public enum StoreText {
                 ? "no concepts indexed\n"
                 : "no concept matches that filter\n"
         }
-        for (rank, hit) in result.hits.enumerated() {
+        for hit in result.hits {
             var flags = flags(hit.concept)
             if !hit.terms.isEmpty {
                 flags += " [" + hit.terms.joined(separator: " ") + "]"
             }
-            if !store.relevant(hit, at: rank, in: result) {
-                flags += " [unrelated]"
-            }
+            if !store.relevant(hit) { flags += " [unrelated]" }
             out += String(format: "%@  %.3f%@\n", hit.concept.id,
-                          hit.score, flags)
+                          hit.relevance, flags)
             out += "  " + hit.concept.title + "\n"
             if !hit.concept.description.isEmpty {
                 out += "  " + hit.concept.description + "\n"

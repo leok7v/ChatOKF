@@ -39,8 +39,8 @@ import XCTest
                 + "router.", tags: ["tech"], body: "One per floor.")
         _ = try store.write(
             id: "person/pet-name", type: "Note", title: "The user's pet name",
-            description: "The user's pet name is the name of their pet.",
-            tags: ["person"], body: "The user calls their dog Biscuit.")
+            description: "The user's dog is called Biscuit.",
+            tags: ["person"], body: "A beagle, three years old.")
         let memories = Memories(root: root)
         memories.enabled = true
         return memories
@@ -416,13 +416,13 @@ import XCTest
         let kept = memories.remember([Memories.Draft(
             id: "person/coffee", type: "Note", title: "Coffee",
             description: "Drinks two espressos before nine.", tags: [],
-            body: "Never after lunch.")], from: said, source: source,
+            body: "Never after lunch.")], said: said, source: source,
             excluding: [])
         XCTAssertEqual(kept.map { note in note.id }, ["person/coffee"])
         let seen = memories.remember([Memories.Draft(
             id: "person/tea", type: "Note", title: "Tea",
             description: "Drinks tea.", tags: [], body: "Green.")],
-            from: said, source: source, excluding: ["person/tea"])
+            said: said, source: source, excluding: ["person/tea"])
         XCTAssertTrue(seen.isEmpty, "a note this chat already saw")
         let path = root.appendingPathComponent("person/coffee.md")
         var text = try String(contentsOf: path, encoding: .utf8)
@@ -433,7 +433,7 @@ import XCTest
         let again = memories.remember([Memories.Draft(
             id: "person/coffee", type: "Note", title: "Coffee again",
             description: "Restated.", tags: [], body: "Restated.")],
-            from: said, source: source, excluding: [])
+            said: said, source: source, excluding: [])
         XCTAssertEqual(again.map { note in note.id }, ["person/coffee"],
                        "a later extraction updates the note in place")
         text = try String(contentsOf: path, encoding: .utf8)
@@ -442,7 +442,7 @@ import XCTest
             id: "person/morning-coffee", type: "Note",
             title: "Morning coffee",
             description: "Restated.",
-            tags: [], body: "Restated.")], from: said, source: source,
+            tags: [], body: "Restated.")], said: said, source: source,
             excluding: [])
         XCTAssertEqual(restated.map { note in note.id }, ["person/coffee"],
                        "a restated note lands under the id on file")
@@ -450,12 +450,12 @@ import XCTest
         let tea = memories.remember([Memories.Draft(
             id: "person/tea", type: "Note", title: "Tea",
             description: "Drinks tea.", tags: [], body: "Green.")],
-            from: said, source: source, excluding: [])
+            said: said, source: source, excluding: [])
         XCTAssertEqual(tea.map { note in note.id }, ["person/tea"])
         let moreTea = memories.remember([Memories.Draft(
             id: "person/afternoon-tea", type: "Note", title: "Tea",
             description: "Drinks green tea.", tags: [], body: "Green.")],
-            from: said, source: source, excluding: [])
+            said: said, source: source, excluding: [])
         XCTAssertEqual(moreTea.map { note in note.id }, ["person/tea"],
                        "a restated draft is updated under its own id")
         XCTAssertNil(memories.note("person/afternoon-tea"))
@@ -483,19 +483,20 @@ import XCTest
             description: "A 2019 Subaru Outback, green, 60k miles.", tags: [],
             body: "Serviced at the dealer every 10k.")
         let owned = memories.remember(
-            [car], from: "User: I drive a 2019 Subaru Outback, green, 60k "
+            [car], said: "I drive a 2019 Subaru Outback, green, 60k "
                 + "miles, serviced at the dealer every 10k.",
             source: nil, excluding: [])
         XCTAssertEqual(owned.map { note in note.id }, ["car/subaru"])
-        let cosmos = "User: Explain dark matter and dark energy in a few "
-            + "sentences.\n\nAssistant: Dark matter is inferred from "
-            + "gravity; dark energy drives the accelerating expansion."
+        let asked = "Explain dark matter and dark energy in a few sentences."
+        let cosmos = "User: " + asked + "\n\nAssistant: Dark matter is "
+            + "inferred from gravity; dark energy drives the accelerating "
+            + "expansion."
         let echo = Memories.Draft(
             id: "car/subaru", type: "Note", title: "Subaru",
             description: "The user owns a Subaru.", tags: ["private"],
             body: "This is a known possession.")
-        XCTAssertFalse(Memories.grounded(echo, in: cosmos))
-        XCTAssertTrue(memories.remember([echo], from: cosmos, source: nil,
+        XCTAssertFalse(Memories.grounded(echo, in: asked))
+        XCTAssertTrue(memories.remember([echo], said: asked, source: nil,
                                         excluding: []).isEmpty)
         XCTAssertEqual(memories.note("car/subaru")?.text.contains("Outback"),
                        true)
@@ -503,9 +504,20 @@ import XCTest
             id: "interest/dark-matter", type: "Note", title: "Dark matter",
             description: "The user asked how dark matter differs from dark "
                 + "energy.", tags: [], body: "Asked on 2026-09-21.")
-        XCTAssertTrue(Memories.grounded(interest, in: cosmos))
+        XCTAssertTrue(Memories.grounded(interest, in: asked))
         XCTAssertTrue(memories.coverage(cosmos).known.isEmpty,
                       "an unrelated note is not offered as already on file")
+        let listed = Memories.Draft(
+            id: "interest/garden", type: "Note", title: "Joe's garden",
+            description: "Joe is interested in herbs, tomatoes and basil.",
+            tags: ["garden"], body: "Listed from the map.")
+        let listing = "List everything we ever talked about that you "
+            + "remember with short titles"
+        XCTAssertFalse(Memories.grounded(listed, in: listing),
+                       "a draft drawn from the answer, not the user, drops")
+        XCTAssertTrue(memories.remember([listed], said: listing, source: nil,
+                                        excluding: []).isEmpty)
+        XCTAssertNil(memories.note("interest/garden"))
         try? FileManager.default.removeItem(at: root)
     }
 }

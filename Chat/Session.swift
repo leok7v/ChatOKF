@@ -328,14 +328,15 @@ public enum TurnEvent: Sendable {
             if let found {
                 Diag.shared.report(.turn, String(
                     format: "[recall] %@ %d note(s), standout %.1f, ~%d tok "
-                        + "%.1fs of %.0fs: %@",
+                        + "%.1fs of %.0fs, searched %.2fs: %@",
                     found.silent ? "silent" : "offered", found.ids.count,
                     found.standout, found.tokens, found.seconds,
-                    Memories.budgetSeconds,
+                    Memories.budgetSeconds, found.searchSeconds,
                     found.ids.joined(separator: " ")))
                 if found.silent { recalledIds.formUnion(found.ids) }
                 out = found
             }
+            Footprint.report(.memory, "after recall")
         }
         return out
     }
@@ -941,10 +942,12 @@ public enum TurnEvent: Sendable {
     }
 
     public struct Extraction: Sendable {
+        public let said: String
         public let exchange: String
         public let conversation: UUID?
 
-        public init(exchange: String, conversation: UUID?) {
+        public init(said: String, exchange: String, conversation: UUID?) {
+            self.said = said
             self.exchange = exchange
             self.conversation = conversation
         }
@@ -982,20 +985,22 @@ public enum TurnEvent: Sendable {
         if let session, memories.active, memories.isOpen {
             let coverage = memories.coverage(extraction.exchange)
             if coverage.covered {
-                Diag.shared.report(.turn, "[extract] covered by the store, "
-                                   + "skipped")
+                Diag.shared.report(.turn, String(
+                    format: "[extract] covered by the store, skipped, "
+                        + "searched %.2fs", coverage.seconds))
             } else {
                 let began = Date()
                 let raw = await session.extractNotes(
                     Memories.extractionInstruction(known: coverage.known))
                 let drafts = Memories.parseDrafts(raw)
-                out = memories.remember(drafts, from: extraction.exchange,
+                out = memories.remember(drafts, said: extraction.said,
                                         source: extraction.conversation,
                                         excluding: recalledIds)
                 Diag.shared.report(.turn, String(
                     format: "[extract] %d draft(s) of %d parsed from %d "
-                        + "chars in %.1fs: %@", out.count, drafts.count,
-                    raw.count, Date().timeIntervalSince(began),
+                        + "chars in %.1fs, searched %.2fs: %@", out.count,
+                    drafts.count, raw.count,
+                    Date().timeIntervalSince(began), coverage.seconds,
                     out.map { note in note.id }.joined(separator: " ")))
             }
         }

@@ -1016,7 +1016,7 @@ import UniformTypeIdentifiers
         let titled = !readOnly && generatedTitle == nil
             && messages.count >= 2 && chars > 200
         let extraction = session.memories.active && messages.count >= 2
-            ? Session.Extraction(exchange: lastExchange,
+            ? Session.Extraction(said: lastSaid, exchange: lastExchange,
                                  conversation: currentConversationId)
             : nil
         if !readOnly, titled || offersFollowupHint || extraction != nil {
@@ -1036,6 +1036,10 @@ import UniformTypeIdentifiers
                     self?.commitCurrent()
                 })
         }
+    }
+
+    private var lastSaid: String {
+        messages.suffix(2).first { m in m.fromUser }?.text ?? ""
     }
 
     private var lastExchange: String {

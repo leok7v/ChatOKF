@@ -473,15 +473,23 @@ final class MiniLM {
         }
     }
 
-    @discardableResult
-    func embed(_ text: String, into out: inout [Float]) -> Int {
+    func encode(_ text: String) -> [Float] {
         let ids = tokenize(text)
         let T = ids.count
+        var x = [Float](repeating: 0, count: T * nEmbd)
         if T > 0 {
-            let ne = nEmbd
-            var x = [Float](repeating: 0, count: T * ne)
             embedTokens(ids, &x)
             for l in 0..<nLayer { encoderLayer(layers[l], &x, T: T) }
+        }
+        return x
+    }
+
+    @discardableResult
+    func embed(_ text: String, into out: inout [Float]) -> Int {
+        let ne = nEmbd
+        let x = encode(text)
+        let T = x.count / ne
+        if T > 0 {
             for d in 0..<ne { out[d] = 0 }
             for t in 0..<T {
                 for d in 0..<ne { out[d] += x[t * ne + d] }

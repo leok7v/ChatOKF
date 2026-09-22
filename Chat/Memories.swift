@@ -11,6 +11,7 @@ import Observation
         public let standout: Float
         public let tokens: Int
         public let seconds: Double
+        public let searchSeconds: Double
         public let readSeconds: [Double]
         public var silent: Bool { seconds <= Memories.budgetSeconds }
     }
@@ -172,12 +173,13 @@ import Observation
             let queries = [question] + also.filter { text in
                 !text.isEmpty
             }
+            let began = Date()
             let result = store.search(queries, filter: Filter(),
                                       limit: Memories.recallLimit + read.count)
-            let fresh = result.hits.enumerated().filter { rank, hit in
-                !read.contains(hit.concept.id)
-                    && store.relevant(hit, at: rank, in: result)
-            }.map { pair in pair.element }.prefix(Memories.recallLimit)
+            let searched = Date().timeIntervalSince(began)
+            let fresh = result.hits.filter { hit in
+                !read.contains(hit.concept.id) && store.relevant(hit)
+            }.prefix(Memories.recallLimit)
             if !fresh.isEmpty {
                 var block = "Notes remembered about this user that may "
                     + "bear on the message below:\n"
@@ -195,14 +197,18 @@ import Observation
                              block: block, standout: result.standout,
                              tokens: tokens,
                              seconds: pp > 0 ? Double(tokens) / pp : 0,
-                             readSeconds: reads)
+                             searchSeconds: searched, readSeconds: reads)
             } else {
+                let unread = result.hits.first { hit in
+                    !read.contains(hit.concept.id)
+                }
                 Diag.shared.report(.turn, String(
-                    format: "[recall] nothing: standout %.1f of %.1f, top "
-                        + "%.3f of %.2f, %d of %d concepts fit",
-                    result.standout, embedder.standoutFloor,
-                    result.hits.first?.score ?? 0, embedder.cosineFloor,
-                    fresh.count, store.concepts.count))
+                    format: "[recall] nothing: top unread %.3f of %.3f, "
+                        + "standout %.1f, %d of %d concepts fit, "
+                        + "searched %.2fs",
+                    unread?.relevance ?? 0, embedder.relevanceFloor,
+                    result.standout, fresh.count, store.concepts.count,
+                    searched))
             }
         } else if store == nil, active {
             Diag.shared.report(.turn, "[recall] the store is not open yet")
@@ -320,23 +326,22 @@ import Observation
     public struct Coverage {
         public let covered: Bool
         public let known: [(id: String, title: String)]
+        public let seconds: Double
     }
 
     public func coverage(_ text: String) -> Coverage {
         var covered = false
         var known: [(id: String, title: String)] = []
+        let began = Date()
         if let store, !store.concepts.isEmpty {
             let result = store.search([text], filter: Filter(),
                                       limit: Memories.recallLimit)
-            covered = store.concepts.count >= Store.standoutFrom
-                && store.confident(result)
-            known = result.hits.enumerated().filter { rank, hit in
-                store.relevant(hit, at: rank, in: result)
-            }.map { pair in
-                (pair.element.concept.id, pair.element.concept.title)
-            }
+            covered = store.confident(result)
+            known = result.hits.filter { hit in store.relevant(hit) }
+                .map { hit in (hit.concept.id, hit.concept.title) }
         }
-        return Coverage(covered: covered, known: known)
+        return Coverage(covered: covered, known: known,
+                        seconds: Date().timeIntervalSince(began))
     }
 
     public static func extractionInstruction(
@@ -384,29 +389,28 @@ import Observation
             }
     }
 
-    nonisolated static func grounded(_ draft: Draft, in exchange: String)
+    nonisolated static func grounded(_ draft: Draft, in said: String)
         -> Bool {
-        let said = Memories.words(exchange)
+        let heard = Memories.words(said)
         let claimed = Memories.words(draft.title + " " + draft.description
                                      + " " + draft.body)
         return claimed.contains { word in
-            said.contains { heard in
-                heard.hasPrefix(word) || word.hasPrefix(heard)
+            heard.contains { spoken in
+                spoken.hasPrefix(word) || word.hasPrefix(spoken)
             }
         }
     }
 
-    public func remember(_ drafts: [Draft], from exchange: String,
+    public func remember(_ drafts: [Draft], said: String,
                          source: UUID?, excluding seen: Set<String>)
         -> [Remembered] {
         var out: [Remembered] = []
         if let store {
-            for draft in drafts
-            where !Memories.grounded(draft, in: exchange) {
+            for draft in drafts where !Memories.grounded(draft, in: said) {
                 Diag.shared.report(.turn, "[extract] " + draft.id
-                                   + " shares no word with the exchange")
+                                   + " shares no word with what the user said")
             }
-            for draft in drafts where Memories.grounded(draft, in: exchange) {
+            for draft in drafts where Memories.grounded(draft, in: said) {
                 var id = draft.id
                 if store.concept(id) == nil,
                    let same = store.duplicate(
