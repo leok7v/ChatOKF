@@ -696,7 +696,7 @@ import UniformTypeIdentifiers
                 compiling = false
                 status = ""
             }
-            session.primeSession(thinkingActive: thinkingActive)
+            session.primeSession()
             session.pruneParked(
                 keeping: Set(ConversationStore.shared.list.map { c in c.id }))
             if !Self.benchPrompt.isEmpty, benchTask == nil {
@@ -729,6 +729,8 @@ import UniformTypeIdentifiers
             let began = Date()
             if line == "new" {
                 newChat()
+            } else if line == "think" {
+                toggleThinking()
             } else if line == "reopen" {
                 if let id = ConversationStore.shared.list.first?.id {
                     openConversation(id)
@@ -1107,20 +1109,11 @@ import UniformTypeIdentifiers
             thinking.toggle()
             let on = thinking
             let fresh = messages.isEmpty
-            let hud = thinkingFlash(on, fresh: fresh)
             Task { @MainActor in
                 await session.pushThinking(on, resetIfFresh: fresh)
             }
-            flashHUD(hud)
+            flashHUD(on ? "Thinking: On" : "Thinking: Off")
         }
-    }
-
-    private func thinkingFlash(_ on: Bool, fresh: Bool) -> String {
-        var out = on ? "Thinking: On" : "Thinking: Off"
-        if on, !fresh, !session.primedThinking {
-            out = "Thinking: On, from the next chat"
-        }
-        return out
     }
 
     func quickAnswer() {

@@ -331,6 +331,8 @@ public struct Sampler: Sendable {
 
     public var penaltyExempt: Set<Int32> = []
 
+    public var dryBreakers: Set<Int32> = []
+
     public var verbatim = false
 
     public static let overthinkMarkers: [String] = [
@@ -573,7 +575,8 @@ public struct Sampler: Sendable {
 
     private func drySuffixMatch(_ j: Int, _ n: Int) -> Int {
         var len = 0
-        while len < j && dry[j - 1 - len] == dry[n - 1 - len] {
+        while len < j && dry[j - 1 - len] == dry[n - 1 - len]
+              && !dryBreakers.contains(dry[n - 1 - len]) {
             len += 1
         }
         return len + 1

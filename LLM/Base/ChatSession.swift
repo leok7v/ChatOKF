@@ -83,6 +83,7 @@ public actor ChatSession {
     }()
     static let digitsExempt = Flags.on("digit-exempt")
     static let budgetNote = Flags.value("reasoning-note") ?? ""
+    static let dryMultiplier = Float(Flags.double("dry-multiplier") ?? 0.8)
     private var gate: GrammarGate?
     private var grammarVocab: GrammarVocab?
     private let toolDialectXML: Bool
@@ -446,6 +447,7 @@ public actor ChatSession {
             if await prime(from: url) == false {
                 try? await precook(to: url)
             }
+            if ChatSession.dryMultiplier > 0 { _ = sequenceBreakers() }
         }
     }
 
@@ -1284,11 +1286,14 @@ public actor ChatSession {
             ? ChatSession.greedyConfig
             : presets.select(thinking: reasons, vision: vision)
         if !turnConfig.setMask.contains(.dryMultiplier) {
-            turnConfig.dryMultiplier = 0.8
+            turnConfig.dryMultiplier = ChatSession.dryMultiplier
         }
         if samplerSeed != 0 { turnConfig.seed = samplerSeed }
         var sampler = Sampler(vocabSize: vocabSize, config: turnConfig)
         sampler.penaltyExempt = wireTokens
+        if turnConfig.dryMultiplier > 0 {
+            sampler.dryBreakers = sequenceBreakers()
+        }
         if overthinkLambda != 0 && reasons && !overthinkTokens.isEmpty {
             sampler.overthinkTokens = overthinkTokens
             sampler.overthinkLambda = overthinkLambda
@@ -1296,6 +1301,29 @@ public actor ChatSession {
         turnSampler = sampler
         if let gate = ensureGate() { gate.disarm() }
         await backend.useSampler(sampler)
+    }
+
+    static let breakerBytes = Set("\n:\"*|".utf8)
+
+    private var breakers: Set<Int32>?
+
+    private func sequenceBreakers() -> Set<Int32> {
+        var out = breakers ?? []
+        if breakers == nil {
+            let began = Date()
+            for id in 0 ..< Int32(vocabSize)
+            where backend.tokenBytes(id).contains(where: { byte in
+                ChatSession.breakerBytes.contains(byte)
+            }) {
+                out.insert(id)
+            }
+            breakers = out
+            Diag.shared.report(.perf, String(
+                format: "[dry] %d sequence breakers of %d tokens in %.0f ms",
+                out.count, vocabSize,
+                Date().timeIntervalSince(began) * 1000))
+        }
+        return out
     }
 
     private func installSampler(masked: Bool, verbatim: Bool) async {
@@ -1504,6 +1532,7 @@ public actor ChatSession {
                     break
                 }
             }
+            let wasReasoning = inThinkRegion && closeAt == nil
             if inThinkRegion && closeAt == nil {
                 closeAt = ChatSession.index(bytes, thinkClose,
                                             thinkSearch)
@@ -1656,7 +1685,8 @@ public actor ChatSession {
                 }
             }
             let armed = gate?.armed ?? false
-            if armed != wasArmed || (toolAt != nil) != wasOpen {
+            let draftEnded = wasReasoning && closeAt != nil
+            if armed != wasArmed || (toolAt != nil) != wasOpen || draftEnded {
                 await installSampler(masked: armed, verbatim: toolAt != nil)
             }
             let openRunaway = toolAt.map { at in

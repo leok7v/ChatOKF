@@ -151,12 +151,17 @@ public enum Flags {
             scope: .diagnostic, defaultValue: ""),
         Knob(name: "prompt", takesValue: true, help:
             "a turn the app sends at launch, repeatable and in order; "
-            + "'new' leaves the conversation and 'reopen' brings it back",
+            + "'new' leaves the conversation, 'reopen' brings it back, "
+            + "'think' taps the lightbulb",
             scope: .diagnostic, defaultValue: ""),
         Knob(name: "reasoning-note", takesValue: true, help:
             "text injected before the </think> the reasoning budget forces, "
             + "so the cut reads as a decision rather than a truncation",
             scope: .experiment, defaultValue: ""),
+        Knob(name: "dry-multiplier", takesValue: true, help:
+            "DRY repetition penalty a turn samples under when the model's "
+            + "card sets none; 0 turns it off", scope: .experiment,
+            defaultValue: "0.8"),
         Knob(name: "prompt-delay", takesValue: true, help:
             "seconds the prompt script waits before its first turn, the "
             + "time a person spends typing", scope: .diagnostic,

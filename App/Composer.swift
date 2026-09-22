@@ -511,10 +511,10 @@ struct Composer: View {
 
     private var footnote: some View {
         Text(noteText)
-            .appFont(.caption)
+            .font(appTextFont(.footnote, max(model.textScale, 1)))
             .foregroundStyle(.primary)
             .lineLimit(1)
-            .minimumScaleFactor(0.85)
+            .minimumScaleFactor(0.75)
             .frame(maxWidth: .infinity)
             .contentTransition(.identity)
     }
@@ -564,8 +564,8 @@ struct Composer: View {
             ? Composer.caveat
             : "Shift+Return for a new line.  " + Composer.caveat
         if hinting {
-            text = isOS ? "Swipe right to ask this"
-                        : "Tab or \u{2192} to ask this"
+            text = isOS ? "Swipe right to ask this question"
+                        : "Tab or \u{2192} to ask this question"
         }
         return text
     }

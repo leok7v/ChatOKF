@@ -52,9 +52,6 @@ public enum TurnEvent: Sendable {
     public private(set) var modelSupportsReasoningEffort = false
     public private(set) var effortLevels: [String] = []
     public private(set) var perImageTokens = 256
-    // Reasoning can turn OFF later by closing the channel as it opens, but
-    // never ON: the marker some templates carry is already in the KV.
-    public internal(set) var primedThinking = true
 
     public var hasSession: Bool { session != nil }
     public var metaTaskRunning: Bool { metaTask != nil }
@@ -576,9 +573,8 @@ public enum TurnEvent: Sendable {
         }
     }
 
-    public func primeSession(resetFirst: Bool = false, thinkingActive: Bool) {
+    public func primeSession(resetFirst: Bool = false) {
         if let session {
-            primedThinking = thinkingActive
             primingTask = Task {
                 await self.primeOrCookInternal(session, reset: resetFirst)
             }
@@ -612,8 +608,7 @@ public enum TurnEvent: Sendable {
         forgetRecalled()
         await memories.awaitOpen()
         makeSession(config, onEvent: onEvent)
-        primeSession(resetFirst: true,
-                    thinkingActive: config.thinking && modelSupportsThinking)
+        primeSession(resetFirst: true)
     }
 
     public func quiesce() async { await session?.quiesce() }
@@ -622,7 +617,6 @@ public enum TurnEvent: Sendable {
         await session?.setThinking(on)
         await session?.setSuppressReasoning(!on)
         if fresh {
-            primedThinking = on
             if let session { await primeOrCookInternal(session, reset: true) }
         }
     }

@@ -56,7 +56,11 @@ private final class MockBackend: AgentBackend, @unchecked Sendable {
         freshTurn = false
     }
 
-    func useSampler(_ s: Sampler?) async {}
+    private(set) var samplers: [Sampler] = []
+
+    func useSampler(_ s: Sampler?) async {
+        if let s { samplers.append(s) }
+    }
 
     private func script() -> [Int32] {
         let idx = cycle && !scripts.isEmpty ? round % scripts.count : round
@@ -1018,6 +1022,28 @@ final class ChatSessionTests: XCTestCase {
                       "reasoning not captured: \(reasoning.text)")
         XCTAssertTrue(content.contains("answer"), "answer missing: \(content)")
         XCTAssertFalse(content.contains("why"), "reasoning leaked into content")
+    }
+
+    func testTheAnswerIsNotPenalizedForRepeatingItsReasoning() async throws {
+        let voc = vocab([(10, "why "), (11, "because"),
+                         (12, "</think>"), (13, "answer"),
+                         (30, " |"), (31, "end.\n"), (32, "plain")])
+        let thinks = MockBackend(scripts: [[10, 11, 12, 13]], vocab: voc)
+        let session = ChatSession(
+            backend: thinks, template: template, system: "You are a bot.",
+            vocabSize: 256, presets: .uniform(SamplerConfig()),
+            enableThinking: true)
+        _ = await drain(session.reply("go"))
+        XCTAssertEqual(thinks.samplers.count, 2,
+                       "the close of the reasoning starts a fresh window")
+        let plain = MockBackend(scripts: [[13]], vocab: voc)
+        let direct = ChatSession(
+            backend: plain, template: template, system: "You are a bot.",
+            vocabSize: 256, presets: .uniform(SamplerConfig()))
+        _ = await drain(direct.reply("go"))
+        XCTAssertEqual(plain.samplers.count, 1)
+        XCTAssertEqual(plain.samplers[0].dryBreakers, [30, 31],
+                       "the tokens whose text carries a breaker")
     }
 
     // Reasoning-none: a small model that RE-OPENS <think> despite the baked

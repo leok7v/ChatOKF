@@ -1097,9 +1097,14 @@ struct ContentView: View {
                     noAnswerNote(m)
                 }
             }
-            if !m.fromUser { Spacer(minLength: 40) }
+            .frame(maxWidth: m.fromUser ? nil : answerColumn,
+                   alignment: .leading)
+            .frame(maxWidth: m.fromUser ? nil : .infinity,
+                   alignment: .leading)
         }
     }
+
+    private var answerColumn: CGFloat { 680 * textScale }
 
     @ViewBuilder
     private func imageStrip(_ images: [CGImage]) -> some View {

@@ -199,14 +199,12 @@ extension Session {
             forgetRecalled()
             await memories.awaitOpen()
             makeSession(config, onEvent: onEvent)
-            let thinking = config.thinking && modelSupportsThinking
             if let session {
                 let t0 = Date()
                 out = (try? await session.resume(
                     from: url, stamp: Session.parkStamp(modelName))) == true
                 let label = String(id.uuidString.prefix(8))
                 if out {
-                    primedThinking = thinking
                     Diag.shared.report(.load, String(
                         format: "[park] resumed %@ at %d tokens in %.2fs",
                         label, await session.committedCount,
@@ -214,7 +212,7 @@ extension Session {
                 } else {
                     Diag.shared.report("[park] resume FAILED \(label), "
                                        + "priming a fresh session instead")
-                    primeSession(resetFirst: true, thinkingActive: thinking)
+                    primeSession(resetFirst: true)
                 }
             }
         }

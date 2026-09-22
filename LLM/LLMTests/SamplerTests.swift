@@ -122,6 +122,22 @@ final class SamplerTests: XCTestCase {
         XCTAssertNotEqual(pick(&guarded, logits), 3)
     }
 
+    func testASequenceBreakerEndsTheMatch() {
+        var dry = SamplerConfig(temperature: 0, setMask: [.temperature])
+        dry.dryMultiplier = 0.8
+        var run = Sampler(vocabSize: 5, config: dry)
+        var cut = Sampler(vocabSize: 5, config: dry)
+        cut.dryBreakers = [4]
+        for t in [Int32(1), 2, 4, 3, 1, 2, 4] {
+            run.accept(t)
+            cut.accept(t)
+        }
+        let logits: [Float] = [0.0, 0.1, 0.2, 0.5, 0.0]
+        XCTAssertNotEqual(pick(&run, logits), 3, "1 2 4 then 3 is a repeat")
+        XCTAssertEqual(pick(&cut, logits), 3,
+                       "a match may not run across a breaker")
+    }
+
     func testVerbatimSuspendsEveryPenalty() {
         var cfg = SamplerConfig(
             temperature: 0, repeatPenalty: 1.5, presencePenalty: 0.5,
