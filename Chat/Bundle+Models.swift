@@ -54,23 +54,21 @@ public enum Models {
         switch gb {
         case ..<4: out = nil
         case ..<7: out = "gemma-4-E2B"
-        default: out = "gemma-4-E4B-MTP"
+        default: out = e4b
         }
         return out
     }
 
     public static var every: [String] {
         isOS
-            ? ["gemma-4-E2B", "gemma-4-E4B", "gemma-4-E4B-MTP",
+            ? ["gemma-4-E2B", "gemma-4-E4B",
                "Qwen3.5-2B", "Qwen3.5-4B", "Ternary-Bonsai-1.7B"]
             : ["Qwen3.5-4B", "Qwen3.5-9B",
                "Qwen3.8-27B-IQ1_S", "Qwen3.8-27B-IQ2_XXS",
                "Qwen3.8-27B-IQ3_XXS", "Qwen3.8-27B-IQ4_XS",
                "Qwen3.8-27B-Q4_K_S",
                "Ternary-Bonsai-27B", "Ternary-Bonsai-1.7B",
-               "gemma-4-E2B",
-               "gemma-4-E4B", "gemma-4-E4B-MTP",
-               "gemma-4-12B", "gemma-4-12B-MTP"]
+               "gemma-4-E2B", "gemma-4-E4B", "gemma-4-12B"]
     }
 
     public static var downloaded: Set<String> {
@@ -98,8 +96,8 @@ public enum Models {
             if let one = qwen38(gb) { band.insert(one) }
             band.insert("Ternary-Bonsai-27B")
             band.insert("Ternary-Bonsai-1.7B")
-            band.insert(e4bMTP)
-            if gb >= 16 { band.insert("gemma-4-12B-MTP") }
+            band.insert(e4b)
+            if gb >= 16 { band.insert("gemma-4-12B") }
         }
         let keep = band.union(downloaded)
         return every.filter { name in keep.contains(name) }
@@ -116,8 +114,7 @@ public enum Models {
     public static var start: String {
         let list = all
         var out = list.contains(fallback) ? fallback : (list.first ?? fallback)
-        let preferred = [e2b, e4b,
-                         isOS ? gemmaRung(installedGB) : e4bMTP]
+        let preferred = [e2b, isOS ? gemmaRung(installedGB) : e4b]
         for name in preferred.compactMap({ n in n }) where list.contains(name) {
             out = name
         }
@@ -126,7 +123,6 @@ public enum Models {
 
     private static let e2b = "gemma-4-E2B"
     private static let e4b = "gemma-4-E4B"
-    private static let e4bMTP = "gemma-4-E4B-MTP"
 
     private static func family(_ name: String) -> String {
         var out = name

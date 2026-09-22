@@ -37,10 +37,12 @@ public enum MemoryTools {
             name: "memory_search",
             description: "Search the user's own notes by meaning AND exact "
                 + "wording; returns id, title and description per hit. Ask "
-                + "a full question, not a keyword. [weak] means no confident "
-                + "match: answer from your own knowledge instead. Put "
-                + "rephrasings in `also` rather than searching again; narrow "
-                + "with `area` only when the map shows the answer is there.",
+                + "a full question, not a keyword. A hit marked [unrelated] "
+                + "does not bear on the question: ignore it and never "
+                + "mention it. [weak] means no note matches at all: answer "
+                + "from your own knowledge. Put rephrasings in `also` rather "
+                + "than searching again; narrow with `area` only when the "
+                + "map shows the answer is there.",
             parametersJSON: "{\"type\":\"object\",\"properties\":{"
                 + "\"query\":{\"type\":\"string\"},"
                 + "\"also\":{\"type\":\"string\",\"description\":\"Other "
@@ -119,6 +121,25 @@ public enum MemoryTools {
         (text ?? "").split(separator: separator)
             .map { part in part.trimmingCharacters(in: .whitespaces) }
             .filter { part in !part.isEmpty }
+    }
+
+    static func slug(_ text: String, words: Int) -> String {
+        text.lowercased()
+            .split(whereSeparator: { c in !c.isLetter && !c.isNumber })
+            .prefix(words).joined(separator: "-")
+    }
+
+    static func repaired(_ heading: String, _ title: String) -> String {
+        let parts = heading.split(separator: "/",
+                                  omittingEmptySubsequences: false)
+        var out = heading
+        if parts.count == 2 {
+            out = slug(String(parts[0]), words: 2) + "/"
+                + slug(String(parts[1]), words: 6)
+        } else if parts.count == 1, heading.split(separator: " ").count <= 2 {
+            out = slug(heading, words: 2) + "/" + slug(title, words: 6)
+        }
+        return out
     }
 
     static func validId(_ id: String) -> Bool {

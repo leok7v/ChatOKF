@@ -989,7 +989,7 @@ public enum TurnEvent: Sendable {
                 let raw = await session.extractNotes(
                     Memories.extractionInstruction(known: coverage.known))
                 let drafts = Memories.parseDrafts(raw)
-                out = memories.remember(drafts,
+                out = memories.remember(drafts, from: extraction.exchange,
                                         source: extraction.conversation,
                                         excluding: recalledIds)
                 Diag.shared.report(.turn, String(

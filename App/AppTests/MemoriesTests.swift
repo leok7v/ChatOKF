@@ -37,9 +37,36 @@ import XCTest
             id: "tech/wifi-mesh", type: "Note", title: "The mesh wifi setup",
             description: "Three TP-Link Deco X55 units wired back to the "
                 + "router.", tags: ["tech"], body: "One per floor.")
+        _ = try store.write(
+            id: "person/pet-name", type: "Note", title: "The user's pet name",
+            description: "The user's pet name is the name of their pet.",
+            tags: ["person"], body: "The user calls their dog Biscuit.")
         let memories = Memories(root: root)
         memories.enabled = true
         return memories
+    }
+
+    static let foreign = [
+        "Which block gives the most fruit per tree, and what makes that "
+            + "surprising?",
+        "explain dark matter and dark energy",
+        "what is the name of the tallest mountain",
+        "who was the user of the first telephone",
+    ]
+
+    func testAForeignQuestionRecallsNothingOnASmallStore() async throws {
+        let memories = try seeded()
+        await memories.awaitOpen()
+        for question in MemoriesTests.foreign {
+            let got = memories.recall(question, also: [], pp: 400,
+                                      excluding: [])
+            XCTAssertNil(got, question + " -> " + (got?.block ?? ""))
+        }
+        let dog = memories.recall("what is my dog called", also: [],
+                                  pp: 400, excluding: [])
+        XCTAssertEqual(dog?.ids, ["person/pet-name"])
+        XCTAssertTrue(dog?.block.contains("Biscuit") == true, dog?.block ?? "")
+        try? FileManager.default.removeItem(at: memories.root)
     }
 
     func testRecallFindsTheNoteAndSkipsWhatWasRead() async throws {
@@ -63,12 +90,12 @@ import XCTest
         try? FileManager.default.removeItem(at: memories.root)
     }
 
-    func testSmallStoreRecallsWithoutTheFloor() async throws {
+    func testAVerbatimModelNumberRecallsOnASmallStore() async throws {
         let memories = try seeded()
         await memories.awaitOpen()
         let hit = memories.recall("Deco X55", also: [], pp: 400,
                                   excluding: [])
-        XCTAssertEqual(hit?.ids.first, "tech/wifi-mesh")
+        XCTAssertEqual(hit?.ids, ["tech/wifi-mesh"])
         try? FileManager.default.removeItem(at: memories.root)
     }
 
@@ -116,6 +143,13 @@ import XCTest
         let found = await runner.execute(
             "memory_search", [ToolArg(name: "query", value: "Deco X55")])
         XCTAssertTrue(found.contains("tech/wifi-mesh"), found)
+        XCTAssertFalse(found.contains("[weak"), found)
+        XCTAssertFalse(found.contains("[unrelated]"), found)
+        let foreign = await runner.execute("memory_search", [
+            ToolArg(name: "query",
+                    value: "explain dark matter and dark energy")])
+        XCTAssertTrue(foreign.hasPrefix("[weak"), foreign)
+        XCTAssertTrue(foreign.contains("[unrelated]"), foreign)
         let read = await runner.execute(
             "memory_read", [ToolArg(name: "id", value: "tech/wifi-mesh")])
         XCTAssertTrue(read.contains("One per floor."), read)
@@ -346,10 +380,19 @@ import XCTest
         XCTAssertTrue(drafts[0].body.hasSuffix("in spring."))
         XCTAssertEqual(drafts[1].type, "Note")
         XCTAssertEqual(Memories.parseDrafts("NONE\n```").count, 0)
-        let bare = "person/joe\ntype: Note\ntitle: Indoor preference\n"
+        let bare = "### cosmology\ntype: Note\ntitle: Dark Matter and Dark "
+            + "Energy\ndescription: What was asked.\nbody:\nAsked.\n"
+            + "### travel plans\ntitle: Kyoto Trip\ndescription: A plan.\n"
+            + "body:\nLate November.\n"
+            + "### interest/dark energy\ntitle: Dark energy\n"
+            + "description: What was asked.\nbody:\nAsked.\n```"
+        XCTAssertEqual(Memories.parseDrafts(bare).map { d in d.id },
+                       ["cosmology/dark-matter-and-dark-energy",
+                        "travel-plans/kyoto-trip", "interest/dark-energy"])
+        let unmarked = "person/joe\ntype: Note\ntitle: Indoor preference\n"
             + "description: Joe prefers being indoors.\ntags: \n"
             + "body: Joe is generally more of an indoor person.\n```"
-        let loose = Memories.parseDrafts(bare)
+        let loose = Memories.parseDrafts(unmarked)
         XCTAssertEqual(loose.map { d in d.id }, ["person/joe"])
         XCTAssertEqual(loose.first?.body,
                        "Joe is generally more of an indoor person.")
@@ -368,15 +411,18 @@ import XCTest
         memories.enabled = true
         await memories.awaitOpen()
         let source = UUID()
+        let said = "User: I drink two espressos of coffee before nine, never "
+            + "after lunch, and green tea in the afternoon."
         let kept = memories.remember([Memories.Draft(
             id: "person/coffee", type: "Note", title: "Coffee",
             description: "Drinks two espressos before nine.", tags: [],
-            body: "Never after lunch.")], source: source, excluding: [])
+            body: "Never after lunch.")], from: said, source: source,
+            excluding: [])
         XCTAssertEqual(kept.map { note in note.id }, ["person/coffee"])
         let seen = memories.remember([Memories.Draft(
             id: "person/tea", type: "Note", title: "Tea",
             description: "Drinks tea.", tags: [], body: "Green.")],
-            source: source, excluding: ["person/tea"])
+            from: said, source: source, excluding: ["person/tea"])
         XCTAssertTrue(seen.isEmpty, "a note this chat already saw")
         let path = root.appendingPathComponent("person/coffee.md")
         var text = try String(contentsOf: path, encoding: .utf8)
@@ -387,7 +433,7 @@ import XCTest
         let again = memories.remember([Memories.Draft(
             id: "person/coffee", type: "Note", title: "Coffee again",
             description: "Restated.", tags: [], body: "Restated.")],
-            source: source, excluding: [])
+            from: said, source: source, excluding: [])
         XCTAssertEqual(again.map { note in note.id }, ["person/coffee"],
                        "a later extraction updates the note in place")
         text = try String(contentsOf: path, encoding: .utf8)
@@ -396,7 +442,7 @@ import XCTest
             id: "person/morning-coffee", type: "Note",
             title: "Morning coffee",
             description: "Restated.",
-            tags: [], body: "Restated.")], source: source,
+            tags: [], body: "Restated.")], from: said, source: source,
             excluding: [])
         XCTAssertEqual(restated.map { note in note.id }, ["person/coffee"],
                        "a restated note lands under the id on file")
@@ -404,12 +450,12 @@ import XCTest
         let tea = memories.remember([Memories.Draft(
             id: "person/tea", type: "Note", title: "Tea",
             description: "Drinks tea.", tags: [], body: "Green.")],
-            source: source, excluding: [])
+            from: said, source: source, excluding: [])
         XCTAssertEqual(tea.map { note in note.id }, ["person/tea"])
         let moreTea = memories.remember([Memories.Draft(
             id: "person/afternoon-tea", type: "Note", title: "Tea",
             description: "Drinks green tea.", tags: [], body: "Green.")],
-            source: source, excluding: [])
+            from: said, source: source, excluding: [])
         XCTAssertEqual(moreTea.map { note in note.id }, ["person/tea"],
                        "a restated draft is updated under its own id")
         XCTAssertNil(memories.note("person/afternoon-tea"))
@@ -418,6 +464,48 @@ import XCTest
         XCTAssertTrue(known.contains("person/coffee (Coffee)"), known)
         XCTAssertEqual(memories.coverage("Restated").known.first?.id,
                        "person/coffee")
+        try? FileManager.default.removeItem(at: root)
+    }
+
+    func testAnEchoOfTheNotesOnFileIsNotRemembered() async throws {
+        guard let url = BertEmbedder.bundledMultilingual,
+              BertEmbedder.load(ggufPath: url.path) != nil else {
+            throw XCTSkip("no bundled e5-small.gguf")
+        }
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("echo-" + UUID().uuidString,
+                                    isDirectory: true)
+        let memories = Memories(root: root)
+        memories.enabled = true
+        await memories.awaitOpen()
+        let car = Memories.Draft(
+            id: "car/subaru", type: "Note", title: "The car",
+            description: "A 2019 Subaru Outback, green, 60k miles.", tags: [],
+            body: "Serviced at the dealer every 10k.")
+        let owned = memories.remember(
+            [car], from: "User: I drive a 2019 Subaru Outback, green, 60k "
+                + "miles, serviced at the dealer every 10k.",
+            source: nil, excluding: [])
+        XCTAssertEqual(owned.map { note in note.id }, ["car/subaru"])
+        let cosmos = "User: Explain dark matter and dark energy in a few "
+            + "sentences.\n\nAssistant: Dark matter is inferred from "
+            + "gravity; dark energy drives the accelerating expansion."
+        let echo = Memories.Draft(
+            id: "car/subaru", type: "Note", title: "Subaru",
+            description: "The user owns a Subaru.", tags: ["private"],
+            body: "This is a known possession.")
+        XCTAssertFalse(Memories.grounded(echo, in: cosmos))
+        XCTAssertTrue(memories.remember([echo], from: cosmos, source: nil,
+                                        excluding: []).isEmpty)
+        XCTAssertEqual(memories.note("car/subaru")?.text.contains("Outback"),
+                       true)
+        let interest = Memories.Draft(
+            id: "interest/dark-matter", type: "Note", title: "Dark matter",
+            description: "The user asked how dark matter differs from dark "
+                + "energy.", tags: [], body: "Asked on 2026-09-21.")
+        XCTAssertTrue(Memories.grounded(interest, in: cosmos))
+        XCTAssertTrue(memories.coverage(cosmos).known.isEmpty,
+                      "an unrelated note is not offered as already on file")
         try? FileManager.default.removeItem(at: root)
     }
 }

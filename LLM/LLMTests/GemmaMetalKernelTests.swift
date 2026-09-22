@@ -291,7 +291,8 @@ struct GemmaMetalKernelTests {
     @Test(needsGemmaMTPWeights) func extendDropsTheSpeculativeQueue() throws {
         let path = try #require(gemmaMTPGgufPath)
         let model = try Gemma4Model(path: path)
-        let eng = try Gemma4MetalEngine(model)
+        let eng = try Gemma4MetalEngine(
+            model, drafts: Gemma4MetalEngine.earnedDraftWidth(model.gguf))
         #expect(eng.hasAssist)
         eng.reset()
         var next = eng.extend([2, 106, 1645, 236764, 1653])

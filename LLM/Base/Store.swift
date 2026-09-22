@@ -6,6 +6,8 @@ public protocol Embedder: AnyObject {
     var queryPrefix: String { get }
     var passagePrefix: String { get }
     var standoutFloor: Float { get }
+    var cosineFloor: Float { get }
+    var verbatimFloor: Float { get }
     func embed(_ text: String) -> [Float]
     func tokens(_ text: String) -> [Int32]
 }
@@ -31,6 +33,8 @@ public final class BertEmbedder: Embedder {
     public var queryPrefix: String { multilingual ? "query: " : "" }
     public var passagePrefix: String { multilingual ? "passage: " : "" }
     public var standoutFloor: Float { multilingual ? 3.0 : 5.0 }
+    public var cosineFloor: Float { multilingual ? 0.84 : 0.5 }
+    public var verbatimFloor: Float { multilingual ? 0.80 : 0.4 }
 
     public static var bundledMultilingual: URL? {
         MiniLM.bundledMultilingual
@@ -789,6 +793,28 @@ public final class Store {
             scanSeconds: done.timeIntervalSince(embedded),
             literalSeconds: Date().timeIntervalSince(done),
             standout: standout)
+    }
+
+    public static let standoutFrom = 40
+
+    private func related(_ hit: Hit) -> Bool {
+        hit.score >= embedder.cosineFloor
+            || (!hit.terms.isEmpty && hit.score >= embedder.verbatimFloor)
+    }
+
+    private func vouched(_ result: SearchResult) -> Bool {
+        concepts.count >= Store.standoutFrom
+            && result.standout >= embedder.standoutFloor
+    }
+
+    public func relevant(_ hit: Hit, at rank: Int,
+                         in result: SearchResult) -> Bool {
+        related(hit) || (rank == 0 && vouched(result))
+    }
+
+    public func confident(_ result: SearchResult) -> Bool {
+        result.hits.first.map { top in relevant(top, at: 0, in: result) }
+            ?? false
     }
 
     static func standout(_ scores: [Float]) -> Float {

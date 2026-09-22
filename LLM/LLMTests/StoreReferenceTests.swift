@@ -38,15 +38,15 @@ final class StoreReferenceTests: XCTestCase {
                                _ out: inout String) {
         emit(&out, "map", StoreText.map(store, ids: false))
         emit(&out, "search1", StoreText.search(
-            store, e, queries: ["why does my basement smell musty in the "
+            store, queries: ["why does my basement smell musty in the "
                 + "summer"], filter: Filter(), limit: 8))
         emit(&out, "search2", StoreText.search(
-            store, e, queries: ["Deco X55"], filter: Filter(), limit: 8))
+            store, queries: ["Deco X55"], filter: Filter(), limit: 8))
         emit(&out, "search3", StoreText.search(
-            store, e, queries: ["herbs"], filter: Filter(area: "garden"),
+            store, queries: ["herbs"], filter: Filter(area: "garden"),
             limit: 4))
         emit(&out, "search4", StoreText.search(
-            store, e, queries: ["how do I stop the basement smelling",
+            store, queries: ["how do I stop the basement smelling",
                                 "mold in the cellar"],
             filter: Filter(), limit: 3))
         emit(&out, "read", StoreText.read(
@@ -76,9 +76,9 @@ final class StoreReferenceTests: XCTestCase {
         emit(&out, "forget", StoreText.retired(store, id: id,
                                                referrers: referrers))
         emit(&out, "hidden", StoreText.search(
-            store, e, queries: ["Probe note"], filter: Filter(), limit: 1))
+            store, queries: ["Probe note"], filter: Filter(), limit: 1))
         emit(&out, "revealed", StoreText.search(
-            store, e, queries: ["Probe note"],
+            store, queries: ["Probe note"],
             filter: Filter(deprecated: true), limit: 1))
         let dangling = try store.purge(id: id)
         store.load()

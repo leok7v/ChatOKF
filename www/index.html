@@ -1014,64 +1014,52 @@ footer {
       <h2>Performance</h2>
       <p>Tokens per second: reading a 512-token prompt, then writing 128
       tokens. The second number in each cell is llama.cpp on the same
-      protocol. The last column is the same model writing with its own
-      draft head, which most of ours carry.</p>
+      protocol.</p>
 
       <p class="speed-lbl">MacBook Air &middot; M3 &middot; 24 GB</p>
       <div class="speed-wrap">
       <table class="speed">
-        <tr><th>Model</th><th>Read</th><th>Write</th><th><span class="long">Write, drafted</span><span class="short">Drafted</span></th></tr>
-        <tr><td>Qwen3.5 4B</td><td><span class="us">341</span> <span class="them">/ 316</span></td><td><span class="us">27.0</span> <span class="them">/ 23.9</span></td><td><span class="us">34.6</span> <span class="them">/ 24.3</span></td></tr>
-        <tr><td>Qwen3.5 9B</td><td><span class="us">186</span> <span class="them">/ 179</span></td><td><span class="us">15.6</span> <span class="them">/ 14.1</span></td><td><span class="us">18.2</span> <span class="them">/ 16.8</span></td></tr>
-        <tr><td>Qwen3.8 27B</td><td><span class="us">51.0</span> <span class="them">/ 52.4</span></td><td><span class="us">6.0</span> <span class="them">/ 5.7</span></td><td><span class="us">8.5</span> <span class="them">/ 5.5</span></td></tr>
-        <tr><td>Gemma 4 E2B</td><td><span class="us">577</span> <span class="them">/ 679</span></td><td><span class="us">49.8</span> <span class="them">/ 53.6</span></td><td></td></tr>
-        <tr><td>Gemma 4 E4B</td><td><span class="us">298</span> <span class="them">/ 336</span></td><td><span class="us">26.9</span> <span class="them">/ 25.8</span></td><td></td></tr>
-        <tr><td>Gemma 4 12B</td><td><span class="us">116</span> <span class="them">/ 120</span></td><td><span class="us">11.8</span> <span class="them">/ 11.5</span></td><td></td></tr>
+        <tr><th>Model</th><th>Read</th><th>Write</th></tr>
+        <tr><td>Qwen3.5 4B</td><td><span class="us">341</span> <span class="them">/ 316</span></td><td><span class="us">27.0</span> <span class="them">/ 23.9</span></td></tr>
+        <tr><td>Qwen3.5 9B</td><td><span class="us">186</span> <span class="them">/ 179</span></td><td><span class="us">15.6</span> <span class="them">/ 14.1</span></td></tr>
+        <tr><td>Qwen3.8 27B</td><td><span class="us">51.0</span> <span class="them">/ 52.4</span></td><td><span class="us">6.0</span> <span class="them">/ 5.7</span></td></tr>
+        <tr><td>Gemma 4 E2B</td><td><span class="us">577</span> <span class="them">/ 679</span></td><td><span class="us">49.8</span> <span class="them">/ 53.6</span></td></tr>
+        <tr><td>Gemma 4 E4B</td><td><span class="us">298</span> <span class="them">/ 336</span></td><td><span class="us">26.9</span> <span class="them">/ 25.8</span></td></tr>
+        <tr><td>Gemma 4 12B</td><td><span class="us">116</span> <span class="them">/ 120</span></td><td><span class="us">11.8</span> <span class="them">/ 11.5</span></td></tr>
       </table>
       </div>
 
       <p class="speed-lbl">M4 Pro &middot; 48 GB</p>
       <div class="speed-wrap">
       <table class="speed">
-        <tr><th>Model</th><th>Read</th><th>Write</th><th><span class="long">Write, drafted</span><span class="short">Drafted</span></th></tr>
-        <tr><td>Qwen3.5 4B</td><td><span class="us">787</span> <span class="them">/ 760</span></td><td><span class="us">63.8</span> <span class="them">/ 59.5</span></td><td><span class="us">71.4</span></td></tr>
-        <tr><td>Qwen3.5 9B</td><td><span class="us">434</span> <span class="them">/ 418</span></td><td><span class="us">38.3</span> <span class="them">/ 36.1</span></td><td><span class="us">37.3</span></td></tr>
-        <tr><td>Qwen3.8 27B</td><td><span class="us">121</span> <span class="them">/ 121</span></td><td><span class="us">13.6</span> <span class="them">/ 12.6</span></td><td><span class="us">19.0</span></td></tr>
-        <tr><td>Gemma 4 E2B</td><td><span class="us">1174</span> <span class="them">/ 1573</span></td><td><span class="us">91.0</span> <span class="them">/ 111.8</span></td><td></td></tr>
-        <tr><td>Gemma 4 E4B</td><td><span class="us">636</span> <span class="them">/ 795</span></td><td><span class="us">66.8</span> <span class="them">/ 66.4</span></td><td></td></tr>
-        <tr><td>Gemma 4 12B</td><td><span class="us">260</span> <span class="them">/ 300</span></td><td><span class="us">37.5</span> <span class="them">/ 31.7</span></td><td></td></tr>
+        <tr><th>Model</th><th>Read</th><th>Write</th></tr>
+        <tr><td>Qwen3.5 4B</td><td><span class="us">787</span> <span class="them">/ 760</span></td><td><span class="us">63.8</span> <span class="them">/ 59.5</span></td></tr>
+        <tr><td>Qwen3.5 9B</td><td><span class="us">434</span> <span class="them">/ 418</span></td><td><span class="us">38.3</span> <span class="them">/ 36.1</span></td></tr>
+        <tr><td>Qwen3.8 27B</td><td><span class="us">121</span> <span class="them">/ 121</span></td><td><span class="us">13.6</span> <span class="them">/ 12.6</span></td></tr>
+        <tr><td>Gemma 4 E2B</td><td><span class="us">1174</span> <span class="them">/ 1573</span></td><td><span class="us">91.0</span> <span class="them">/ 111.8</span></td></tr>
+        <tr><td>Gemma 4 E4B</td><td><span class="us">636</span> <span class="them">/ 795</span></td><td><span class="us">66.8</span> <span class="them">/ 66.4</span></td></tr>
+        <tr><td>Gemma 4 12B</td><td><span class="us">260</span> <span class="them">/ 300</span></td><td><span class="us">37.5</span> <span class="them">/ 31.7</span></td></tr>
       </table>
       </div>
 
       <p class="speed-cap">Measured against llama.cpp on the same machine,
       build b10796 on the M3 and 4df29be4f on the M4 Pro, on the pristine
-      files; ours on the same weights with our own vision, audio and draft
-      tensors added. llama.cpp runs no draft head for Gemma, so that cell
-      is ours alone. Gemma's own draft head is timed on a shorter prompt
-      than this one, so its drafted figure would not be comparable with the
-      Write column beside it and is left out rather than printed; it does
-      draft, and it does pay.
-      The 27B is IQ4_XS on the M3 and Q4_K_S on the M4 Pro,
-      each against llama.cpp's nearest file. One cooled run each,
+      files; ours on the same weights with our own vision and audio
+      tensors added. The 27B is IQ4_XS on the M3 and Q4_K_S on the M4
+      Pro, each against llama.cpp's nearest file. One cooled run each,
       2026-09-07 and 2026-09-19. Every number here is greedy decode, the
-      protocol llama.cpp is measured on. Chatting in the app samples
-      instead, which the draft head finds harder to predict: on the
-      Qwen3.5 4B that turns a 1.27x drafted gain into 1.11x, while the
-      undrafted Write column is unchanged.</p>
+      protocol llama.cpp is measured on.</p>
       <p style="margin-top:1.4rem">And in a pocket, the same protocol in the
       app itself:</p>
       <div class="speed-wrap">
       <table class="speed">
-        <tr><th>Device</th><th>Model</th><th>Read</th><th>Write</th><th><span class="long">Write, drafted</span><span class="short">Drafted</span></th></tr>
-        <tr><td>iPad mini A17 Pro</td><td>Gemma 4 E4B</td><td>123</td><td>13.8</td><td>20.6</td></tr>
-        <tr><td>iPhone 15 Pro</td><td>Gemma 4 E4B</td><td>134</td><td>13.7</td><td>20.9</td></tr>
-        <tr><td>iPhone 16e</td><td>Gemma 4 E4B</td><td>100</td><td>12.8</td><td>17.0</td></tr>
-        <tr><td>iPhone 12 mini</td><td>Gemma 4 E2B</td><td>93</td><td>16.2</td><td></td></tr>
+        <tr><th>Device</th><th>Model</th><th>Read</th><th>Write</th></tr>
+        <tr><td>iPad mini A17 Pro</td><td>Gemma 4 E4B</td><td>123</td><td>13.8</td></tr>
+        <tr><td>iPhone 15 Pro</td><td>Gemma 4 E4B</td><td>134</td><td>13.7</td></tr>
+        <tr><td>iPhone 16e</td><td>Gemma 4 E4B</td><td>100</td><td>12.8</td></tr>
+        <tr><td>iPhone 12 mini</td><td>Gemma 4 E2B</td><td>93</td></tr>
       </table>
       </div>
-      <p class="speed-cap">The 4 GB phones write without the draft head on
-      purpose: its extra weights do not stay resident there, and paging
-      them every step is slower than not drafting.</p>
     </div>
   </section>
 

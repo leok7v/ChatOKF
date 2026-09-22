@@ -15,12 +15,10 @@ public enum StoreText {
         return out
     }
 
-    public static func confidence(_ result: SearchResult,
-                           _ embedder: Embedder) -> String {
+    public static func confidence(_ store: Store,
+                                  _ result: SearchResult) -> String {
         var out = ""
-        let literal = result.hits.first?.terms.isEmpty == false
-        let vague = result.standout < embedder.standoutFloor
-        if !result.hits.isEmpty && vague && !literal {
+        if !result.hits.isEmpty && !store.confident(result) {
             out = "[weak: no clear match; answer from your own "
                 + "knowledge rather than from these]\n"
         }
@@ -59,20 +57,22 @@ public enum StoreText {
         return out
     }
 
-    public static func search(_ store: Store, _ embedder: Embedder,
-                       queries: [String], filter: Filter,
-                       limit: Int) -> String {
+    public static func search(_ store: Store, queries: [String],
+                              filter: Filter, limit: Int) -> String {
         let result = store.search(queries, filter: filter, limit: limit)
-        var out = confidence(result, embedder)
+        var out = confidence(store, result)
         if result.hits.isEmpty {
             out += filter.isEmpty
                 ? "no concepts indexed\n"
                 : "no concept matches that filter\n"
         }
-        for hit in result.hits {
+        for (rank, hit) in result.hits.enumerated() {
             var flags = flags(hit.concept)
             if !hit.terms.isEmpty {
                 flags += " [" + hit.terms.joined(separator: " ") + "]"
+            }
+            if !store.relevant(hit, at: rank, in: result) {
+                flags += " [unrelated]"
             }
             out += String(format: "%@  %.3f%@\n", hit.concept.id,
                           hit.score, flags)

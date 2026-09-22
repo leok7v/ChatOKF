@@ -91,7 +91,9 @@ final class CalibrationTests: XCTestCase {
               + "\(e.standoutFloor)")
         print("[calib] standout score  question                             "
               + "top hit")
-        for question in questions { print("[calib] " + row(store, e, question)) }
+        for question in questions {
+            print("[calib] " + row(store, e, question))
+        }
         print("[calib] -- off topic")
         for question in CalibrationTests.offTopic {
             print("[calib] " + row(store, e, question))
@@ -180,6 +182,122 @@ final class CalibrationTests: XCTestCase {
                          } ?? "-", note.id))
         }
         try? FileManager.default.removeItem(at: root)
+    }
+
+    static let planted: [(id: String, title: String, description: String,
+                          body: String)] = [
+        ("person/pet-name", "The user's pet name",
+         "The user's pet name is the name of their pet.",
+         "The user calls their dog Biscuit."),
+        ("car/subaru", "The car", "A 2019 Subaru Outback, green, 60k miles.",
+         "Serviced at the dealer every 10k."),
+        ("kitchen/pancakes", "Sunday pancakes",
+         "Buttermilk pancakes with a pinch of cardamom every Sunday.",
+         "Two eggs, a cup of buttermilk, rest the batter ten minutes."),
+        ("tech/wifi-mesh", "The mesh wifi setup",
+         "Three TP-Link Deco X55 units wired back to the router.",
+         "One per floor."),
+    ]
+
+    static let leakQuestions = [
+        "Which block gives the most fruit per tree, and what makes that "
+            + "surprising?",
+        "explain dark matter and dark energy",
+        "what is 17 times 23",
+        "what is my dog called",
+        "which car do I drive",
+        "how do I make the Sunday pancakes",
+        "Deco X55",
+        "what is the name of the tallest mountain",
+        "does a green apple have more sugar than a red one",
+        "who was the user of the first telephone",
+    ]
+
+    private func leakRow(_ store: Store, _ question: String) -> String {
+        let result = store.search([question], filter: Filter(), limit: 2)
+        let top = result.hits.first
+        let second = result.hits.dropFirst().first
+        return String(format: "%5.2f  %.3f %.3f  %-40@ %@%@", result.standout,
+                      top?.score ?? 0, second?.score ?? 0,
+                      String(question.prefix(40)), top?.concept.id ?? "-",
+                      top?.terms.isEmpty == false
+                          ? " [" + top!.terms.joined(separator: " ") + "]"
+                          : "")
+    }
+
+    func testPlantedNotesAgainstForeignQuestions() throws {
+        let e = try embedder()
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("leak-" + UUID().uuidString,
+                                    isDirectory: true)
+        let store = Store(root: root, embedder: e)
+        for note in CalibrationTests.planted {
+            _ = try store.write(id: note.id, type: "Note", title: note.title,
+                                description: note.description, tags: [],
+                                body: note.body)
+        }
+        store.load()
+        print("[leak] \(store.concepts.count) planted notes, floor "
+              + "\(e.standoutFloor)")
+        print("[leak] standout top   second question"
+              + "                                 top hit")
+        for question in CalibrationTests.leakQuestions {
+            print("[leak] " + leakRow(store, question))
+        }
+        try? FileManager.default.removeItem(at: root)
+    }
+
+    private struct Band {
+        var standouts: [Float] = []
+        var scores: [Float] = []
+
+        mutating func add(_ result: SearchResult) {
+            standouts.append(result.standout)
+            scores.append(result.hits.first?.score ?? 0)
+        }
+
+        var line: String {
+            String(format: "standout %5.2f %5.2f %5.2f  cosine %.3f %.3f %.3f",
+                   standouts.reduce(0, +) / Float(max(1, standouts.count)),
+                   standouts.min() ?? 0, standouts.max() ?? 0,
+                   scores.reduce(0, +) / Float(max(1, scores.count)),
+                   scores.min() ?? 0, scores.max() ?? 0)
+        }
+    }
+
+    func testOffTopicLadder() throws {
+        let e = try embedder()
+        let full = Store(root: try copy(CalibrationTests.sample), embedder: e)
+        full.load()
+        let answers = CalibrationTests.sampleQuestions.map { question in
+            full.search([question], filter: Filter(), limit: 1)
+                .hits.first?.concept.id ?? ""
+        }
+        let others = full.concepts.map { concept in concept.id }
+            .filter { id in !answers.contains(id) }
+        print("[calib] ladder: on topic against off topic, mean min max")
+        for n in [3, 5, 8, 10, 15, 20, 40, 80, 157] {
+            let kept = Set(answers.prefix(min(n, answers.count))
+                           + others.prefix(max(0, n - answers.count)))
+            let root = try copy(CalibrationTests.sample, keeping: kept)
+            let store = Store(root: root, embedder: e)
+            store.load()
+            var on = Band()
+            var off = Band()
+            for (i, question) in CalibrationTests.sampleQuestions.enumerated()
+            where kept.contains(answers[i]) {
+                on.add(store.search([question], filter: Filter(), limit: 1))
+            }
+            for question in CalibrationTests.offTopic {
+                off.add(store.search([question], filter: Filter(), limit: 1))
+            }
+            print(String(format: "[calib]   %3d on   %@", store.concepts.count,
+                         on.line))
+            print(String(format: "[calib]   %3d off  %@", store.concepts.count,
+                         off.line))
+            try? FileManager.default.removeItem(at: root)
+        }
+        try? FileManager.default.removeItem(at: full.root)
     }
 
     func testSmallStoreLadder() throws {

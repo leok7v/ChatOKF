@@ -16,50 +16,50 @@ Joe Shmoe, who this knowledge base belongs to
 house/basement-humidity  0.912 [musty smell]
   Basement humidity and the musty smell
   Sixty-five percent relative humidity in summer, which is above the mold threshold, and the grading outside is part of it.
-garden/basil-window-box  0.839
+garden/basil-window-box  0.839 [unrelated]
   Basil in the kitchen window box
   Keeping a few basil plants alive indoors through winter, and why they never taste as good as the summer ones.
-house/door-sticking  0.839
+house/door-sticking  0.839 [unrelated]
   The back door sticks in summer
   Seasonal swelling, not a failing hinge, so the fix is planing a sixteenth off the latch stile in July.
-house/bathroom-fan  0.833
+house/bathroom-fan  0.833 [unrelated]
   Replacing the upstairs bathroom fan
   The old fan is undersized and vents into the attic, which is half of why there is frost on the roof sheathing.
-garden/basil  0.832
+garden/basil  0.832 [unrelated]
   Growing basil
   Basil hates cold, bolts the moment it flowers, and wants pinching every week to stay bushy.
-house/radon-test  0.825 [stale]
+house/radon-test  0.825 [stale] [unrelated]
   Radon test results
   A short-term test in the basement read 2.7 pCi/L, under the action level but not zero. Due for a retest.
-garden/mint-containment  0.820
+garden/mint-containment  0.820 [unrelated]
   Keeping mint from taking the bed
   Mint spreads by runners and will own a raised bed in two seasons, so it stays in a buried pot.
-garden/compost  0.817
+garden/compost  0.817 [unrelated]
   The compost pile
   A two-bin pile behind the garage, the brown-to-green ratio that keeps it from smelling, and what never goes in.
 ### search2
 tech/wifi-mesh  0.829 [deco x55]
   The mesh wifi setup
   Three TP-Link Deco X55 units wired back to the router, which fixed the dead spots that a single router never could.
-tech/doorbell-camera  0.796
+tech/doorbell-camera  0.796 [unrelated]
   The video doorbell
   Useful for packages, and the subscription to keep recordings is the part nobody mentions at purchase.
-tech/smart-tv-livingroom  0.793
+tech/smart-tv-livingroom  0.793 [unrelated]
   The living room TV
   A 65-inch 4K set from 2021 whose built-in software is slow and ad-ridden, so everything actually runs through the Apple TV.
-house/water-heater  0.792
+house/water-heater  0.792 [unrelated]
   The water heater
   A 50-gallon gas tank from 2016, which puts it near the end of its life, and the anode rod has never been checked.
-tech/robot-vacuum  0.791
+tech/robot-vacuum  0.791 [unrelated]
   The robot vacuum
   Runs daily, handles the open floors, and cannot deal with cords or the dog's water bowl.
-tech/streaming-devices  0.791
+tech/streaming-devices  0.791 [unrelated]
   The other streaming boxes
   What is on the other two TVs and why they are all different, which is a mild ongoing irritation.
-tech/password-manager  0.790
+tech/password-manager  0.790 [unrelated]
   The password manager
   One shared vault for the household, which finally killed the reused passwords and the sticky note by the router.
-tech/wifi-dead-spot  0.789
+tech/wifi-dead-spot  0.789 [unrelated]
   The dead spot in the back bedroom
   The back bedroom is the far corner from the router with a chimney in between, and it is also the home office, which is why it mattered.
 ### search3
@@ -72,7 +72,7 @@ garden/basil  0.843
 garden/basil-window-box  0.841
   Basil in the kitchen window box
   Keeping a few basil plants alive indoors through winter, and why they never taste as good as the summer ones.
-garden/peppers  0.836
+garden/peppers  0.836 [unrelated]
   Sweet and hot peppers
   Peppers want more heat and less water than I keep giving them, and they set fruit late.
 ### search4
@@ -82,7 +82,7 @@ house/basement-humidity  0.868 [mold]
 garden/compost  0.827 [smelling]
   The compost pile
   A two-bin pile behind the garage, the brown-to-green ratio that keeps it from smelling, and what never goes in.
-house/attic-insulation  0.824
+house/attic-insulation  0.824 [unrelated]
   Topping up the attic insulation
   R-19 up there against R-49 recommended, plus air sealing the ceiling penetrations first, which matters more than the depth.
 ### read
@@ -159,7 +159,7 @@ consider linking: tech/speed-test-2025 tech/device-inventory watch/watchlist tec
 retired kitchen/zz-probe  (156 live concepts)
 ### hidden
 [weak: no clear match; answer from your own knowledge rather than from these]
-tech/speed-test-2025  0.825 [stale]
+tech/speed-test-2025  0.825 [stale] [unrelated]
   Speed test results, 2025
   Measured throughput at several places in the house after the mesh went in. A year old and worth redoing.
 ### revealed

@@ -80,7 +80,8 @@ public final class Gemma4MetalEngine {
     private let outputNormOff: WeightRef
     private let perLayerProjNormOff: WeightRef?
 
-    public init(_ model: Gemma4Model, pageP: Int = 512) throws {
+    public init(_ model: Gemma4Model, pageP: Int = 512,
+                drafts: Int? = nil) throws {
         self.model = model
         cfg = model.cfg
         map = model.gguf.map
@@ -123,7 +124,7 @@ public final class Gemma4MetalEngine {
         // a block that does not fit cannot be attended correctly at all.
         let widest = cfg.blockwiseVision
             ? (model.gguf.int("gemma4.vision.max_soft_tokens") ?? 0) : 0
-        specN = max(1, Flags.int("spec-n")
+        specN = max(1, drafts ?? Flags.int("spec-n")
                        ?? Gemma4MetalEngine.draftWidth(model.gguf))
         let B = ctx.matrixUnits
             ? max(Gemma4MetalEngine.defaultBatch, widest) : 1
@@ -198,7 +199,9 @@ public final class Gemma4MetalEngine {
 
     public var hasAssist: Bool { assist != nil }
 
-    static func draftWidth(_ g: GGUF) -> Int {
+    static func draftWidth(_ g: GGUF) -> Int { 1 }
+
+    static func earnedDraftWidth(_ g: GGUF) -> Int {
         let gb = Double(g.mapSize) / 1_073_741_824
         let ram = (ProcessInfo.processInfo.physicalMemory + (1 << 29)) >> 30
         var out = 1

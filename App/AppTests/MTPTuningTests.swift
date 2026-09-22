@@ -114,10 +114,10 @@ import XCTest
         try? FileManager.default.removeItem(at: root)
     }
 
-    func testTheMacDefaultIsTheDraftingBuild() throws {
+    func testNoDraftingFileIsOfferedAndTheMacStartsPlain() throws {
+        XCTAssertFalse(Models.every.contains { name in name.hasSuffix("-MTP") })
         try XCTSkipIf(isOS, "the iOS default is the tier rung")
-        XCTAssertTrue(Models.every.contains("gemma-4-E4B-MTP"))
-        XCTAssertEqual(Models.start, "gemma-4-E4B-MTP")
+        XCTAssertEqual(Models.start, "gemma-4-E4B")
     }
 
 }

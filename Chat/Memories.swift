@@ -32,7 +32,7 @@ import Observation
     static let backupKey = "backupMemories"
     static let bytesPerToken = 3.5
     static let recallLimit = 3
-    static let smallStore = 40
+    static let bodyCap = 600
     public static var supported: Bool { true }
 
     public static let defaultRoot: URL = {
@@ -154,6 +154,17 @@ import Observation
         return out
     }
 
+    static func line(_ concept: Concept) -> String {
+        var out = "- " + concept.title
+        if !concept.description.isEmpty { out += ": " + concept.description }
+        let body = concept.body.replacingOccurrences(of: "\n", with: " ")
+        if !body.isEmpty {
+            out += "\n  " + String(body.prefix(Memories.bodyCap))
+            if body.count > Memories.bodyCap { out += " ..." }
+        }
+        return out + "\n"
+    }
+
     public func recall(_ question: String, also: [String], pp: Double,
                        excluding read: Set<String>) -> Recall? {
         var out: Recall? = nil
@@ -163,23 +174,14 @@ import Observation
             }
             let result = store.search(queries, filter: Filter(),
                                       limit: Memories.recallLimit + read.count)
-            let fresh = result.hits.filter { hit in
+            let fresh = result.hits.enumerated().filter { rank, hit in
                 !read.contains(hit.concept.id)
-            }.prefix(Memories.recallLimit)
-            let literal = result.hits.first?.terms.isEmpty == false
-            let small = store.concepts.count < Memories.smallStore
-            let confident = small || literal
-                || result.standout >= embedder.standoutFloor
-            if confident, !fresh.isEmpty {
+                    && store.relevant(hit, at: rank, in: result)
+            }.map { pair in pair.element }.prefix(Memories.recallLimit)
+            if !fresh.isEmpty {
                 var block = "Notes remembered about this user that may "
                     + "bear on the message below:\n"
-                for hit in fresh {
-                    block += "- " + hit.concept.title
-                    if !hit.concept.description.isEmpty {
-                        block += ": " + hit.concept.description
-                    }
-                    block += "\n"
-                }
+                for hit in fresh { block += Memories.line(hit.concept) }
                 block += "\n"
                 let tokens = Int(Double(block.utf8.count)
                                  / Memories.bytesPerToken)
@@ -196,10 +198,11 @@ import Observation
                              readSeconds: reads)
             } else {
                 Diag.shared.report(.turn, String(
-                    format: "[recall] nothing: standout %.1f, floor %.1f, "
-                        + "%d of %d concepts unread",
-                    result.standout, embedder.standoutFloor, fresh.count,
-                    store.concepts.count))
+                    format: "[recall] nothing: standout %.1f of %.1f, top "
+                        + "%.3f of %.2f, %d of %d concepts fit",
+                    result.standout, embedder.standoutFloor,
+                    result.hits.first?.score ?? 0, embedder.cosineFloor,
+                    fresh.count, store.concepts.count))
             }
         } else if store == nil, active {
             Diag.shared.report(.turn, "[recall] the store is not open yet")
@@ -240,19 +243,26 @@ import Observation
     }
 
     public static let extractionInstruction =
-        "From the user's LAST message only, list durable facts they stated "
-        + "about themselves that would still be true in six months: "
-        + "preferences, possessions, people, places, plans, habits, health "
-        + "or money facts. Never anything the assistant said, found in "
-        + "notes or answered, and never a question the user asked. "
+        "From the user's LAST message and the answer to it, write what is "
+        + "worth keeping about this user, at most five entries. Two kinds: "
+        + "a durable fact they stated about themselves (preferences, "
+        + "possessions, people, places, plans, habits, health or money "
+        + "facts, still true in six months), and an interest, a subject "
+        + "they asked to have explained or explored, one entry per subject "
+        + "under the area interest saying what they asked, so a question "
+        + "about X and Y is two entries, interest/x and interest/y, and a "
+        + "third names the field both belong to when it is clear. Not a "
+        + "lookup, a calculation, a translation or small talk, and never a "
+        + "fact only the assistant supplied. "
         + "If there is nothing, reply NONE. Otherwise reply only entries in "
-        + "this exact form, one per fact, at most three:\n"
+        + "this exact form:\n"
         + "### area/name\ntype: Note\ntitle: a few words\n"
-        + "description: one sentence\n"
+        + "description: one sentence stating the fact, or what was asked\n"
         + "tags: comma separated; include private for medical, financial "
         + "or address facts\nbody:\none to three sentences\n"
-        + "Areas are one lowercase word like person, house, work, family, "
-        + "health; names are lowercase words joined by dashes."
+        + "The id is an area word, a slash and a dashed name, like "
+        + "person/coffee, house/roof-leak or interest/black-holes; areas are "
+        + "person, house, work, family, health, interest and the like."
 
     static func parseDrafts(_ raw: String) -> [Draft] {
         var out: [Draft] = []
@@ -261,9 +271,11 @@ import Observation
         var id = ""
         var inBody = false
         func flush() {
+            let title = fields["title"] ?? ""
             let draft = Draft(
-                id: id, type: fields["type"] ?? "Note",
-                title: fields["title"] ?? "",
+                id: MemoryTools.validId(id)
+                    ? id : MemoryTools.repaired(id, title),
+                type: fields["type"] ?? "Note", title: title,
                 description: fields["description"] ?? "",
                 tags: MemoryTools.list(fields["tags"], ","),
                 body: body.joined(separator: "\n")
@@ -313,13 +325,15 @@ import Observation
     public func coverage(_ text: String) -> Coverage {
         var covered = false
         var known: [(id: String, title: String)] = []
-        if let store, let embedder, !store.concepts.isEmpty {
+        if let store, !store.concepts.isEmpty {
             let result = store.search([text], filter: Filter(),
                                       limit: Memories.recallLimit)
-            covered = result.standout >= embedder.standoutFloor
-                && store.concepts.count >= Memories.smallStore
-            known = result.hits.map { hit in
-                (hit.concept.id, hit.concept.title)
+            covered = store.concepts.count >= Store.standoutFrom
+                && store.confident(result)
+            known = result.hits.enumerated().filter { rank, hit in
+                store.relevant(hit, at: rank, in: result)
+            }.map { pair in
+                (pair.element.concept.id, pair.element.concept.title)
             }
         }
         return Coverage(covered: covered, known: known)
@@ -352,11 +366,47 @@ import Observation
         return out
     }
 
-    public func remember(_ drafts: [Draft], source: UUID?,
-                         excluding seen: Set<String>) -> [Remembered] {
+    nonisolated static let generic: Set<String> = [
+        "about", "after", "again", "always", "another", "because", "before",
+        "being", "between", "could", "every", "known", "might", "never",
+        "often", "other", "should", "since", "still", "their", "there",
+        "these", "things", "those", "through", "under", "until", "usually",
+        "where", "which", "while", "would",
+    ]
+
+    nonisolated static func words(_ text: String) -> [String] {
+        text.lowercased()
+            .split(whereSeparator: { c in !c.isLetter && !c.isNumber })
+            .map(String.init)
+            .filter { word in
+                (word.count >= 5 && !Memories.generic.contains(word))
+                    || (word.count == 4 && word.allSatisfy { c in c.isNumber })
+            }
+    }
+
+    nonisolated static func grounded(_ draft: Draft, in exchange: String)
+        -> Bool {
+        let said = Memories.words(exchange)
+        let claimed = Memories.words(draft.title + " " + draft.description
+                                     + " " + draft.body)
+        return claimed.contains { word in
+            said.contains { heard in
+                heard.hasPrefix(word) || word.hasPrefix(heard)
+            }
+        }
+    }
+
+    public func remember(_ drafts: [Draft], from exchange: String,
+                         source: UUID?, excluding seen: Set<String>)
+        -> [Remembered] {
         var out: [Remembered] = []
         if let store {
-            for draft in drafts {
+            for draft in drafts
+            where !Memories.grounded(draft, in: exchange) {
+                Diag.shared.report(.turn, "[extract] " + draft.id
+                                   + " shares no word with the exchange")
+            }
+            for draft in drafts where Memories.grounded(draft, in: exchange) {
                 var id = draft.id
                 if store.concept(id) == nil,
                    let same = store.duplicate(
@@ -404,7 +454,7 @@ import Observation
 
     func tool(_ name: String, _ args: [ToolArg]) -> String {
         var out = "error: memories are not open"
-        if let store, let embedder {
+        if let store {
             switch name {
             case "memory_search":
                 let queries = [MemoryTools.arg(args, "query") ?? ""]
@@ -417,7 +467,7 @@ import Observation
                     let found = store.search(queries, filter: filter,
                                              limit: max(1, limit))
                     seenIds.formUnion(found.hits.map { hit in hit.concept.id })
-                    out = StoreText.search(store, embedder, queries: queries,
+                    out = StoreText.search(store, queries: queries,
                                            filter: filter, limit: max(1, limit))
                 }
             case "memory_read":
