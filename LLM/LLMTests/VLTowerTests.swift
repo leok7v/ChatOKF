@@ -88,7 +88,7 @@ struct VLTowerTests {
         #expect(pair.count == still.count)
         let cpuGap = divergence(still, pair)
         #expect(cpuGap.0 <= cpuGap.1 * 0.001, "cpu pair vs still \(cpuGap)")
-        let metal = gpu.forward(pair: px, px, gridH: gh, gridW: gw)
+        let metal = try gpu.forward(pair: px, px, gridH: gh, gridW: gw)
         let gap = divergence(still, metal)
         #expect(gap.0 <= gap.1 * 0.02, "metal pair vs cpu still \(gap)")
     }
@@ -174,7 +174,7 @@ struct VLTowerTests {
         let gh = 24, gw = 40
         let px = pixels(gw * p, gh * p)
         let a = cpu.forward(pixels: px, gridH: gh, gridW: gw)
-        let b = gpu.forward(pixels: px, gridH: gh, gridW: gw)
+        let b = try gpu.forward(pixels: px, gridH: gh, gridW: gw)
         #expect(a.count == gh * gw / 4 * cpu.cfg.projDim)
         #expect(b.count == a.count)
         var worst: Float = 0

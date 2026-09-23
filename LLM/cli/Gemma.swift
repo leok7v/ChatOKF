@@ -323,7 +323,7 @@ enum GemmaCLIError: Error, CustomStringConvertible {
     let gpu = try Gemma4MetalAudio(chat.model,
                                    ctx: Gemma4MetalEngine(chat.model).ctx)
     let g0 = Date()
-    let mg = gpu.forward(mel: feats.values, frames: frames, bins: bins)
+    let mg = try gpu.forward(mel: feats.values, frames: frames, bins: bins)
     let gpuSecs = Date().timeIntervalSince(g0)
     let mTower = Vectors.cosine(got.tower, mg.tower)
     let mProj = Vectors.cosine(got.proj, mg.proj)
@@ -449,7 +449,7 @@ enum GemmaCLIError: Error, CustomStringConvertible {
     var parts: [ContentPart] = []
     for (i, chunk) in chunks.enumerated() {
         let m0 = Date()
-        let got = ears(chunk.samples)
+        let got = try ears(chunk.samples)
         err(String(format: "[say] %@ %d %.1f-%.1fs -> %d soft tokens "
                    + "(%.1fs)%@\n", gated ? "utterance" : "chunk", i + 1,
                    Double(chunk.range.lowerBound) / rate,
@@ -524,7 +524,7 @@ enum GemmaCLIError: Error, CustomStringConvertible {
     var spans: [SoftSpan] = []
     var parts: [ContentPart] = []
     for (i, u) in said.enumerated() {
-        let got = ears(u.samples)
+        let got = try ears(u.samples)
         err(String(format: "[mic] utterance %d at %.1fs, %.1fs -> %d soft\n",
                    i + 1, u.startSeconds,
                    Double(u.samples.count) / rate, got.count))
@@ -582,8 +582,8 @@ private func gemmaDrive(_ chat: GemmaChat, _ gpu: Gemma4MetalEngine?)
 }
 
 private func gemmaEars(_ chat: GemmaChat, _ gpu: Gemma4MetalEngine?)
-    throws -> ([Float]) -> (proj: [Float], count: Int) {
-    let out: ([Float]) -> (proj: [Float], count: Int)
+    throws -> ([Float]) throws -> (proj: [Float], count: Int) {
+    let out: ([Float]) throws -> (proj: [Float], count: Int)
     if !chat.model.hasAudioTower {
         let um = try Gemma4UnifiedMedia(chat.model)
         out = { pcm in
@@ -592,18 +592,18 @@ private func gemmaEars(_ chat: GemmaChat, _ gpu: Gemma4MetalEngine?)
         }
     } else {
         let mel = Gemma4Mel(chat.melConfig)
-        let forward: ([Float], Int, Int)
+        let forward: ([Float], Int, Int) throws
             -> (tower: [Float], proj: [Float], count: Int)
         if let gpu {
             let gt = try Gemma4MetalAudio(chat.model, ctx: gpu.ctx)
-            forward = { m, f, b in gt.forward(mel: m, frames: f, bins: b) }
+            forward = { m, f, b in try gt.forward(mel: m, frames: f, bins: b) }
         } else {
             let ct = try Gemma4Audio(chat.model)
             forward = { m, f, b in ct.forward(mel: m, frames: f, bins: b) }
         }
         out = { pcm in
             let feats = mel.features(pcm)
-            let a = forward(feats.values, feats.frames, mel.cfg.bins)
+            let a = try forward(feats.values, feats.frames, mel.cfg.bins)
             return (a.proj, a.count)
         }
     }
@@ -611,8 +611,8 @@ private func gemmaEars(_ chat: GemmaChat, _ gpu: Gemma4MetalEngine?)
 }
 
 private func gemmaEyes(_ chat: GemmaChat, _ gpu: Gemma4MetalEngine?)
-    throws -> ([Float], [(Int, Int)]) -> (proj: [Float], count: Int) {
-    let out: ([Float], [(Int, Int)]) -> (proj: [Float], count: Int)
+    throws -> ([Float], [(Int, Int)]) throws -> (proj: [Float], count: Int) {
+    let out: ([Float], [(Int, Int)]) throws -> (proj: [Float], count: Int)
     if !chat.model.hasVisionTower {
         let media = try Gemma4UnifiedMedia(chat.model)
         out = { pixels, pos in
@@ -622,7 +622,7 @@ private func gemmaEyes(_ chat: GemmaChat, _ gpu: Gemma4MetalEngine?)
     } else if let gpu {
         let tower = try Gemma4MetalViT(chat.model, ctx: gpu.ctx)
         out = { pixels, pos in
-            let r = tower.forward(pixels: pixels, pos: pos)
+            let r = try tower.forward(pixels: pixels, pos: pos)
             return (r.proj, r.count)
         }
     } else {
@@ -788,7 +788,7 @@ private func gemmaEyes(_ chat: GemmaChat, _ gpu: Gemma4MetalEngine?)
             throw GemmaCLIError.msg("frame \(i) would not patchify")
         }
         let cut = frame!
-        let out = vit(cut.pixels, cut.pos)
+        let out = try vit(cut.pixels, cut.pos)
         feats.append(contentsOf: out.proj)
         perFrame = out.count
         block.append(contentsOf:
@@ -930,7 +930,7 @@ private func gemmaEyes(_ chat: GemmaChat, _ gpu: Gemma4MetalEngine?)
     let gpu = try Gemma4MetalViT(chat.model,
                                  ctx: Gemma4MetalEngine(chat.model).ctx)
     let g0 = Date()
-    let mg = gpu.forward(pixels: px.values, pos: pos)
+    let mg = try gpu.forward(pixels: px.values, pos: pos)
     let gpuSecs = Date().timeIntervalSince(g0)
     let mTower = Vectors.cosine(got.tower, mg.tower)
     let mProj = Vectors.cosine(got.proj, mg.proj)

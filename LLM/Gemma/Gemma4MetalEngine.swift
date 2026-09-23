@@ -362,13 +362,41 @@ public final class Gemma4MetalEngine {
         extend(ids, softAt: { _ in nil })
     }
 
+    private var gpuFault = false
+
     // `softAt` is asked EXACTLY ONCE per id and in order: a caller's feed is a
     // cursor.
     public func extend(_ ids: [Int32],
                        softAt: (Int32) -> [Float]?) -> Int32 {
-        let B = batch
         stopSignal.clear()
         specFlush()
+        let mark = bookmark()
+        var recorded: [[Float]?] = []
+        var cap = GPUGate.shared.chunkCap(batch)
+        var attempt = 0
+        var out: Int32 = 0
+        var done = false
+        while !done {
+            gpuFault = false
+            out = prefill(ids, cap: cap) { k, id in
+                if k == recorded.count { recorded.append(softAt(id)) }
+                return recorded[k]
+            }
+            done = !gpuFault || attempt >= GPUGate.retries
+            if !done {
+                restore(mark)
+                GPUGate.shared.backoff(attempt)
+                cap = max(1, cap / 4)
+                attempt += 1
+            }
+        }
+        if gpuFault { stopSignal.raise() }
+        return out
+    }
+
+    private func prefill(_ ids: [Int32], cap: Int,
+                         softAt: (Int, Int32) -> [Float]?) -> Int32 {
+        let B = min(batch, cap)
         Diag.memory?("prefill start \(ids.count) ids at pos \(pos)")
         let blocks = cfg.blockwiseVision
             ? cfg.visionBlocks(ids, from: pos)
@@ -376,12 +404,12 @@ public final class Gemma4MetalEngine {
         var i = 0
         // The stop is the loop PREDICATE, so a Stop lands between chunks and
         // leaves `pos` and the KV consistent for the rollback.
-        while i < ids.count && !stopSignal.raisedNow {
+        while i < ids.count && !stopSignal.raisedNow && !gpuFault {
             let n = B > 1 ? chunk(blocks, at: i, want: min(B, ids.count - i))
                           : 1
             var soft: [Int: [Float]] = [:]
             for j in 0..<n {
-                if let feature = softAt(ids[i + j]) { soft[j] = feature }
+                if let feature = softAt(i + j, ids[i + j]) { soft[j] = feature }
             }
             if n == 1 {
                 if let feature = soft[0] {
@@ -393,11 +421,11 @@ public final class Gemma4MetalEngine {
                 forwardChunk(Array(ids[i ..< (i + n)]), soft,
                              Array(blocks[i ..< (i + n)]))
             }
-            pos += n
+            if !gpuFault { pos += n }
             i += n
         }
         Diag.memory?("prefill done at pos \(pos)")
-        return pick(logits())
+        return gpuFault ? 0 : pick(logits())
     }
 
     private func chunk(_ blocks: [(Int, Int)], at i: Int, want: Int) -> Int {
@@ -414,6 +442,25 @@ public final class Gemma4MetalEngine {
     }
 
     public func decode(_ token: Int32) -> Int32 {
+        var out: Int32 = 0
+        var attempt = 0
+        var done = false
+        while !done {
+            let mark = bookmark()
+            gpuFault = false
+            out = decodeOnce(token)
+            done = !gpuFault || attempt >= GPUGate.retries
+            if !done {
+                restore(mark)
+                GPUGate.shared.backoff(attempt)
+                attempt += 1
+            }
+        }
+        if gpuFault { stopSignal.raise() }
+        return out
+    }
+
+    private func decodeOnce(_ token: Int32) -> Int32 {
         let ready = assist != nil && specN > 1
             && !plainDecode && capacity >= specN
             && sampler?.logitMask == nil
@@ -431,8 +478,8 @@ public final class Gemma4MetalEngine {
 
     public func decodePlain(_ token: Int32) -> Int32 {
         forward(token: Int(token), pos: pos)
-        pos += 1
-        return pick(logits())
+        if !gpuFault { pos += 1 }
+        return gpuFault ? 0 : pick(logits())
     }
 
     private func specFlush() { specQueue.removeAll() }
@@ -483,8 +530,10 @@ public final class Gemma4MetalEngine {
     }
 
     func pick(_ values: [Float]) -> Int32 {
-        var out: Int32
-        if sampler != nil {
+        var out: Int32 = 0
+        if gpuFault {
+            out = 0
+        } else if sampler != nil {
             var work = values
             out = sampler!.sample(&work)
             sampler!.accept(out)
@@ -500,7 +549,7 @@ public final class Gemma4MetalEngine {
             if cfg.hasPerLayerInputs { buildPLE(f) }
             layers(f, pos: pos)
         }
-        evictAll()
+        if !gpuFault { evictAll() }
     }
 
     private func seedToken(_ token: Int) {
@@ -547,7 +596,7 @@ public final class Gemma4MetalEngine {
             if cfg.hasPerLayerInputs { buildPLE(f) }
             layers(f, pos: pos)
         }
-        evictAll()
+        if !gpuFault { evictAll() }
     }
 
     private func seedEmbedding(_ embedding: [Float]) {
@@ -621,10 +670,12 @@ public final class Gemma4MetalEngine {
         if c.hasPerLayerInputs { gatherPLEChunk(ids, soft, n) }
         for (_, pool) in kv { pool.appendBatch(n) }
         encodeChunk(basePos: basePos, n: n)
-        evictAll()
-        let src = bNormedN.f32(n * c.nEmbd)
-        let dst = bNormed.f32(c.nEmbd)
-        for i in 0..<c.nEmbd { dst[i] = src[(n - 1) * c.nEmbd + i] }
+        if !gpuFault {
+            evictAll()
+            let src = bNormedN.f32(n * c.nEmbd)
+            let dst = bNormed.f32(c.nEmbd)
+            for i in 0..<c.nEmbd { dst[i] = src[(n - 1) * c.nEmbd + i] }
+        }
     }
 
     // Soft rows already hold a tower feature and must NOT be scaled.
@@ -681,7 +732,7 @@ public final class Gemma4MetalEngine {
     private func encodeChunk(basePos: Int, n: Int) {
         let c = cfg
         let per = min(Gemma4MetalEngine.prefillLayers, c.nLayer)
-        BackgroundGate.shared.waitForForeground()
+        GPUGate.shared.pace()
         var queued: [MTLCommandBuffer] = []
         var il = 0
         while il < c.nLayer {
@@ -707,11 +758,8 @@ public final class Gemma4MetalEngine {
         queued[queued.count - 1].waitUntilCompleted()
         for cb in queued { ctx.clock.add(cb) }
         for (_, pool) in kv { pool.touch() }
-        let fault = queued.compactMap { cb in cb.error }.first
-        if let fault {
-            let why = "prefill chunk n=\(n) pos=\(basePos): \(fault)"
-            Diag.shared.report("[metal] \(why)")
-            fatalError("metal \(why)")
+        if !GPUGate.shared.verdict(queued, "prefill chunk n=\(n) pos=\(basePos)") {
+            gpuFault = true
         }
         if Gemma4MetalEngine.timing {
             let gpu = queued.reduce(0.0) { total, cb in
@@ -1101,16 +1149,11 @@ public final class Gemma4MetalEngine {
     // NO memory report here: one call per token, and the hook writes to stderr
     // and the log synchronously. The prefill path carries the reports.
     private func commit(_ cb: MTLCommandBuffer, _ tag: String) {
-        BackgroundGate.shared.waitForForeground()
         let t0 = Date()
-        cb.commit()
-        cb.waitUntilCompleted()
+        let ok = GPUGate.shared.submit(cb, tag)
         ctx.clock.add(cb)
         for (_, pool) in kv { pool.touch() }
-        if let err = cb.error {
-            Diag.shared.report("[metal] \(tag): \(err)")
-            fatalError("metal \(tag): \(err)")
-        }
+        if !ok { gpuFault = true }
         if Gemma4MetalEngine.timing {
             let wall = Date().timeIntervalSince(t0) * 1000
             let gpu = (cb.gpuEndTime - cb.gpuStartTime) * 1000

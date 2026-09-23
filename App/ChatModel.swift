@@ -1743,7 +1743,7 @@ import UniformTypeIdentifiers
                 self.apply(event, at: idx)
             }
             phrases.cancel()
-            KeepAwake.hold(false)
+            self.releaseWhenSettled()
             self.genTask = nil
             self.prefilling = false
             self.prefillProgress = nil
@@ -1751,6 +1751,15 @@ import UniformTypeIdentifiers
             self.watching = false
             self.lookingAt = nil
             if self.session.metaTaskRunning { _ = self.phraseCycler() }
+        }
+    }
+
+    private func releaseWhenSettled() {
+        Task { @MainActor in
+            while session.metaTaskRunning {
+                try? await Task.sleep(for: .milliseconds(200))
+            }
+            if genTask == nil { KeepAwake.hold(false) }
         }
     }
 

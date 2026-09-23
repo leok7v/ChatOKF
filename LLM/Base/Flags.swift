@@ -173,6 +173,14 @@ public enum Flags {
         Knob(name: "model", takesValue: true, help:
             "the catalog name the app selects at launch, in place of the "
             + "one it remembers", scope: .diagnostic, defaultValue: ""),
+        Knob(name: "thermal", takesValue: true, help:
+            "nominal | fair | serious | critical: the thermal state the GPU "
+            + "gate paces by, in place of the device's",
+            scope: .diagnostic, defaultValue: ""),
+        Knob(name: "gpu-fault", takesValue: true, help:
+            "every Nth command buffer is reported as failed, to drive the "
+            + "retry and the cancel on a cool device; 0 off",
+            scope: .diagnostic, defaultValue: "0"),
     ]
 
     private static let byName: [String: Knob] = {

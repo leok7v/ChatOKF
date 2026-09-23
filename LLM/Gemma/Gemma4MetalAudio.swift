@@ -54,7 +54,7 @@ public final class Gemma4MetalAudio {
         let q, k, v, out, attn, ff, clamp: MTLBuffer
     }
 
-    public func forward(mel: [Float], frames: Int, bins: Int)
+    public func forward(mel: [Float], frames: Int, bins: Int) throws
         -> (tower: [Float], proj: [Float], count: Int) {
         let (seed, n) = cpu.subsample(mel, frames, bins)
         let e = cfg.embd
@@ -66,26 +66,31 @@ public final class Gemma4MetalAudio {
                         out: ctx.makeF32(n * e), attn: ctx.makeF32(n * e),
                         ff: ctx.makeF32(n * cfg.ff),
                         clamp: ctx.makeF32(n * max(cfg.ff, 2 * e)))
-        let cb = ctx.queue.makeCommandBuffer()!
-        let enc = cb.makeComputeCommandEncoder()!
-        let f = MetalEnc(ctx: ctx, e: enc)
-        for il in 0..<cfg.layers {
-            feedForward(f, il, "ffw1", s, n)
-            f.rmsnormBatch(x: s.x, weightOff: off(il, "norm_pre_attn"),
-                           y: s.norm, n: e, rows: n, eps: cfg.eps)
-            attention(f, il, s, n)
-            f.rmsnormRows(x: s.attn, xoff: 0, d: e, rows: n,
-                          weightOff: off(il, "norm_post_attn"), eps: cfg.eps)
-            f.add(x: s.x, y: s.attn, n: n * e)
-            lightConv(f, il, s, n)
-            feedForward(f, il, "ffw2", s, n)
-            f.rmsnormRows(x: s.x, xoff: 0, d: e, rows: n,
-                          weightOff: off(il, "norm_out"), eps: cfg.eps)
+        let ran = GPUGate.shared.run("gemma audio") {
+            seed.withUnsafeBytes { raw in
+                _ = memcpy(s.x.contents(), raw.baseAddress!, raw.count)
+            }
+            let cb = ctx.queue.makeCommandBuffer()!
+            let enc = cb.makeComputeCommandEncoder()!
+            let f = MetalEnc(ctx: ctx, e: enc)
+            for il in 0..<cfg.layers {
+                feedForward(f, il, "ffw1", s, n)
+                f.rmsnormBatch(x: s.x, weightOff: off(il, "norm_pre_attn"),
+                               y: s.norm, n: e, rows: n, eps: cfg.eps)
+                attention(f, il, s, n)
+                f.rmsnormRows(x: s.attn, xoff: 0, d: e, rows: n,
+                              weightOff: off(il, "norm_post_attn"),
+                              eps: cfg.eps)
+                f.add(x: s.x, y: s.attn, n: n * e)
+                lightConv(f, il, s, n)
+                feedForward(f, il, "ffw2", s, n)
+                f.rmsnormRows(x: s.x, xoff: 0, d: e, rows: n,
+                              weightOff: off(il, "norm_out"), eps: cfg.eps)
+            }
+            enc.endEncoding()
+            return cb
         }
-        enc.endEncoding()
-        cb.commit()
-        cb.waitUntilCompleted()
-        if let err = cb.error { fatalError("metal gemma audio: \(err)") }
+        if !ran { throw GPUFault(description: "the audio tower did not run") }
         let tower = cpu.outputProject(Array(s.x.f32(n * e)), n)
         return (tower, cpu.project(tower, n), n)
     }

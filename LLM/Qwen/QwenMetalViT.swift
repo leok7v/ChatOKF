@@ -125,33 +125,44 @@ public final class QwenMetalViT {
         return tables!
     }
 
-    public func forward(pixels: [Float]) -> [Float] {
-        forward(pixels: pixels, gridH: cfg.side, gridW: cfg.side)
+    public func forward(pixels: [Float]) throws -> [Float] {
+        try forward(pixels: pixels, gridH: cfg.side, gridW: cfg.side)
     }
 
-    public func forward(pixels: [Float], gridH: Int, gridW: Int) -> [Float] {
+    public func forward(pixels: [Float], gridH: Int,
+                        gridW: Int) throws -> [Float] {
         let t = prepare(h: gridH, w: gridW)
-        return run(QwenViT.patchRows(pixels, cfg, t.order, w: gridW),
-                   cfg.patchDim, patchW, t)
+        return try run(QwenViT.patchRows(pixels, cfg, t.order, w: gridW),
+                       cfg.patchDim, patchW, t)
     }
 
     public func forward(pair a: [Float], _ b: [Float], gridH: Int,
-                        gridW: Int) -> [Float] {
+                        gridW: Int) throws -> [Float] {
         let t = prepare(h: gridH, w: gridW)
-        return run(QwenViT.pairRows(a, b, cfg, t.order, w: gridW),
-                   2 * cfg.patchDim, patchWPair, t)
+        return try run(QwenViT.pairRows(a, b, cfg, t.order, w: gridW),
+                       2 * cfg.patchDim, patchWPair, t)
     }
 
     private func run(_ rows: [Float], _ k: Int, _ weight: MTLBuffer,
-                     _ t: Tables) -> [Float] {
+                     _ t: Tables) throws -> [Float] {
         let n = t.order.count
         ensure(n)
-        let embd = cfg.embd
-        let hd = cfg.headDim
-        let scale = 1 / Float(hd).squareRoot()
+        let m2 = cfg.merge * cfg.merge
+        let mTok = n / m2
         rows.withUnsafeBytes { src in
             _ = memcpy(bRows.contents(), src.baseAddress!, src.count)
         }
+        let ran = GPUGate.shared.run("qwen vit") { encode(k, weight, t) }
+        if !ran { throw GPUFault(description: "the vision tower did not run") }
+        return Array(bOut.f32(mTok * cfg.projDim))
+    }
+
+    private func encode(_ k: Int, _ weight: MTLBuffer,
+                        _ t: Tables) -> MTLCommandBuffer {
+        let n = t.order.count
+        let embd = cfg.embd
+        let hd = cfg.headDim
+        let scale = 1 / Float(hd).squareRoot()
         let cb = ctx.queue.makeCommandBuffer()!
         let enc = cb.makeComputeCommandEncoder()!
         let f = MetalEnc(ctx: ctx, e: enc)
@@ -194,9 +205,7 @@ public final class QwenMetalViT {
         f.f16Gemm(mm2W, X: bTmp, out: bOut, K: mIn, M: cfg.projDim, N: mTok)
         f.addBiasRows(x: bOut, bias: mm2B, m: cfg.projDim, rows: mTok)
         enc.endEncoding()
-        cb.commit()
-        cb.waitUntilCompleted()
-        return Array(bOut.f32(mTok * cfg.projDim))
+        return cb
     }
 
     // One vectorized vImage pass: a scalar loop over ~250M params is seconds.

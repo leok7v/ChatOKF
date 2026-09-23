@@ -32,9 +32,9 @@ func probeWrap(_ user: String) -> String {
         // times the resident steady state.
         if let mvit = try? QwenMetalViT(path: mmproj) {
             let m0 = Date()
-            let mout = mvit.forward(pixels: pixels)
+            let mout = try mvit.forward(pixels: pixels)
             let m1 = Date()
-            _ = mvit.forward(pixels: pixels)
+            _ = try mvit.forward(pixels: pixels)
             err(String(format: "[vit] metal forward %.2fs (warm %.2fs)\n",
                        m1.timeIntervalSince(m0),
                        Date().timeIntervalSince(m1)))

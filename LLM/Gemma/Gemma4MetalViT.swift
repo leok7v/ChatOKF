@@ -36,7 +36,7 @@ public final class Gemma4MetalViT {
         ctx.window(UInt64(t.base - map))
     }
 
-    public func forward(pixels: [Float], pos: [(Int, Int)])
+    public func forward(pixels: [Float], pos: [(Int, Int)]) throws
         -> (tower: [Float], proj: [Float], count: Int) {
         let n = pos.count
         let e = cfg.embd
@@ -60,10 +60,39 @@ public final class Gemma4MetalViT {
         let bMask = ctx.makeF32(padded.map { p in p ? Float(1) : Float(0) })
         let bClamp = ctx.makeF32(n * max(e, cfg.ff))
 
-        let cb = ctx.queue.makeCommandBuffer()!
-        let enc = cb.makeComputeCommandEncoder()!
-        let f = MetalEnc(ctx: ctx, e: enc)
-        for il in 0..<cfg.layers {
+        let seed = Array(bX.f32(n * e))
+        let ran = GPUGate.shared.run("gemma vit") {
+            seed.withUnsafeBytes { raw in
+                _ = memcpy(bX.contents(), raw.baseAddress!, raw.count)
+            }
+            let cb = ctx.queue.makeCommandBuffer()!
+            let enc = cb.makeComputeCommandEncoder()!
+            let f = MetalEnc(ctx: ctx, e: enc)
+            for il in 0..<cfg.layers {
+                encodeBlock(f, il, n: n, bX, bNorm, bTmp, bQ, bK, bV, bCtx,
+                            bFF, bUp, bCos, bSin, bMask, bClamp)
+            }
+            enc.endEncoding()
+            return cb
+        }
+        if !ran { throw GPUFault(description: "the vision tower did not run") }
+        return cpu.poolAndProject(Array(bX.f32(n * e)), pos: pos,
+                                  padded: padded)
+    }
+
+    private func encodeBlock(_ f: MetalEnc, _ il: Int, n: Int,
+                             _ bX: MTLBuffer, _ bNorm: MTLBuffer,
+                             _ bTmp: MTLBuffer, _ bQ: MTLBuffer,
+                             _ bK: MTLBuffer, _ bV: MTLBuffer,
+                             _ bCtx: MTLBuffer, _ bFF: MTLBuffer,
+                             _ bUp: MTLBuffer, _ bCos: MTLBuffer,
+                             _ bSin: MTLBuffer, _ bMask: MTLBuffer,
+                             _ bClamp: MTLBuffer) {
+        let e = cfg.embd
+        let hd = cfg.headDim
+        let nH = cfg.heads
+        let wide = nH * hd
+        do {
             func t(_ n: String) -> GGUFTensor {
                 model.gguf.tensor("v.blk.\(il).\(n)")
             }
@@ -117,12 +146,6 @@ public final class Gemma4MetalViT {
                                y: bNorm, n: e, rows: n, eps: cfg.eps)
             f.add(x: bX, y: bNorm, n: n * e)
         }
-        enc.endEncoding()
-        cb.commit()
-        cb.waitUntilCompleted()
-        if let err = cb.error { fatalError("metal gemma vit: \(err)") }
-        return cpu.poolAndProject(Array(bX.f32(n * e)), pos: pos,
-                                  padded: padded)
     }
 
 }

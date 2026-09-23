@@ -96,11 +96,12 @@ public final class Gemma4Media: MediaEncoder, @unchecked Sendable {
         }
         let mel = Gemma4Mel(Gemma4MelConfig(model.gguf) ?? .processorDefault)
         let tower = try audioTower()
-        return AudioChunks.split(pcm, rate: Double(mel.cfg.sampleRate),
-                                 maxSeconds: wire.maxSeconds)
+        return try AudioChunks.split(pcm, rate: Double(mel.cfg.sampleRate),
+                                     maxSeconds: wire.maxSeconds)
             .map { chunk in
                 let feats = mel.features(Array(pcm[chunk.range]))
-                let got = tower.run(feats.values, feats.frames, mel.cfg.bins)
+                let got = try tower.run(feats.values, feats.frames,
+                                        mel.cfg.bins)
                 return SoftSpan.bracketed(
                     begin: wire.boa, placeholder: wire.token, end: wire.eoa,
                     count: got.count, features: got.proj)
@@ -135,9 +136,10 @@ public final class Gemma4Media: MediaEncoder, @unchecked Sendable {
         if model.hasVisionTower {
             let vit = try visionTower()
             encode = { frame in
-                patch.patches(frame, budget: budget).map { cut in
-                    let got = vit.run(cut.pixels, cut.pos)
-                    return (got.proj, got.count)
+                patch.patches(frame, budget: budget).flatMap { cut in
+                    (try? vit.run(cut.pixels, cut.pos)).map { got in
+                        (got.proj, got.count)
+                    }
                 }
             }
         } else {
@@ -199,8 +201,8 @@ public final class Gemma4Media: MediaEncoder, @unchecked Sendable {
     }
 
     struct VisionTower {
-        let run: ([Float], [(Int, Int)]) -> (tower: [Float], proj: [Float],
-                                             count: Int)
+        let run: ([Float], [(Int, Int)]) throws
+            -> (tower: [Float], proj: [Float], count: Int)
     }
 
     func visionTower() throws -> VisionTower {
@@ -208,7 +210,7 @@ public final class Gemma4Media: MediaEncoder, @unchecked Sendable {
             if let ctx {
                 let gpu = try Gemma4MetalViT(model, ctx: ctx)
                 vision = VisionTower { pixels, pos in
-                    gpu.forward(pixels: pixels, pos: pos)
+                    try gpu.forward(pixels: pixels, pos: pos)
                 }
             } else {
                 let cpu = try Gemma4ViT(model)
@@ -226,8 +228,8 @@ public final class Gemma4Media: MediaEncoder, @unchecked Sendable {
     }
 
     struct AudioTower {
-        let run: ([Float], Int, Int) -> (tower: [Float], proj: [Float],
-                                         count: Int)
+        let run: ([Float], Int, Int) throws
+            -> (tower: [Float], proj: [Float], count: Int)
     }
 
     func audioTower() throws -> AudioTower {
@@ -235,7 +237,7 @@ public final class Gemma4Media: MediaEncoder, @unchecked Sendable {
             if let ctx {
                 let gpu = try Gemma4MetalAudio(model, ctx: ctx)
                 audio = AudioTower { mel, frames, bins in
-                    gpu.forward(mel: mel, frames: frames, bins: bins)
+                    try gpu.forward(mel: mel, frames: frames, bins: bins)
                 }
             } else {
                 let cpu = try Gemma4Audio(model)

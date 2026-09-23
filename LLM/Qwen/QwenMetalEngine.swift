@@ -216,25 +216,51 @@ public final class QwenMetalEngine {
         (Flags.value("skip") ?? "").split(separator: ",").map(String.init))
     static func runs(_ group: String) -> Bool { !skip.contains(group) }
 
+    private var gpuFault = false
+
     public func extend(_ ids: [Int32]) -> Int32 {
         // A prior turn's Stop must not kill this one.
         stopSignal.clear()
         specQueue.removeAll()
+        let mark = bookmark()
+        var chunk = GPUGate.shared.chunkCap(defaultChunk)
+        var attempt = 0
         var out: Int32 = 0
-        if ids.count > 1 {
-            out = prefillBatch(ids)
-        } else {
-            var i = 0
-            while i < ids.count && !stopSignal.raisedNow {
-                if i == ids.count - 1 {
-                    out = pick(forwardLogits(token: Int(ids[i]), pos: pos,
-                                             seed: true))
-                } else {
-                    forward(token: Int(ids[i]), pos: pos, seed: true)
-                }
-                pos += 1
-                i += 1
+        var done = false
+        while !done {
+            gpuFault = false
+            out = ids.count > 1 ? prefillBatch(ids, chunk: chunk)
+                                : prefillOne(ids)
+            done = !gpuFault || attempt >= GPUGate.retries
+            if !done {
+                restore(mark)
+                GPUGate.shared.backoff(attempt)
+                chunk = max(8, chunk / 4)
+                attempt += 1
             }
+        }
+        if gpuFault { stopSignal.raise() }
+        return out
+    }
+
+    private var defaultChunk: Int {
+        ctx.matrixUnits
+            ? QwenMetalEngine.prefillChunk
+            : min(QwenMetalEngine.prefillChunk, MetalEnc.narrowMax)
+    }
+
+    private func prefillOne(_ ids: [Int32]) -> Int32 {
+        var out: Int32 = 0
+        var i = 0
+        while i < ids.count && !stopSignal.raisedNow && !gpuFault {
+            if i == ids.count - 1 {
+                out = pick(forwardLogits(token: Int(ids[i]), pos: pos,
+                                         seed: true))
+            } else {
+                forward(token: Int(ids[i]), pos: pos, seed: true)
+            }
+            pos += 1
+            i += 1
         }
         return out
     }
@@ -296,6 +322,26 @@ public final class QwenMetalEngine {
     }
 
     public func decode(_ token: Int32) -> Int32 {
+        var out: Int32 = 0
+        var attempt = 0
+        var done = false
+        while !done {
+            let mark = GPUGate.shared.hot && specQueue.isEmpty
+                ? bookmark() : nil
+            gpuFault = false
+            out = decodeOnce(token)
+            done = !gpuFault || mark == nil || attempt >= GPUGate.retries
+            if !done {
+                restore(mark!)
+                GPUGate.shared.backoff(attempt)
+                attempt += 1
+            }
+        }
+        if gpuFault { stopSignal.raise() }
+        return out
+    }
+
+    private func decodeOnce(_ token: Int32) -> Int32 {
         let ready = mtp != nil && !plainDecode && sampler?.logitMask == nil
         var out: Int32
         if !specQueue.isEmpty {
@@ -352,9 +398,7 @@ public final class QwenMetalEngine {
     }
 
     func prefillBatch(_ ids: [Int32], chunk c0: Int? = nil) -> Int32 {
-        let chunk = c0 ?? (ctx.matrixUnits
-            ? QwenMetalEngine.prefillChunk
-            : min(QwenMetalEngine.prefillChunk, MetalEnc.narrowMax))
+        let chunk = c0 ?? defaultChunk
         let c = cfg
         var out: Int32 = 0
         // One scratch set sized to the largest chunk; each chunk is its own
@@ -367,7 +411,7 @@ public final class QwenMetalEngine {
         let idsBuf = ctx.device.makeBuffer(length: capN * 4,
                                            options: .storageModeShared)!
         var i = 0
-        while i < ids.count && !stopSignal.raisedNow {
+        while i < ids.count && !stopSignal.raisedNow && !gpuFault {
             let end = min(i + chunk, ids.count)
             let N = end - i
             let basePos = pos
@@ -387,9 +431,13 @@ public final class QwenMetalEngine {
                               seed)
             e.endEncoding()
             commitTimed(cb, "prefillBatch")
-            pos += N
-            keepPrev(b.normed, row: N - 1)
-            if end == ids.count { out = pick(Array(bLogits.f32(c.nVocab))) }
+            if !gpuFault {
+                pos += N
+                keepPrev(b.normed, row: N - 1)
+                if end == ids.count {
+                    out = pick(Array(bLogits.f32(c.nVocab)))
+                }
+            }
             i = end
         }
         return out
@@ -454,7 +502,7 @@ public final class QwenMetalEngine {
                                             options: .storageModeShared)!
         var out: Int32 = 0
         var i = 0
-        while i < ids.count && !stopSignal.raisedNow {
+        while i < ids.count && !stopSignal.raisedNow && !gpuFault {
             let end = min(i + chunk, ids.count)
             let N = end - i
             let basePos = pos
@@ -493,11 +541,16 @@ public final class QwenMetalEngine {
                               seed)
             e.endEncoding()
             commitTimed(cb, "prefillVision")
-            pos += N
-            keepPrev(b.normed, row: N - 1)
-            if end == ids.count { out = pick(Array(bLogits.f32(c.nVocab))) }
+            if !gpuFault {
+                pos += N
+                keepPrev(b.normed, row: N - 1)
+                if end == ids.count {
+                    out = pick(Array(bLogits.f32(c.nVocab)))
+                }
+            }
             i = end
         }
+        if gpuFault { stopSignal.raise() }
         return out
     }
 
@@ -726,8 +779,10 @@ public final class QwenMetalEngine {
     }
 
     func pick(_ logits: [Float]) -> Int32 {
-        var out: Int32
-        if sampler != nil {
+        var out: Int32 = 0
+        if gpuFault {
+            out = 0
+        } else if sampler != nil {
             var work = logits
             let picked = sampler!.sample(&work)
             sampler!.accept(picked)
@@ -902,15 +957,11 @@ public final class QwenMetalEngine {
     }
 
     private func commitTimed(_ cb: MTLCommandBuffer, _ tag: String) {
-        // iOS aborts a GPU submit made in the background; every runtime commit
-        // funnels through here, so this one gate covers them all.
-        BackgroundGate.shared.waitForForeground()
         let t0 = Date()
-        cb.commit()
-        cb.waitUntilCompleted()
+        let ok = GPUGate.shared.submit(cb, tag)
         ctx.clock.add(cb)
         for (_, pool) in pools { pool.touch() }
-        if let err = cb.error { fatalError("metal \(tag): \(err)") }
+        if !ok { gpuFault = true }
         if QwenMetalEngine.timing {
             let wall = Date().timeIntervalSince(t0) * 1000
             let gpu = (cb.gpuEndTime - cb.gpuStartTime) * 1000
@@ -1210,16 +1261,7 @@ public final class QwenMetalEngine {
         MetalEnc(ctx: ctx, e: e).gemv(model.output, x: hidden, out: bLogits,
                                       off: off(model.output))
         e.endEncoding()
-        let t0 = Date()
-        cb.commit()
-        cb.waitUntilCompleted()
-        ctx.clock.add(cb)
-        if QwenMetalEngine.timing {
-            let wall = Date().timeIntervalSince(t0) * 1000
-            let gpu = (cb.gpuEndTime - cb.gpuStartTime) * 1000
-            FileHandle.standardError.write(Data(
-                "logits gpu=\(Int(gpu))ms wall=\(Int(wall))ms\n".utf8))
-        }
+        commitTimed(cb, "logits")
         return Array(bLogits.f32(cfg.nVocab))
     }
 }
