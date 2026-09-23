@@ -6,6 +6,8 @@ struct DoneButton: View {
 
     var body: some View {
         Button("Done", action: action)
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
             .modifier(TintedOnPhone())
             .keyboardShortcut(.defaultAction)
     }
