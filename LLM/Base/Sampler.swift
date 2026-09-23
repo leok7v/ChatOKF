@@ -329,6 +329,10 @@ public struct Sampler: Sendable {
     public var overthinkTokens: Set<Int32> = []
     public var overthinkLambda: Float = 0
 
+    public var banned: Set<Int32> = []
+
+    static let bannedLogit: Float = -1e30
+
     public var penaltyExempt: Set<Int32> = []
 
     public var dryBreakers: Set<Int32> = []
@@ -424,6 +428,7 @@ public struct Sampler: Sendable {
 
     public mutating func sample(_ logits: inout [Float]) -> Int32 {
         logitMask?(&logits)
+        applyBanned(&logits)
         if !verbatim {
             applyDry(&logits)
             applyRepeatPenalty(&logits)
@@ -619,6 +624,15 @@ public struct Sampler: Sendable {
                     }
                 }
                 j += 1
+            }
+        }
+    }
+
+    private func applyBanned(_ logits: inout [Float]) {
+        for t in banned {
+            let i = Int(t)
+            if i >= 0 && i < logits.count {
+                logits[i] = Sampler.bannedLogit
             }
         }
     }

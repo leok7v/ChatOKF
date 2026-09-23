@@ -410,12 +410,8 @@ public enum TurnEvent: Sendable {
                 + "actually see, and never claim you cannot view images."
         }
         if memories.active {
-            let map = memories.map
-            if !map.isEmpty {
-                s += "\nThe user's own notes, by area; a message may arrive "
-                    + "with the ones that fit it, and memory_search finds the "
-                    + "rest:\n" + map
-            }
+            s += "\nThe user keeps their own notes. The ones that fit a "
+                + "message arrive with it; memory_search finds the rest."
         }
         return s
     }
@@ -474,12 +470,18 @@ public enum TurnEvent: Sendable {
                 system: systemStable, systemTail: "",
                 vocabSize: ggufVocabCount, presets: activePresets,
                 enableThinking: thinkingActive,
+                suppressReasoning: !thinkingActive,
                 reasoningEffort: modelSupportsReasoningEffort ? wire : nil,
                 maxReasoning: config.thinkTokenCap * 2,
                 softReasoningCap: config.thinkTokenCap,
                 overthink: Session.overthinkLambda,
                 seed: Flags.uint64("seed") ?? 0, runner: toolRunner,
                 readGuard: Session.memoryGuard)
+            Diag.shared.report(.load, "[chat] session \(modelName): thinking "
+                + (thinkingActive ? "on" : "off, reasoning suppressed")
+                + ", asked " + (config.thinking ? "on" : "off")
+                + ", model " + (modelSupportsThinking ? "thinks" : "cannot")
+                + ", effort " + (modelSupportsReasoningEffort ? wire : "none"))
             hookTrace(thinkingActive: thinkingActive, onEvent: onEvent)
         }
     }
@@ -552,6 +554,9 @@ public enum TurnEvent: Sendable {
     // depends on. Empty means no cookable prefix, so only the reset is owed.
     private func primeOrCookInternal(_ s: ChatSession, reset: Bool) async {
         let stamp = await s.precookStamp
+        Diag.shared.report(.load, "[chat] prefix stamp "
+            + (stamp.isEmpty ? "none, nothing cookable"
+                             : String(stamp.prefix(16))))
         let live = Session.liveDir(modelName)
         try? FileManager.default.removeItem(at: live)
         let attached = (try? await s.attach(live: live)) != nil

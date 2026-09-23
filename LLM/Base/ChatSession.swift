@@ -71,6 +71,7 @@ public actor ChatSession {
     private let overthinkTokens: Set<Int32>
     private let overthinkLambda: Float
     private let wireTokens: Set<Int32>
+    private let reasoningOpeners: Set<Int32>
     private var runner: (any ToolRunner)?
     private var toolSpecs: [ToolSpec] { runner?.tools ?? [] }
     enum GrammarMode { case off, full, structural }
@@ -128,6 +129,7 @@ public actor ChatSession {
                 systemTail: String = "", vocabSize: Int,
                 presets: SamplingPresets = .greedy,
                 enableThinking: Bool = false,
+                suppressReasoning: Bool = false,
                 reasoningEffort: String? = nil, maxTokens: Int = .max,
                 maxReasoning: Int = 0, softReasoningCap: Int = 0,
                 overthink: Float = 0, seed: UInt64 = 0,
@@ -149,6 +151,7 @@ public actor ChatSession {
         self.presets = presets
         self.vocabSize = max(vocabSize, 1)
         self.enableThinking = enableThinking
+        self.suppressReasoning = suppressReasoning
         self.reasoningEffort = reasoningEffort
         self.maxTokens = maxTokens
         self.maxReasoning = maxReasoning
@@ -175,6 +178,16 @@ public actor ChatSession {
             if ids.count == 1 { specials.insert(ids[0]) }
         }
         self.wireTokens = specials
+        var openers: Set<Int32> = []
+        if wire.derivedReasoning,
+           let first = backend.encode(wire.reasoningOpen).first {
+            let text = String(decoding: backend.tokenBytes(first),
+                              as: UTF8.self)
+            if text.count >= 3, wire.reasoningOpen.hasPrefix(text) {
+                openers.insert(first)
+            }
+        }
+        self.reasoningOpeners = openers
         self.history = [AgentMessage(role: "system",
                                      content: system + systemTail)]
         self.committed = []
@@ -1291,6 +1304,7 @@ public actor ChatSession {
         if samplerSeed != 0 { turnConfig.seed = samplerSeed }
         var sampler = Sampler(vocabSize: vocabSize, config: turnConfig)
         sampler.penaltyExempt = wireTokens
+        if !reasons { sampler.banned = reasoningOpeners }
         if turnConfig.dryMultiplier > 0 {
             sampler.dryBreakers = sequenceBreakers()
         }
@@ -1492,6 +1506,7 @@ public actor ChatSession {
         var stop = false
         var thinkRescues = 0
         let g0 = Date()
+        var steady: Date? = nil
         let gpu0 = backend.gpuSeconds
         lastMetrics = TurnMetrics(ctx: startCtx, thinkTokens: tally.think,
                                   contentTokens: tally.content, pp: pp, tg: 0,
@@ -1626,12 +1641,12 @@ public actor ChatSession {
                 }
             }
             steps += 1
+            if steady == nil { steady = Date() }
             if steps % 8 == 0 {
-                let tg = Double(steps)
-                    / max(Date().timeIntervalSince(g0), 1e-6)
                 lastMetrics = TurnMetrics(
                     ctx: startCtx + steps, thinkTokens: tally.think + think,
-                    contentTokens: tally.content + content, pp: pp, tg: tg,
+                    contentTokens: tally.content + content, pp: pp,
+                    tg: ChatSession.steadyRate(steps, steady),
                     readFraction: readFraction, readStop: readStop)
             }
             let softOver = softReasoningCap > 0 && think >= softReasoningCap &&
@@ -1816,8 +1831,7 @@ public actor ChatSession {
             preamble = body.trimmingCharacters(in: .whitespacesAndNewlines)
         }
         let ctx = await backend.position
-        let tgSec = Date().timeIntervalSince(g0)
-        let tg = tgSec > 0 ? Double(steps) / tgSec : 0
+        let tg = ChatSession.steadyRate(steps, steady)
         let gpuSec = backend.gpuSeconds - gpu0
         let tgGPU = gpuSec > 0 ? Double(steps) / gpuSec : 0
         lastMetrics = TurnMetrics(ctx: ctx, thinkTokens: tally.think + think,
@@ -1837,6 +1851,15 @@ public actor ChatSession {
                   text: committedAnswer)
         }
         return (pending, preamble)
+    }
+
+    static func steadyRate(_ steps: Int, _ since: Date?) -> Double {
+        var out = 0.0
+        if let since, steps > 1 {
+            let sec = Date().timeIntervalSince(since)
+            if sec > 0 { out = Double(steps - 1) / sec }
+        }
+        return out
     }
 
     private func completedCall(_ text: String) -> ToolCall? {

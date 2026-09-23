@@ -43,7 +43,7 @@ public enum MemoryTools {
                 + "is about this, answer from your own knowledge and say the "
                 + "notes do not cover it. Put rephrasings in `also` rather "
                 + "than searching again; narrow with `area` only when the "
-                + "map shows the answer is there.",
+                + "user names one.",
             parametersJSON: "{\"type\":\"object\",\"properties\":{"
                 + "\"query\":{\"type\":\"string\"},"
                 + "\"also\":{\"type\":\"string\",\"description\":\"Other "
