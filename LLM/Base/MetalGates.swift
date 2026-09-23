@@ -39,13 +39,28 @@ public struct GPUFault: Error, CustomStringConvertible {
     public let description: String
 }
 
+struct SplitMix {
+    private var state: UInt64
+
+    init(_ seed: UInt64) { state = seed }
+
+    mutating func next() -> Double {
+        state = state &+ 0x9E37_79B9_7F4A_7C15
+        var z = state
+        z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
+        z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
+        z = z ^ (z >> 31)
+        return Double(z >> 11) * 0x1p-53
+    }
+}
+
 public final class GPUGate: @unchecked Sendable {
     public static let shared = GPUGate()
     public static let retries = 3
     static let criticalWait = 30.0
     private let lock = NSLock()
-    private var submits = 0
-    private var faultEvery = Flags.int("gpu-fault") ?? 0
+    private var dice = SplitMix(Flags.uint64("seed") ?? 0x9E37_79B9_7F4A_7C15)
+    private var faultRate = Flags.double("gpu-fault-rate") ?? 0
     private var forced = GPUGate.parse(Flags.value("thermal") ?? "")
 
     static func parse(_ text: String) -> ProcessInfo.ThermalState? {
@@ -83,11 +98,12 @@ public final class GPUGate: @unchecked Sendable {
         return state == .serious || state == .critical
     }
 
-    public func simulate(thermal: ProcessInfo.ThermalState?, faultEvery: Int) {
+    public func simulate(thermal: ProcessInfo.ThermalState?, faultRate: Double,
+                         seed: UInt64 = 1) {
         lock.lock()
         forced = thermal
-        self.faultEvery = faultEvery
-        submits = 0
+        self.faultRate = faultRate
+        dice = SplitMix(seed)
         lock.unlock()
     }
 
@@ -113,8 +129,7 @@ public final class GPUGate: @unchecked Sendable {
 
     func verdict(_ buffers: [MTLCommandBuffer], _ tag: String) -> Bool {
         lock.lock()
-        submits += 1
-        let staged = faultEvery > 0 && submits % faultEvery == 0
+        let staged = faultRate > 0 && dice.next() < faultRate
         lock.unlock()
         let fault = buffers.compactMap { cb in cb.error }.first
         let ok = fault == nil && !staged
@@ -146,5 +161,58 @@ public final class GPUGate: @unchecked Sendable {
             attempt += 1
         }
         return ok
+    }
+}
+
+public final class GPUContender: @unchecked Sendable {
+    public static let shared = GPUContender()
+    static let maxLanes = 8
+    private let lock = NSLock()
+    private var lanes = 0
+
+    private var live: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return lanes > 0
+    }
+
+    public func stop() {
+        lock.lock()
+        lanes = 0
+        lock.unlock()
+    }
+
+    func start(_ ctx: MetalContext) {
+        let wanted = min(max(Flags.int("gpu-contender") ?? 0, 0),
+                         GPUContender.maxLanes)
+        lock.lock()
+        let fresh = wanted > 0 && lanes == 0
+        if fresh { lanes = wanted }
+        lock.unlock()
+        if fresh {
+            Diag.shared.report(.load, "[gpu] \(wanted) contender lane(s) "
+                + "on their own queue")
+            for _ in 0..<wanted {
+                Thread.detachNewThread { [weak self] in self?.spin(ctx) }
+            }
+        }
+    }
+
+    private func spin(_ ctx: MetalContext) {
+        let queue = ctx.device.makeCommandQueue()
+        let width = 1 << 16
+        let a = ctx.makeF32(width)
+        let b = ctx.makeF32(width)
+        while live {
+            if BackgroundGate.shared.parked {
+                Thread.sleep(forTimeInterval: 0.25)
+            } else if let cb = queue?.makeCommandBuffer(),
+                      let e = cb.makeComputeCommandEncoder() {
+                MetalEnc(ctx: ctx, e: e).add(x: a, y: b, n: width)
+                e.endEncoding()
+                cb.commit()
+                cb.waitUntilCompleted()
+            }
+        }
     }
 }

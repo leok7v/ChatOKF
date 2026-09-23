@@ -88,6 +88,7 @@ public final class Gemma4MetalEngine {
         self.pageP = pageP
         ctx = try MetalContext(model.gguf)
         try ctx.prewarm()
+        GPUContender.shared.start(ctx)
         // token_embd is gather-only because the lm_head is untied here; a TIED
         // one is walked end to end every token, where no readahead is wrong.
         if let ple = model.perLayerEmbd { model.gguf.gathered(ple) }
@@ -370,62 +371,68 @@ public final class Gemma4MetalEngine {
                        softAt: (Int32) -> [Float]?) -> Int32 {
         stopSignal.clear()
         specFlush()
-        let mark = bookmark()
+        gpuFault = false
         var recorded: [[Float]?] = []
-        var cap = GPUGate.shared.chunkCap(batch)
-        var attempt = 0
-        var out: Int32 = 0
-        var done = false
-        while !done {
-            gpuFault = false
-            out = prefill(ids, cap: cap) { k, id in
-                if k == recorded.count { recorded.append(softAt(id)) }
-                return recorded[k]
-            }
-            done = !gpuFault || attempt >= GPUGate.retries
-            if !done {
-                restore(mark)
-                GPUGate.shared.backoff(attempt)
-                cap = max(1, cap / 4)
-                attempt += 1
-            }
+        let out = prefill(ids) { k, id in
+            while recorded.count <= k { recorded.append(softAt(id)) }
+            return recorded[k]
         }
         if gpuFault { stopSignal.raise() }
         return out
     }
 
-    private func prefill(_ ids: [Int32], cap: Int,
+    private func prefill(_ ids: [Int32],
                          softAt: (Int, Int32) -> [Float]?) -> Int32 {
-        let B = min(batch, cap)
         Diag.memory?("prefill start \(ids.count) ids at pos \(pos)")
         let blocks = cfg.blockwiseVision
             ? cfg.visionBlocks(ids, from: pos)
             : [(Int, Int)](repeating: (0, 0), count: ids.count)
+        var width = GPUGate.shared.chunkCap(batch)
         var i = 0
         // The stop is the loop PREDICATE, so a Stop lands between chunks and
         // leaves `pos` and the KV consistent for the rollback.
         while i < ids.count && !stopSignal.raisedNow && !gpuFault {
-            let n = B > 1 ? chunk(blocks, at: i, want: min(B, ids.count - i))
-                          : 1
-            var soft: [Int: [Float]] = [:]
-            for j in 0..<n {
-                if let feature = softAt(i + j, ids[i + j]) { soft[j] = feature }
-            }
-            if n == 1 {
-                if let feature = soft[0] {
-                    forward(embedding: feature, pos: pos)
-                } else {
-                    forward(token: Int(ids[i]), pos: pos)
+            let mark = bookmark()
+            var placed = 0
+            var attempt = 0
+            while placed == 0 && attempt <= GPUGate.retries
+                  && !stopSignal.raisedNow {
+                if attempt > 0 {
+                    restore(mark)
+                    GPUGate.shared.backoff(attempt - 1)
+                    width = max(1, width / 4)
+                    gpuFault = false
                 }
-            } else {
-                forwardChunk(Array(ids[i ..< (i + n)]), soft,
-                             Array(blocks[i ..< (i + n)]))
+                placed = chunkAt(i, ids, blocks, width, softAt)
+                attempt += 1
             }
-            if !gpuFault { pos += n }
-            i += n
+            i += placed
         }
         Diag.memory?("prefill done at pos \(pos)")
         return gpuFault ? 0 : pick(logits())
+    }
+
+    private func chunkAt(_ i: Int, _ ids: [Int32], _ blocks: [(Int, Int)],
+                         _ width: Int,
+                         _ softAt: (Int, Int32) -> [Float]?) -> Int {
+        let B = min(batch, width)
+        let n = B > 1 ? chunk(blocks, at: i, want: min(B, ids.count - i)) : 1
+        var soft: [Int: [Float]] = [:]
+        for j in 0..<n {
+            if let feature = softAt(i + j, ids[i + j]) { soft[j] = feature }
+        }
+        if n == 1 {
+            if let feature = soft[0] {
+                forward(embedding: feature, pos: pos)
+            } else {
+                forward(token: Int(ids[i]), pos: pos)
+            }
+        } else {
+            forwardChunk(Array(ids[i ..< (i + n)]), soft,
+                         Array(blocks[i ..< (i + n)]))
+        }
+        if !gpuFault { pos += n }
+        return gpuFault ? 0 : n
     }
 
     private func chunk(_ blocks: [(Int, Int)], at i: Int, want: Int) -> Int {

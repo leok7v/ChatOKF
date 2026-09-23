@@ -4,34 +4,42 @@ import XCTest
 final class GPUGateTests: XCTestCase {
 
     override func tearDown() {
-        GPUGate.shared.simulate(thermal: nil, faultEvery: 0)
+        GPUGate.shared.simulate(thermal: nil, faultRate: 0)
     }
 
     func testTheChunkCapFollowsTheThermalState() {
         let gate = GPUGate.shared
-        gate.simulate(thermal: .nominal, faultEvery: 0)
+        gate.simulate(thermal: .nominal, faultRate: 0)
         XCTAssertEqual(gate.chunkCap(512), 512)
         XCTAssertFalse(gate.hot)
-        gate.simulate(thermal: .fair, faultEvery: 0)
+        gate.simulate(thermal: .fair, faultRate: 0)
         XCTAssertEqual(gate.chunkCap(512), 512)
-        gate.simulate(thermal: .serious, faultEvery: 0)
+        gate.simulate(thermal: .serious, faultRate: 0)
         XCTAssertEqual(gate.chunkCap(512), 128)
         XCTAssertEqual(gate.chunkCap(32), 32)
         XCTAssertTrue(gate.hot)
-        gate.simulate(thermal: .critical, faultEvery: 0)
+        gate.simulate(thermal: .critical, faultRate: 0)
         XCTAssertEqual(gate.chunkCap(512), 32)
         XCTAssertTrue(gate.hot)
     }
 
-    func testAStagedFaultFailsEveryNthVerdict() {
+    func testTheStagedRateFailsThatFractionAndReplaysFromTheSeed() {
         let gate = GPUGate.shared
-        gate.simulate(thermal: nil, faultEvery: 3)
-        XCTAssertTrue(gate.verdict([], "one"))
-        XCTAssertTrue(gate.verdict([], "two"))
-        XCTAssertFalse(gate.verdict([], "three"))
-        XCTAssertTrue(gate.verdict([], "four"))
-        gate.simulate(thermal: nil, faultEvery: 0)
-        XCTAssertTrue(gate.verdict([], "five"))
+        gate.simulate(thermal: nil, faultRate: 1)
+        XCTAssertFalse(gate.verdict([], "always"))
+        gate.simulate(thermal: nil, faultRate: 0)
+        XCTAssertTrue(gate.verdict([], "never"))
+        func failures(_ seed: UInt64) -> Int {
+            gate.simulate(thermal: nil, faultRate: 0.25, seed: seed)
+            var out = 0
+            for i in 0..<400 where !gate.verdict([], "\(i)") { out += 1 }
+            return out
+        }
+        let first = failures(7)
+        XCTAssertEqual(first, failures(7), "the seed replays the run")
+        XCTAssertGreaterThan(first, 60)
+        XCTAssertLessThan(first, 140)
+        gate.simulate(thermal: nil, faultRate: 0)
     }
 
     func testTheKnobSpellingsParse() {

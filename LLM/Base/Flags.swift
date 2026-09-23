@@ -177,9 +177,14 @@ public enum Flags {
             "nominal | fair | serious | critical: the thermal state the GPU "
             + "gate paces by, in place of the device's",
             scope: .diagnostic, defaultValue: ""),
-        Knob(name: "gpu-fault", takesValue: true, help:
-            "every Nth command buffer is reported as failed, to drive the "
-            + "retry and the cancel on a cool device; 0 off",
+        Knob(name: "gpu-contender", takesValue: true, help:
+            "background lanes that hammer the GPU on their own queue, to "
+            + "provoke the interactivity abort a long buffer earns; 0 off, "
+            + "8 at most", scope: .diagnostic, defaultValue: "0"),
+        Knob(name: "gpu-fault-rate", takesValue: true, help:
+            "the fraction of command buffers reported as failed, drawn from "
+            + "the --seed generator, to drive the retry and the cancel on a "
+            + "cool device; 0 off, 1 fails every one",
             scope: .diagnostic, defaultValue: "0"),
     ]
 

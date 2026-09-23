@@ -50,6 +50,7 @@ public final class QwenMetalEngine {
         self.pageP = pageP
         ctx = try MetalContext(model.gguf)
         try ctx.prewarm()
+        GPUContender.shared.start(ctx)
         let c = cfg
         bx = ctx.makeF32(c.nEmbd)
         bNormed = ctx.makeF32(c.nEmbd)
@@ -222,23 +223,8 @@ public final class QwenMetalEngine {
         // A prior turn's Stop must not kill this one.
         stopSignal.clear()
         specQueue.removeAll()
-        let mark = bookmark()
-        var chunk = GPUGate.shared.chunkCap(defaultChunk)
-        var attempt = 0
-        var out: Int32 = 0
-        var done = false
-        while !done {
-            gpuFault = false
-            out = ids.count > 1 ? prefillBatch(ids, chunk: chunk)
-                                : prefillOne(ids)
-            done = !gpuFault || attempt >= GPUGate.retries
-            if !done {
-                restore(mark)
-                GPUGate.shared.backoff(attempt)
-                chunk = max(8, chunk / 4)
-                attempt += 1
-            }
-        }
+        gpuFault = false
+        let out = ids.count > 1 ? prefillBatch(ids) : prefillOne(ids)
         if gpuFault { stopSignal.raise() }
         return out
     }
@@ -398,7 +384,7 @@ public final class QwenMetalEngine {
     }
 
     func prefillBatch(_ ids: [Int32], chunk c0: Int? = nil) -> Int32 {
-        let chunk = c0 ?? defaultChunk
+        var chunk = GPUGate.shared.chunkCap(c0 ?? defaultChunk)
         let c = cfg
         var out: Int32 = 0
         // One scratch set sized to the largest chunk; each chunk is its own
@@ -412,33 +398,48 @@ public final class QwenMetalEngine {
                                            options: .storageModeShared)!
         var i = 0
         while i < ids.count && !stopSignal.raisedNow && !gpuFault {
-            let end = min(i + chunk, ids.count)
-            let N = end - i
-            let basePos = pos
-            idsBuf.contents().withMemoryRebound(to: Int32.self, capacity: N) {
-                p in
-                for k in 0..<N { p[k] = ids[i + k] }
-            }
-            let cb = ctx.queue.makeCommandBuffer()!
-            let e = cb.makeComputeCommandEncoder(dispatchType: .concurrent)!
-            let f = MetalEnc(ctx: ctx, e: e, concurrent: true)
-            f.embedBatch(ids: idsBuf, weightOff: off(model.tokEmbd),
-                         out: b.x, nEmbd: c.nEmbd, N: N,
-                         type: model.tokEmbd.type)
-            encodeDrafterInput(f, x: b.x, N: N, seed)
-            encodeChunk(f, b, N: N, basePos: basePos, pos3: nil)
-            encodeDrafterSeed(f, hidden: b.normed, N: N, basePos: basePos,
-                              seed)
-            e.endEncoding()
-            commitTimed(cb, "prefillBatch")
-            if !gpuFault {
-                pos += N
-                keepPrev(b.normed, row: N - 1)
-                if end == ids.count {
-                    out = pick(Array(bLogits.f32(c.nVocab)))
+            let mark = bookmark()
+            var placed = 0
+            var attempt = 0
+            while placed == 0 && attempt <= GPUGate.retries
+                  && !stopSignal.raisedNow {
+                if attempt > 0 {
+                    restore(mark)
+                    GPUGate.shared.backoff(attempt - 1)
+                    chunk = max(8, chunk / 4)
+                    gpuFault = false
                 }
+                let end = min(i + chunk, ids.count)
+                let N = end - i
+                let basePos = pos
+                idsBuf.contents().withMemoryRebound(to: Int32.self,
+                                                    capacity: N) { p in
+                    for k in 0..<N { p[k] = ids[i + k] }
+                }
+                let cb = ctx.queue.makeCommandBuffer()!
+                let e = cb.makeComputeCommandEncoder(
+                    dispatchType: .concurrent)!
+                let f = MetalEnc(ctx: ctx, e: e, concurrent: true)
+                f.embedBatch(ids: idsBuf, weightOff: off(model.tokEmbd),
+                             out: b.x, nEmbd: c.nEmbd, N: N,
+                             type: model.tokEmbd.type)
+                encodeDrafterInput(f, x: b.x, N: N, seed)
+                encodeChunk(f, b, N: N, basePos: basePos, pos3: nil)
+                encodeDrafterSeed(f, hidden: b.normed, N: N, basePos: basePos,
+                                  seed)
+                e.endEncoding()
+                commitTimed(cb, "prefillBatch")
+                if !gpuFault {
+                    pos += N
+                    keepPrev(b.normed, row: N - 1)
+                    if end == ids.count {
+                        out = pick(Array(bLogits.f32(c.nVocab)))
+                    }
+                    placed = N
+                }
+                attempt += 1
             }
-            i = end
+            i += placed
         }
         return out
     }
@@ -500,58 +501,84 @@ public final class QwenMetalEngine {
         }
         let pos3Buf = ctx.device.makeBuffer(length: capN * 3 * 4,
                                             options: .storageModeShared)!
+        var width = GPUGate.shared.chunkCap(chunk)
         var out: Int32 = 0
         var i = 0
         while i < ids.count && !stopSignal.raisedNow && !gpuFault {
-            let end = min(i + chunk, ids.count)
-            let N = end - i
-            let basePos = pos
-            let xp = b.x.contents().assumingMemoryBound(to: Float.self)
-            for k in 0..<N {
-                let g = i + k
-                var img = -1
-                for (j, s) in spans.enumerated()
-                where g >= s.start
-                    && g < s.start + feats[j].count / c.nEmbd { img = j }
-                if img >= 0 {
-                    feats[img].withUnsafeBufferPointer { fp in
-                        _ = memcpy(xp + k * c.nEmbd,
-                                   fp.baseAddress!
-                                       + (g - spans[img].start) * c.nEmbd,
-                                   c.nEmbd * 4)
+            let mark = bookmark()
+            var placed = 0
+            var attempt = 0
+            while placed == 0 && attempt <= GPUGate.retries
+                  && !stopSignal.raisedNow {
+                if attempt > 0 {
+                    restore(mark)
+                    GPUGate.shared.backoff(attempt - 1)
+                    width = max(8, width / 4)
+                    gpuFault = false
+                }
+                let N = min(width, ids.count - i)
+                visionChunk(b, seed, pos3Buf, ids, feats, spans, plan.pos,
+                            from: i, N: N)
+                if !gpuFault {
+                    if i + N == ids.count {
+                        out = pick(Array(bLogits.f32(c.nVocab)))
                     }
-                } else {
-                    QB.dequant(model.tokEmbd, row: Int(ids[g]),
-                               count: c.nEmbd, into: xp + k * c.nEmbd)
+                    placed = N
                 }
+                attempt += 1
             }
-            let pp = pos3Buf.contents().assumingMemoryBound(to: Int32.self)
-            for k in 0..<N {
-                let p = plan.pos[i + k]
-                pp[k * 3] = p.0
-                pp[k * 3 + 1] = p.1
-                pp[k * 3 + 2] = p.2
-            }
-            let cb = ctx.queue.makeCommandBuffer()!
-            let e = cb.makeComputeCommandEncoder(dispatchType: .concurrent)!
-            let f = MetalEnc(ctx: ctx, e: e, concurrent: true)
-            encodeDrafterInput(f, x: b.x, N: N, seed)
-            encodeChunk(f, b, N: N, basePos: basePos, pos3: pos3Buf)
-            encodeDrafterSeed(f, hidden: b.normed, N: N, basePos: basePos,
-                              seed)
-            e.endEncoding()
-            commitTimed(cb, "prefillVision")
-            if !gpuFault {
-                pos += N
-                keepPrev(b.normed, row: N - 1)
-                if end == ids.count {
-                    out = pick(Array(bLogits.f32(c.nVocab)))
-                }
-            }
-            i = end
+            i += placed
         }
         if gpuFault { stopSignal.raise() }
         return out
+    }
+
+    private func visionChunk(_ b: BatchScratch, _ seed: QwenMTPSeedScratch?,
+                             _ pos3Buf: MTLBuffer, _ ids: [Int32],
+                             _ feats: [[Float]],
+                             _ spans: [(start: Int, gh: Int, gw: Int)],
+                             _ plan: [(Int32, Int32, Int32)],
+                             from i: Int, N: Int) {
+        let c = cfg
+        let basePos = pos
+        let xp = b.x.contents().assumingMemoryBound(to: Float.self)
+        for k in 0..<N {
+            let g = i + k
+            var img = -1
+            for (j, s) in spans.enumerated()
+            where g >= s.start
+                && g < s.start + feats[j].count / c.nEmbd { img = j }
+            if img >= 0 {
+                feats[img].withUnsafeBufferPointer { fp in
+                    _ = memcpy(xp + k * c.nEmbd,
+                               fp.baseAddress!
+                                   + (g - spans[img].start) * c.nEmbd,
+                               c.nEmbd * 4)
+                }
+            } else {
+                QB.dequant(model.tokEmbd, row: Int(ids[g]),
+                           count: c.nEmbd, into: xp + k * c.nEmbd)
+            }
+        }
+        let pp = pos3Buf.contents().assumingMemoryBound(to: Int32.self)
+        for k in 0..<N {
+            let p = plan[i + k]
+            pp[k * 3] = p.0
+            pp[k * 3 + 1] = p.1
+            pp[k * 3 + 2] = p.2
+        }
+        let cb = ctx.queue.makeCommandBuffer()!
+        let e = cb.makeComputeCommandEncoder(dispatchType: .concurrent)!
+        let f = MetalEnc(ctx: ctx, e: e, concurrent: true)
+        encodeDrafterInput(f, x: b.x, N: N, seed)
+        encodeChunk(f, b, N: N, basePos: basePos, pos3: pos3Buf)
+        encodeDrafterSeed(f, hidden: b.normed, N: N, basePos: basePos, seed)
+        e.endEncoding()
+        commitTimed(cb, "prefillVision")
+        if !gpuFault {
+            pos += N
+            keepPrev(b.normed, row: N - 1)
+        }
     }
 
     private func gdnBatch(_ f: MetalEnc, _ L: QwenLayer, _ il: Int,
