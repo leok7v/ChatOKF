@@ -169,6 +169,7 @@ public final class GPUContender: @unchecked Sendable {
     static let maxLanes = 8
     private let lock = NSLock()
     private var lanes = 0
+    private var context: MetalContext?
 
     private var live: Bool {
         lock.lock()
@@ -187,31 +188,39 @@ public final class GPUContender: @unchecked Sendable {
                          GPUContender.maxLanes)
         lock.lock()
         let fresh = wanted > 0 && lanes == 0
-        if fresh { lanes = wanted }
+        if fresh {
+            lanes = wanted
+            context = ctx
+        }
         lock.unlock()
         if fresh {
             Diag.shared.report(.load, "[gpu] \(wanted) contender lane(s) "
                 + "on their own queue")
             for _ in 0..<wanted {
-                Thread.detachNewThread { [weak self] in self?.spin(ctx) }
+                Thread.detachNewThread { [weak self] in self?.spin() }
             }
         }
     }
 
-    private func spin(_ ctx: MetalContext) {
-        let queue = ctx.device.makeCommandQueue()
-        let width = 1 << 16
-        let a = ctx.makeF32(width)
-        let b = ctx.makeF32(width)
-        while live {
-            if BackgroundGate.shared.parked {
-                Thread.sleep(forTimeInterval: 0.25)
-            } else if let cb = queue?.makeCommandBuffer(),
-                      let e = cb.makeComputeCommandEncoder() {
-                MetalEnc(ctx: ctx, e: e).add(x: a, y: b, n: width)
-                e.endEncoding()
-                cb.commit()
-                cb.waitUntilCompleted()
+    private func spin() {
+        lock.lock()
+        let held = context
+        lock.unlock()
+        if let ctx = held {
+            let queue = ctx.device.makeCommandQueue()
+            let width = 1 << 16
+            let a = ctx.makeF32(width)
+            let b = ctx.makeF32(width)
+            while live {
+                if BackgroundGate.shared.parked {
+                    Thread.sleep(forTimeInterval: 0.25)
+                } else if let cb = queue?.makeCommandBuffer(),
+                          let e = cb.makeComputeCommandEncoder() {
+                    MetalEnc(ctx: ctx, e: e).add(x: a, y: b, n: width)
+                    e.endEncoding()
+                    cb.commit()
+                    cb.waitUntilCompleted()
+                }
             }
         }
     }
