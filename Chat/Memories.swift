@@ -28,6 +28,65 @@ import Observation
         let seconds: Double
     }
 
+    private struct Asked: @unchecked Sendable {
+        let store: Store
+        let queries: [String]
+        let limit: Int
+        var filter = Filter()
+    }
+
+    private struct Searched: @unchecked Sendable {
+        let result: SearchResult
+        let seconds: Double
+    }
+
+    nonisolated static let storeLock = NSLock()
+
+    nonisolated static func locked<T>(_ body: () throws -> T) rethrows -> T {
+        storeLock.lock()
+        defer { storeLock.unlock() }
+        return try body()
+    }
+
+    private struct Boxed<T>: @unchecked Sendable {
+        let body: () -> T
+    }
+
+    private struct Risky<T>: @unchecked Sendable {
+        let body: () throws -> T
+    }
+
+    private struct Held<T>: @unchecked Sendable {
+        let value: T
+    }
+
+    nonisolated private static func offMain<T>(_ boxed: Boxed<T>) async -> T {
+        let held = await Task.detached(priority: .userInitiated) {
+            Held(value: Memories.locked { boxed.body() })
+        }.value
+        return held.value
+    }
+
+    nonisolated private static func written<T>(_ boxed: Risky<T>) async throws
+        -> T {
+        let held = try await Task.detached(priority: .userInitiated) {
+            try Held(value: Memories.locked { try boxed.body() })
+        }.value
+        return held.value
+    }
+
+    nonisolated private static func searched(_ ask: Asked) async -> Searched {
+        await Task.detached(priority: .userInitiated) {
+            let began = Date()
+            let result = Memories.locked {
+                ask.store.search(ask.queries, filter: ask.filter,
+                                 limit: ask.limit)
+            }
+            return Searched(result: result,
+                            seconds: Date().timeIntervalSince(began))
+        }.value
+    }
+
     public static let folder = "memories.noindex"
     static let enabledKey = "totalRecall"
     static let backupKey = "backupMemories"
@@ -167,16 +226,17 @@ import Observation
     }
 
     public func recall(_ question: String, also: [String], pp: Double,
-                       excluding read: Set<String>) -> Recall? {
+                       excluding read: Set<String>) async -> Recall? {
         var out: Recall? = nil
         if let store, let embedder, !store.concepts.isEmpty {
             let queries = [question] + also.filter { text in
                 !text.isEmpty
             }
-            let began = Date()
-            let result = store.search(queries, filter: Filter(),
-                                      limit: Memories.recallLimit + read.count)
-            let searched = Date().timeIntervalSince(began)
+            let found = await Memories.searched(Asked(
+                store: store, queries: queries,
+                limit: Memories.recallLimit + read.count))
+            let result = found.result
+            let searched = found.seconds
             let fresh = result.hits.filter { hit in
                 !read.contains(hit.concept.id) && store.relevant(hit)
             }.prefix(Memories.recallLimit)
@@ -329,13 +389,14 @@ import Observation
         public let seconds: Double
     }
 
-    public func coverage(_ text: String) -> Coverage {
+    public func coverage(_ text: String) async -> Coverage {
         var covered = false
         var known: [(id: String, title: String)] = []
         let began = Date()
         if let store, !store.concepts.isEmpty {
-            let result = store.search([text], filter: Filter(),
-                                      limit: Memories.recallLimit)
+            let result = await Memories.searched(Asked(
+                store: store, queries: [text],
+                limit: Memories.recallLimit)).result
             covered = store.confident(result)
             known = result.hits.filter { hit in store.relevant(hit) }
                 .map { hit in (hit.concept.id, hit.concept.title) }
@@ -403,7 +464,7 @@ import Observation
 
     public func remember(_ drafts: [Draft], said: String,
                          source: UUID?, excluding seen: Set<String>)
-        -> [Remembered] {
+        async -> [Remembered] {
         var out: [Remembered] = []
         if let store {
             for draft in drafts where !Memories.grounded(draft, in: said) {
@@ -412,16 +473,20 @@ import Observation
             }
             for draft in drafts where Memories.grounded(draft, in: said) {
                 var id = draft.id
-                if store.concept(id) == nil,
-                   let same = store.duplicate(
-                       title: draft.title, description: draft.description,
-                       tags: draft.tags, type: draft.type) {
+                let same = await Memories.offMain(Boxed {
+                    store.concept(id) == nil ? store.duplicate(
+                        title: draft.title, description: draft.description,
+                        tags: draft.tags, type: draft.type) : nil
+                })
+                if let same {
                     Diag.shared.report(.turn, String(
                         format: "[extract] %@ restates %@ (%.3f)", draft.id,
                         same.id, same.score))
                     id = same.id
                 }
-                let existing = store.concept(id)
+                let existing = await Memories.offMain(Boxed {
+                    store.concept(id)
+                })
                 var lines = [Memories.generatedLine(modelName)]
                 if let source {
                     lines += ["sources:",
@@ -431,18 +496,20 @@ import Observation
                 var wrote: URL? = nil
                 if existing?.trust != .human, !seen.contains(id),
                    !seenIds.contains(id) {
-                    wrote = try? store.write(
-                        id: id, type: draft.type, title: draft.title,
-                        description: draft.description, tags: draft.tags,
-                        body: draft.body, status: "",
-                        adding: existing == nil ? lines : [])
+                    wrote = await Memories.offMain(Boxed {
+                        try? store.write(
+                            id: id, type: draft.type, title: draft.title,
+                            description: draft.description, tags: draft.tags,
+                            body: draft.body, status: "",
+                            adding: existing == nil ? lines : [])
+                    })
                 }
                 if wrote != nil {
                     out.append(Remembered(id: id, title: draft.title))
                 }
             }
             if !out.isEmpty {
-                store.load()
+                await Memories.offMain(Boxed { store.load() })
                 refresh()
             }
         }
@@ -456,7 +523,7 @@ import Observation
 
     public var modelName = "model"
 
-    func tool(_ name: String, _ args: [ToolArg]) -> String {
+    func tool(_ name: String, _ args: [ToolArg]) async -> String {
         var out = "error: memories are not open"
         if let store {
             switch name {
@@ -468,8 +535,9 @@ import Observation
                 if queries[0].isEmpty {
                     out = "error: memory_search needs a query"
                 } else {
-                    let found = store.search(queries, filter: filter,
-                                             limit: max(1, limit))
+                    let found = await Memories.searched(Asked(
+                        store: store, queries: queries,
+                        limit: max(1, limit), filter: filter)).result
                     let shown = found.hits.filter { hit in
                         store.relevant(hit)
                     }
@@ -490,9 +558,9 @@ import Observation
                     out = "error: no such note: " + id
                 }
             case "memory_create", "memory_update":
-                out = save(name == "memory_update", args)
+                out = await save(name == "memory_update", args)
             case "memory_forget":
-                out = retire(MemoryTools.arg(args, "id") ?? "")
+                out = await retire(MemoryTools.arg(args, "id") ?? "")
             default:
                 out = "error: no tool named " + name
             }
@@ -517,7 +585,7 @@ import Observation
         return out
     }
 
-    private func save(_ existing: Bool, _ args: [ToolArg]) -> String {
+    private func save(_ existing: Bool, _ args: [ToolArg]) async -> String {
         let id = MemoryTools.arg(args, "id") ?? ""
         let found = store?.concept(id) != nil
         var out = ""
@@ -532,24 +600,28 @@ import Observation
             let title = MemoryTools.arg(args, "title") ?? id
             let description = MemoryTools.arg(args, "description") ?? ""
             let tags = MemoryTools.list(MemoryTools.arg(args, "tags"), ",")
-            let same = found ? nil : store.duplicate(
-                title: title, description: description, tags: tags,
-                type: type)
+            let same = found ? nil : await Memories.offMain(Boxed {
+                store.duplicate(title: title, description: description,
+                                tags: tags, type: type)
+            })
             if let same {
                 out = id + " restates " + same.id + " ("
                     + (store.concept(same.id)?.title ?? "") + "); "
                     + "memory_read it, and memory_update it only if this "
                     + "adds something new\n"
             } else {
+                let stamp = Memories.generatedLine(modelName)
                 do {
-                    _ = try store.write(
-                        id: id, type: type, title: title,
-                        description: description, tags: tags,
-                        body: MemoryTools.arg(args, "body") ?? "",
-                        status: "",
-                        adding: [Memories.generatedLine(modelName)],
-                        dropping: found ? ["generated", "verified"] : [])
-                    store.load()
+                    _ = try await Memories.written(Risky {
+                        try store.write(
+                            id: id, type: type, title: title,
+                            description: description, tags: tags,
+                            body: MemoryTools.arg(args, "body") ?? "",
+                            status: "",
+                            adding: [stamp],
+                            dropping: found ? ["generated", "verified"] : [])
+                    })
+                    await Memories.offMain(Boxed { store.load() })
                     refresh()
                     seenIds.insert(id)
                     noted.removeAll { note in note.id == id }
@@ -563,12 +635,14 @@ import Observation
         return out
     }
 
-    private func retire(_ id: String) -> String {
+    private func retire(_ id: String) async -> String {
         var out = "error: memories are not open"
         if let store {
             do {
-                let referrers = try store.deprecate(id: id)
-                store.load()
+                let referrers = try await Memories.written(Risky {
+                    try store.deprecate(id: id)
+                })
+                await Memories.offMain(Boxed { store.load() })
                 refresh()
                 out = StoreText.retired(store, id: id, referrers: referrers)
             } catch {

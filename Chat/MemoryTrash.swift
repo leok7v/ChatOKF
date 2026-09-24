@@ -76,7 +76,7 @@ extension Memories {
 
     public func trash(_ id: String) {
         if let store, let concept = store.concept(id) {
-            let cuts = (try? store.unlink(id)) ?? []
+            let cuts = Memories.locked { (try? store.unlink(id)) ?? [] }
             let row = Memories.row(concept)
             let to = trashURL(id)
             let fm = FileManager.default
@@ -95,7 +95,7 @@ extension Memories {
                                       markup: cut.markup, label: cut.label)
                 }))
             writeTrash(kept)
-            store.load()
+            Memories.locked { store.load() }
             refresh()
             Diag.shared.report(.turn, "[memories] trashed \(id), "
                 + "\(cuts.count) link(s) collapsed")
@@ -110,12 +110,14 @@ extension Memories {
             try? fm.createDirectory(at: to.deletingLastPathComponent(),
                                     withIntermediateDirectories: true)
             try? fm.moveItem(at: trashURL(id), to: to)
-            store.relink(entry.unlinked.map { cut in
-                RemovedLink(referrer: cut.referrer, markup: cut.markup,
-                            label: cut.label)
-            })
+            Memories.locked {
+                store.relink(entry.unlinked.map { cut in
+                    RemovedLink(referrer: cut.referrer, markup: cut.markup,
+                                label: cut.label)
+                })
+            }
             writeTrash(kept.filter { e in e.id != id })
-            store.load()
+            Memories.locked { store.load() }
             refresh()
         }
     }

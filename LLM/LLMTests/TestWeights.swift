@@ -23,9 +23,12 @@ enum TestWeights {
 
     static let clones = [home + "/huggingface.co", home + "/Models"]
 
+    static let skipped = ProcessInfo.processInfo
+        .environment["CHATOKF_SKIP_WEIGHTS"] == "1"
+
     static func find(_ name: String) -> String? {
         var out: String? = nil
-        if let src = ModelCatalog.source(name),
+        if !skipped, let src = ModelCatalog.source(name),
            let file = ModelCatalog.ggufFiles[name] {
             for store in stores where out == nil {
                 if let set = ModelCatalog.localSet(name, in: store),

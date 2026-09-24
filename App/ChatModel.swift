@@ -1896,7 +1896,7 @@ import UniformTypeIdentifiers
 
     private func sendText() {
         let raw = input
-        var prompt = promptFor(raw)
+        let prompt = promptFor(raw)
         let display = AttachmentRefs.stripped(raw)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         if !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
@@ -1908,7 +1908,20 @@ import UniformTypeIdentifiers
             let docs = Session.refs(attachedDocs)
             let stoppable = ChatModel.stoppableSpan(prompt, attachedDocs)
             attachedDocs = []
-            let recall = session.recall(display, also: [generatedTitle ?? ""])
+            Task { [weak self] in
+                await self?.sendRecalled(prompt: prompt, display: display,
+                                         docs: docs, stoppable: stoppable,
+                                         stage: stage)
+            }
+        }
+    }
+
+    private func sendRecalled(prompt: String, display: String,
+                              docs: [DocRef], stoppable: String?,
+                              stage: Whimsical.Stage) async {
+        let recall = await session.recall(display,
+                                          also: [generatedTitle ?? ""])
+        if canRunTurn {
             if let recall, !recall.silent {
                 let notes = zip(recall.ids, zip(recall.titles,
                                                 recall.readSeconds))
@@ -1919,8 +1932,8 @@ import UniformTypeIdentifiers
                                     docs: docs, stoppable: stoppable,
                                     stage: stage, notes: notes)
             } else {
-                if let recall { prompt = recall.block + prompt }
-                submitText(prompt: prompt, display: display, docs: docs,
+                let text = recall.map { r in r.block + prompt } ?? prompt
+                submitText(prompt: text, display: display, docs: docs,
                            stoppable: stoppable, stage: stage)
             }
         }

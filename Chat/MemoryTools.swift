@@ -15,7 +15,7 @@ public struct MemoryToolRunner: ToolRunner {
     public func execute(_ name: String, _ args: [ToolArg]) async -> String {
         var out = ""
         if name.hasPrefix("memory_") {
-            out = await MainActor.run { memories.tool(name, args) }
+            out = await memories.tool(name, args)
         } else {
             out = await inner.execute(name, args)
         }

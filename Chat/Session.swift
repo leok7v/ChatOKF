@@ -320,11 +320,12 @@ public enum TurnEvent: Sendable {
         recordRate(Session.ppKey(modelName), pp)
     }
 
-    public func recall(_ question: String, also: [String]) -> Memories.Recall? {
+    public func recall(_ question: String, also: [String]) async
+        -> Memories.Recall? {
         var out: Memories.Recall? = nil
         if memories.active {
-            let found = memories.recall(question, also: also,
-                                        pp: measuredPP, excluding: recalledIds)
+            let found = await memories.recall(
+                question, also: also, pp: measuredPP, excluding: recalledIds)
             if let found {
                 Diag.shared.report(.turn, String(
                     format: "[recall] %@ %d note(s), standout %.1f, ~%d tok "
@@ -988,7 +989,7 @@ public enum TurnEvent: Sendable {
         -> [Memories.Remembered] {
         var out: [Memories.Remembered] = []
         if let session, memories.active, memories.isOpen {
-            let coverage = memories.coverage(extraction.exchange)
+            let coverage = await memories.coverage(extraction.exchange)
             if coverage.covered {
                 Diag.shared.report(.turn, String(
                     format: "[extract] covered by the store, skipped, "
@@ -998,9 +999,10 @@ public enum TurnEvent: Sendable {
                 let raw = await session.extractNotes(
                     Memories.extractionInstruction(known: coverage.known))
                 let drafts = Memories.parseDrafts(raw)
-                out = memories.remember(drafts, said: extraction.said,
-                                        source: extraction.conversation,
-                                        excluding: recalledIds)
+                out = await memories.remember(
+                    drafts, said: extraction.said,
+                    source: extraction.conversation,
+                    excluding: recalledIds)
                 Diag.shared.report(.turn, String(
                     format: "[extract] %d draft(s) of %d parsed from %d "
                         + "chars in %.1fs, searched %.2fs: %@", out.count,

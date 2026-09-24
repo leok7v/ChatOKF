@@ -1,22 +1,36 @@
-import AVKit
+import AVFoundation
 import SwiftUI
+import UIKit
 
-struct ClipSurface: UIViewControllerRepresentable {
+final class ClipView: UIView {
+
+    override class var layerClass: AnyClass { AVPlayerLayer.self }
+
+    private var playerLayer: AVPlayerLayer? { layer as? AVPlayerLayer }
+
+    var player: AVPlayer? {
+        get { playerLayer?.player }
+        set { playerLayer?.player = newValue }
+    }
+
+    var gravity: AVLayerVideoGravity {
+        get { playerLayer?.videoGravity ?? .resizeAspect }
+        set { playerLayer?.videoGravity = newValue }
+    }
+}
+
+struct ClipSurface: UIViewRepresentable {
 
     let player: AVPlayer?
 
-    func makeUIViewController(context: Context) -> AVPlayerViewController {
-        let view = AVPlayerViewController()
-        view.showsPlaybackControls = false
-        view.canStartPictureInPictureAutomaticallyFromInline = false
-        view.updatesNowPlayingInfoCenter = false
-        view.videoGravity = .resizeAspect
+    func makeUIView(context: Context) -> ClipView {
+        let view = ClipView()
+        view.gravity = .resizeAspect
         view.player = player
         return view
     }
 
-    func updateUIViewController(_ view: AVPlayerViewController,
-                                context: Context) {
+    func updateUIView(_ view: ClipView, context: Context) {
         if view.player !== player { view.player = player }
     }
 

@@ -302,3 +302,22 @@ schemes:
         "--speech-floor 3": false
     archive:
       config: Release
+  # Everything that does not need a model on disk. Measured 2026-09-24:
+  # StoreReferenceTests 179.8s, PplitTests 25.0s, CalibrationTests ~100s,
+  # against about 6s for the other 277 tests. The gate for a change that
+  # touches neither the engine nor the embedder.
+  ChatOKF-light:
+    build:
+      targets:
+        ChatOKF: all
+        ChatOKFTests: [test]
+        LLMTests: [test]
+        MDTests: [test]
+    test:
+      config: Debug
+      environmentVariables:
+        CHATOKF_SKIP_WEIGHTS: "1"
+      targets:
+        - ChatOKFTests
+        - LLMTests
+        - MDTests

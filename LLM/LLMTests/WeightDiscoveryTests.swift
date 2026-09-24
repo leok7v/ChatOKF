@@ -21,7 +21,7 @@ final class WeightDiscoveryTests: XCTestCase {
             FileManager.default.isReadableFile(
                 atPath: root + "/" + src.repo + "/" + file)
         }
-        if cloned {
+        if cloned, !TestWeights.skipped {
             XCTAssertNotNil(gemmaGgufPath,
                             "the clone is present but discovery missed it")
         }

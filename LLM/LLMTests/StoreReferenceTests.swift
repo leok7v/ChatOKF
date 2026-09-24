@@ -10,6 +10,9 @@ final class StoreReferenceTests: XCTestCase {
     static let sidecar = ".okf-vectors-multilingual-e5-small.bin"
 
     private func embedder() throws -> BertEmbedder {
+        guard !TestWeights.skipped else {
+            throw XCTSkip("CHATOKF_SKIP_WEIGHTS: embedder ladders skipped")
+        }
         guard let url = BertEmbedder.bundledMultilingual,
               let loaded = BertEmbedder.load(ggufPath: url.path) else {
             throw XCTSkip("no bundled e5-small.gguf")
