@@ -1104,7 +1104,9 @@ struct ContentView: View {
         }
     }
 
-    private var answerColumn: CGFloat { 680 * textScale }
+    private var answerColumn: CGFloat {
+        isOS ? 680 * textScale : .infinity
+    }
 
     @ViewBuilder
     private func imageStrip(_ images: [CGImage]) -> some View {
