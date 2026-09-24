@@ -71,7 +71,7 @@ enum ImagePrefetch {
     // A table cell that is a lone image, decomposed to (url, width, height).
     static func imageInCell(_ cell: String) -> (URL, CGFloat?, CGFloat?)? {
         var result: (URL, CGFloat?, CGFloat?)? = nil
-        let parsed = Markdown.parse(cell)
+        let parsed = Markdown.parseCell(cell)
         if let first = parsed.items.first,
            case .image(_, let url, let w, let h) = first.block {
             result = (url, w, h)

@@ -33,6 +33,27 @@ extension Markdown {
         return Document(items: items)
     }
 
+    static let cellLock = NSLock()
+    nonisolated(unsafe) private static var cells: [String: Document] = [:]
+    private static let cellLimit = 4096
+
+    static func parseCell(_ cell: String) -> Document {
+        cellLock.lock()
+        let hit = cells[cell]
+        cellLock.unlock()
+        let result: Document
+        if let hit {
+            result = hit
+        } else {
+            result = parse(cell)
+            cellLock.lock()
+            if cells.count >= cellLimit { cells.removeAll() }
+            cells[cell] = result
+            cellLock.unlock()
+        }
+        return result
+    }
+
     // The shared block engine. Reads `currentRefs` for reference links.
     static func blocks(_ lines: [String]) -> [Block] {
         blockSpans(lines).map { pair in pair.block }

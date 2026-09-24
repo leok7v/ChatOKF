@@ -164,7 +164,7 @@ import Foundation
                                  style: MarkdownStyle) -> CGFloat {
         var widest: CGFloat = 0
         let drawn = NSMutableAttributedString()
-        if let block = Markdown.parse(cell).items.first?.block {
+        if let block = Markdown.parseCell(cell).items.first?.block {
             switch block {
                 case .image: break
                 default: fillCell(block, text: cell, base: font, style: style,
@@ -205,7 +205,7 @@ import Foundation
 
     private static func renderedText(of cell: String) -> String {
         var result = TeX.scriptsToUnicode(cell)
-        if let first = Markdown.parse(cell).items.first {
+        if let first = Markdown.parseCell(cell).items.first {
             switch first.block {
                 case .paragraph(let a): result = String(a.characters)
                 case .image: result = ""
@@ -283,7 +283,7 @@ import Foundation
     static func tableCell(_ text: String, base: PlatformFont,
                           style: MarkdownStyle,
                           images: [URL: PlatformImage]) -> NSAttributedString {
-        let parsed = Markdown.parse(text)
+        let parsed = Markdown.parseCell(text)
         let m = NSMutableAttributedString()
         if let first = parsed.items.first {
             fillCell(first.block, text: text, base: base, style: style,

@@ -359,23 +359,40 @@ enum TeX {
         return result
     }
 
-    // Longest-first, then lexicographic, so equal-length keys replace in a
-    // deterministic order.
-    private static func replaceTokens(_ s: String) -> String {
-        var out = s
-        let pairs = tokenMap.sorted { a, b in
+    private enum TokenRule {
+        case bounded(NSRegularExpression, String)
+        case literal(String, String)
+    }
+
+    private static let tokenRules: [TokenRule] = tokenMap
+        .sorted { a, b in
             a.key.count > b.key.count
                 || (a.key.count == b.key.count && a.key > b.key)
         }
-        for (k, v) in pairs { out = replaceToken(out, k, v) }
+        .compactMap { pair in tokenRule(pair.key, pair.value) }
+
+    private static func replaceTokens(_ s: String) -> String {
+        var out = s
+        for rule in tokenRules {
+            switch rule {
+                case .bounded(let re, let template):
+                    let ns = out as NSString
+                    out = re.stringByReplacingMatches(
+                        in: out,
+                        range: NSRange(location: 0, length: ns.length),
+                        withTemplate: template)
+                case .literal(let key, let value):
+                    out = out.replacingOccurrences(of: key, with: value)
+            }
+        }
         return out
     }
 
     // A control word ends where a non-letter begins, or \ne fires inside
     // \newcommand. Keys not ending in a letter have no boundary.
-    private static func replaceToken(_ s: String, _ key: String,
-                                     _ value: String) -> String {
-        var result = s
+    private static func tokenRule(_ key: String,
+                                  _ value: String) -> TokenRule? {
+        var result: TokenRule? = nil
         if let last = key.last, last.isLetter {
             let pattern = NSRegularExpression.escapedPattern(for: key)
                         + "(?![A-Za-z])"
@@ -385,14 +402,11 @@ enum TeX {
                 value.isEmpty ? [.caseInsensitive] : []
             if let re = try? NSRegularExpression(pattern: pattern,
                                                  options: folding) {
-                let ns = s as NSString
-                result = re.stringByReplacingMatches(
-                    in: s, range: NSRange(location: 0, length: ns.length),
-                    withTemplate:
-                        NSRegularExpression.escapedTemplate(for: value))
+                result = .bounded(
+                    re, NSRegularExpression.escapedTemplate(for: value))
             }
         } else {
-            result = s.replacingOccurrences(of: key, with: value)
+            result = .literal(key, value)
         }
         return result
     }
