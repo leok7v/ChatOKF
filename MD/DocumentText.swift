@@ -79,6 +79,13 @@ import Foundation
         FontRole.body(style.bodySize).platformFont
     }
 
+    static func blockParagraph(_ style: MarkdownStyle)
+        -> NSMutableParagraphStyle {
+        let para = NSMutableParagraphStyle()
+        para.paragraphSpacing = style.blockSpacing
+        return para
+    }
+
     // The narrowest this document can be drawn before a table or a formula is
     // asked for less room than its content can occupy.
     static func minimumWidth(of document: Markdown.Document,
@@ -361,13 +368,17 @@ import Foundation
         -> NSAttributedString {
         let m = NSMutableAttributedString()
         let indent = CGFloat(depth + 1) * 20
-        let para = NSMutableParagraphStyle()
-        para.headIndent = indent
-        para.firstLineHeadIndent = indent - 20
-        para.tabStops = [NSTextTab(textAlignment: .left, location: indent)]
-        para.paragraphSpacing = tight ? 2 : 8
-        para.paragraphSpacingBefore = tight ? 2 : 4
-        for item in items {
+        for (idx, item) in items.enumerated() {
+            let para = NSMutableParagraphStyle()
+            para.headIndent = indent
+            para.firstLineHeadIndent = indent - 20
+            para.tabStops = [NSTextTab(textAlignment: .left,
+                                       location: indent)]
+            para.paragraphSpacing = tight ? 2 : 8
+            para.paragraphSpacingBefore = tight ? 2 : 4
+            if idx == items.count - 1, depth == 0 {
+                para.paragraphSpacing = style.blockSpacing
+            }
             m.append(listItem(item, para: para, depth: depth,
                               style: style, images: images,
                               width: width - indent))
@@ -422,7 +433,9 @@ import Foundation
         m.addAttribute(atomicKindKey, value: AtomicKind.image.rawValue,
                        range: full)
         m.addAttribute(atomicIdKey, value: UUID().uuidString, range: full)
-        m.append(NSAttributedString(string: "\n\n"))
+        m.addAttribute(.paragraphStyle, value: blockParagraph(style),
+                       range: full)
+        m.append(NSAttributedString(string: "\n"))
         return m
     }
 
@@ -454,6 +467,8 @@ import Foundation
                        range: full)
         m.addAttribute(atomicIdKey, value: UUID().uuidString, range: full)
         m.addAttribute(atomicCopyKey, value: text, range: full)
+        m.addAttribute(.paragraphStyle, value: blockParagraph(style),
+                       range: full)
         m.append(NSAttributedString(string: "\n"))
         return m
     }
@@ -476,7 +491,7 @@ import Foundation
                        range: content)
         m.addAttribute(atomicIdKey, value: UUID().uuidString, range: content)
         m.addAttribute(atomicCopyKey, value: tex, range: content)
-        m.append(NSAttributedString(string: "\n\n"))
+        m.append(NSAttributedString(string: "\n"))
         let para = NSMutableParagraphStyle()
         para.alignment = .center
         para.paragraphSpacing = style.blockSpacing
@@ -490,7 +505,9 @@ import Foundation
                                   style: MarkdownStyle) -> NSAttributedString {
         let m = NSMutableAttributedString()
         translateInline(attr, base: bodyFont(style), style: style, into: m)
-        m.append(NSAttributedString(string: "\n\n"))
+        m.addAttribute(.paragraphStyle, value: blockParagraph(style),
+                       range: NSRange(location: 0, length: m.length))
+        m.append(NSAttributedString(string: "\n"))
         return m
     }
 
@@ -502,19 +519,20 @@ import Foundation
         translateInline(text, base: font, style: style, into: m)
         // A tight list ends with no blank line, so a heading right after it
         // needs its own spacing-before.
-        let para = NSMutableParagraphStyle()
+        let para = blockParagraph(style)
         para.paragraphSpacingBefore = style.blockSpacing
         m.addAttribute(.paragraphStyle, value: para,
                        range: NSRange(location: 0, length: m.length))
-        m.append(NSAttributedString(string: "\n\n"))
+        m.append(NSAttributedString(string: "\n"))
         return m
     }
 
     private static func rule(style: MarkdownStyle) -> NSAttributedString {
         NSAttributedString(
-            string: String(repeating: "\u{2500}", count: 8) + "\n\n",
+            string: String(repeating: "\u{2500}", count: 8) + "\n",
             attributes: [.font: bodyFont(style),
-                         .foregroundColor: platformSecondaryColor])
+                         .foregroundColor: platformSecondaryColor,
+                         .paragraphStyle: blockParagraph(style)])
     }
 
     static func translateInline(_ attr: AttributedString, base: PlatformFont,
