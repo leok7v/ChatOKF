@@ -607,6 +607,7 @@ import UniformTypeIdentifiers
         systemPrompt: UserDefaults.standard.string(forKey: "systemPrompt")
             ?? ChatModel.defaultSystemPrompt)
     var genTask: Task<Void, Never>?
+    var sendTask: Task<Void, Never>?
     private static let benchPrompt = Flags.value("bench-prompt") ?? ""
     private static let benchTokens = Flags.int("bench-tokens") ?? 128
     private static let benchCool = Flags.int("bench-cool") ?? 90
@@ -712,6 +713,7 @@ import UniformTypeIdentifiers
     }
 
     private func settled() async {
+        await sendTask?.value
         await genTask?.value
         while session.metaTaskRunning {
             try? await Task.sleep(for: .milliseconds(200))
@@ -795,6 +797,7 @@ import UniformTypeIdentifiers
         for arm in ["drafted", "plain"] {
             if arm == "plain" {
                 newChat()
+                await sendTask?.value
                 await genTask?.value
                 await session.awaitPrimed()
                 await session.pushSpeculation(false)
@@ -806,6 +809,7 @@ import UniformTypeIdentifiers
             input = text
             caret = input.utf16.count
             send()
+            await sendTask?.value
             await genTask?.value
             if let m = benchMetrics {
                 Diag.shared.report(String(
@@ -1908,10 +1912,11 @@ import UniformTypeIdentifiers
             let docs = Session.refs(attachedDocs)
             let stoppable = ChatModel.stoppableSpan(prompt, attachedDocs)
             attachedDocs = []
-            Task { [weak self] in
+            sendTask = Task { [weak self] in
                 await self?.sendRecalled(prompt: prompt, display: display,
                                          docs: docs, stoppable: stoppable,
                                          stage: stage)
+                self?.sendTask = nil
             }
         }
     }
