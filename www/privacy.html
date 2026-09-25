@@ -229,7 +229,7 @@ footer .sp { margin-left: auto; }
   <p class="lede">ChatOKF runs its language models entirely on your device.
   Your conversations are never sent to any server, because there is no
   server to send them to.</p>
-  <span class="stamp">Effective July 2026</span>
+  <span class="stamp">Effective September 2026</span>
 
   <h2>What we collect</h2>
   <p>Nothing. ChatOKF has no analytics, no crash reporters, no advertising
@@ -243,6 +243,12 @@ footer .sp { margin-left: auto; }
   replies are never uploaded anywhere. Conversations are not synced or
   backed up by the app, and deleting the app removes everything it ever
   stored.</p>
+  <p>If you ask the app to remember something, it writes a short note in
+  plain text on the device. Every note is listed under Memories, to read
+  or to delete, and one switch (Total Recall, in Settings, Intelligence)
+  stops the app reading or writing them. Notes are left out of iCloud and
+  device backups unless you turn on Backup Memories in Settings,
+  Privacy; it is off by default.</p>
 
   <h2>Network access</h2>
   <p>ChatOKF uses the network for exactly two things, both visible and
@@ -258,7 +264,9 @@ footer .sp { margin-left: auto; }
   <h3>Optional lookups</h3>
   <p>The model can consult reference sources while answering. Two switches
   in Settings (also on the toolbar: airplane, book, globe) control what may
-  leave the device:</p>
+  leave the device. Both are on when the app is first installed; the
+  toolbar button cycles through airplane mode (both off), Wikipedia only,
+  and web access:</p>
   <div class="tier">
     <p class="eyebrow">Tier 1</p>
     <h3>Wikipedia only</h3>
@@ -275,9 +283,14 @@ footer .sp { margin-left: auto; }
     <p class="eyebrow">Tier 2</p>
     <h3>Web access</h3>
     <ul>
-      <li>Web search sends the model's search terms to the Mwmbl search
-      engine, and pages the model picks from the results are fetched
-      directly.</li>
+      <li>Web search sends the model's search terms, and nothing else from
+      the conversation, to a search service: Parallel
+      (<code>parallel.ai</code>, a commercial service, which also sees your
+      network address) and, when Parallel is switched off or finds
+      nothing, Mwmbl (<code>mwmbl.org</code>, a non-profit index that keeps
+      no network address and no search that points back to you). Each has
+      its own switch in Settings, Privacy, with a link to its policy. Pages
+      the model picks from the results are fetched directly.</li>
       <li>Weather resolves your approximate location from your IP address
       and queries public weather services (Open-Meteo, and the US National
       Weather Service where covered). The app never uses GPS and never
@@ -296,10 +309,14 @@ footer .sp { margin-left: auto; }
     picker, the photo library picker, or drag and drop.</li>
     <li>Outbound HTTPS, for the model download and the optional lookups
     described above.</li>
+    <li>The microphone, only when you tap the microphone button to speak
+    a question. It listens until you pause, and the sound goes to the
+    model on the device; it is never sent anywhere.
+    Replies read aloud are spoken by a voice synthesized on the device.</li>
   </ul>
   <p>The photo picker runs out of process, so the app never sees your
   library, only the photos you hand it. The app never requests your
-  camera, microphone, contacts, or location.</p>
+  camera, contacts, or location.</p>
 
   <h2>Children's privacy</h2>
   <p>ChatOKF is not directed at children under 13. We do not knowingly
