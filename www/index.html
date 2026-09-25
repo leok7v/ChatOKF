@@ -131,15 +131,22 @@
   --ground: var(--ground-dark);
   --bg-veil: 0.62; --bg-mute: 0.9; --scrim-top: 30%; --scrim-end: 58%;
 }
+/* NO GROUND IN LIGHT MODE. The photograph has to sit under dark serif
+   text on a pale page, and the veil that makes the text comfortable
+   leaves the image looking like a fault rather than a choice: stones
+   and daisies at 30% read as a ghost, not as texture. The hero keeps
+   its own photograph, so light mode is not bare, and the prose sits on
+   the flat substrate where it belongs. --ground-light stays defined;
+   restoring it is one word. */
 @media (prefers-color-scheme: light) {
   :root:not([data-theme="dark"]) {
-    --ground: var(--ground-light);
-    --bg-veil: 0.9; --bg-mute: 1; --scrim-top: 14%; --scrim-end: 34%;
+    --ground: none;
+    --bg-veil: 0; --bg-mute: 1; --scrim-top: 0%; --scrim-end: 0%;
   }
 }
 :root[data-theme="light"] {
-  --ground: var(--ground-light);
-  --bg-veil: 0.9; --bg-mute: 1; --scrim-top: 14%; --scrim-end: 34%;
+  --ground: none;
+  --bg-veil: 0; --bg-mute: 1; --scrim-top: 0%; --scrim-end: 0%;
 }
 body::before {
   content: ""; position: fixed; inset: 0; z-index: -2;
@@ -583,6 +590,22 @@ figcaption {
   color: var(--ink-mute); margin: 1.3rem 0 0;
 }
 .reqs b { color: var(--ink); font-weight: 400; }
+/* commands are quoted verbatim, so the box scrolls rather than wraps: a
+   wrapped shell line reads as two commands and gets pasted as one */
+.cmd {
+  font-family: var(--mono); font-size: 0.78rem; line-height: 1.9;
+  font-weight: var(--mono-weight);
+  color: var(--ink);
+  background: var(--wash);
+  border: 1px solid var(--edge);
+  border-radius: 6px;
+  padding: 0.85rem 1.05rem;
+  margin: 0.8rem 0 0;
+  max-width: 64ch;
+  overflow-x: auto;
+}
+.cmd code { font: inherit; color: inherit; }
+@media (max-width: 520px) { .cmd { font-size: 0.7rem; } }
 
 /* ---------- the musing ------------------------------------------------- */
 
@@ -726,6 +749,7 @@ footer {
   <nav>
     <a class="opt1" href="#do">What it does</a>
     <a class="opt2" href="#speed">How fast</a>
+    <a href="#get">Download</a>
     <button class="tgl" id="tgl" type="button" aria-label="Switch theme">
       <svg class="i-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor"
            stroke-width="1.7" stroke-linecap="round" aria-hidden="true">
@@ -1063,6 +1087,37 @@ footer {
     </div>
   </section>
 
+  <section class="sec" id="get">
+    <div class="tag">07<b>Get it</b></div>
+    <div>
+      <h2>On the Mac, today.</h2>
+      <p>A disk image, signed and notarised by Apple. Open it and drag
+      ChatOKF to your Applications folder. The app itself is about 200 MB;
+      the model you pick is downloaded afterwards, from inside the app,
+      and you choose which one.</p>
+      <p>
+        <a class="get"
+           href="https://github.com/leok7v/ChatOKF/releases/latest/download/ChatOKF.dmg">Download
+           for macOS</a>
+        <a class="get ghost"
+           href="https://github.com/leok7v/ChatOKF/releases"
+           target="_blank" rel="noopener noreferrer">All releases</a>
+      </p>
+      <p style="margin-top:1.7rem">Or with Homebrew:</p>
+      <pre class="cmd"><code>brew tap leok7v/chatokf https://github.com/leok7v/ChatOKF.tap
+brew trust leok7v/chatokf
+brew install --cask chatokf</code></pre>
+      <p class="dim" style="font-size:0.92rem">The middle line is
+      Homebrew's gate on taps that are not its own; it will ask for it by
+      name if you skip it.</p>
+      <p class="reqs"><b>Apple silicon</b>, macOS 15 or newer.<br>
+      Signed with a Developer ID certificate, notarised and stapled, so
+      it opens without a warning and without being talked around
+      Gatekeeper.<br>
+      <b>iPhone and iPad</b> are coming to the App Store.</p>
+    </div>
+  </section>
+
 </main>
 
 <footer>
@@ -1073,9 +1128,7 @@ footer {
     </div>
     <div class="cell">
       <span class="k">Download</span>
-      <span class="v"><a
-        href="#" onclick="alert('Coming Soon'); return false;">App
-        Store</a></span>
+      <span class="v"><a href="#get">macOS disk image</a></span>
     </div>
     <div class="cell">
       <span class="k">Source</span>
