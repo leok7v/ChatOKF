@@ -7,9 +7,27 @@
 
 name: swift
 
+# branches: ['**'] is every branch and NO TAG. Without it a release tag
+# runs this suite a second time over the commit main has already tested,
+# which is 12 minutes of runner and nothing learned.
 on:
   push:
+    branches: ['**']
+    # A commit that touches only the release recipe, the cask or prose
+    # cannot change what this suite tests, and the suite costs twelve
+    # minutes. Every path here is one no Swift target reads.
+    paths-ignore:
+      - '.github/workflows/dmg.yml'
+      - '.github/workflows/pages.yml'
+      - 'www/**'
+      - 'README.md'
+      - 'LICENSE'
   pull_request:
+
+# A newer push to the same ref makes the older run pointless.
+concurrency:
+  group: swift-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build-and-test:
