@@ -8,6 +8,27 @@ have towers for them.
 Pure Swift only: no C, no Python, no FFI. Metal and the system frameworks
 are the whole dependency list; nothing runs on the Neural Engine.
 
+## Install
+
+macOS 15 or newer on Apple silicon. Every release carries a disk image,
+signed with a Developer ID certificate, notarized and stapled, so it opens
+without being talked around Gatekeeper:
+
+    https://github.com/leok7v/ChatOKF/releases/latest
+
+Or with Homebrew:
+
+    brew tap leok7v/chatokf https://github.com/leok7v/ChatOKF.tap
+    brew trust leok7v/chatokf
+    brew install --cask chatokf
+
+The middle line is Homebrew's gate on taps that are not its own; it asks for
+it by name if you skip it. The cask lives in a separate repository because
+`brew tap` clones a whole repo and this one carries a 132 MB Git LFS object
+that brew's git cannot check out.
+
+The iPhone and iPad build is not published yet.
+
 ## Build
 
 Requirements: an Apple Silicon Mac and Xcode 26 (Swift 6, macOS 15 SDK). The

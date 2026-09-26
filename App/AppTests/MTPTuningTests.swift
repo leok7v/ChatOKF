@@ -117,7 +117,14 @@ import XCTest
     func testNoDraftingFileIsOfferedAndTheMacStartsPlain() throws {
         XCTAssertFalse(Models.every.contains { name in name.hasSuffix("-MTP") })
         try XCTSkipIf(isOS, "the iOS default is the tier rung")
-        XCTAssertEqual(Models.start, "gemma-4-E4B")
+        XCTAssertFalse(Models.start.hasSuffix("-MTP"),
+                       "the Mac must never start on a drafting file")
+        let gb = installedGB
+        let plain = gb >= 16 ? "gemma-4-12B"
+            : (gb >= 8 ? "gemma-4-E4B" : Models.fallback)
+        XCTAssertEqual(Models.start, plain,
+                       "the macOS default is the 12B where it fits, and "
+                           + "this Mac reports \(gb) GB")
     }
 
 }

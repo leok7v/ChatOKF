@@ -94,9 +94,9 @@ public enum Models {
             if gb >= 8 { band.insert("Qwen3.5-4B") }
             if gb >= 16 { band.insert("Qwen3.5-9B") }
             if let one = qwen38(gb) { band.insert(one) }
-            band.insert("Ternary-Bonsai-27B")
+            if gb >= 9 { band.insert("Ternary-Bonsai-27B") }
             band.insert("Ternary-Bonsai-1.7B")
-            band.insert(e4b)
+            if gb >= 8 { band.insert(e4b) }
             if gb >= 16 { band.insert("gemma-4-12B") }
         }
         let keep = band.union(downloaded)
@@ -114,7 +114,9 @@ public enum Models {
     public static var start: String {
         let list = all
         var out = list.contains(fallback) ? fallback : (list.first ?? fallback)
-        let preferred = [e2b, isOS ? gemmaRung(installedGB) : e4b]
+        let preferred: [String?] = isOS
+            ? [e2b, gemmaRung(installedGB)]
+            : [e2b, e4b, "gemma-4-12B"]
         for name in preferred.compactMap({ n in n }) where list.contains(name) {
             out = name
         }
