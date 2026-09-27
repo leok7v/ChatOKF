@@ -18,14 +18,15 @@ without being talked around Gatekeeper:
 
 Or with Homebrew:
 
-    brew tap leok7v/chatokf https://github.com/leok7v/ChatOKF.tap
-    brew trust leok7v/chatokf
+    brew tap leok7v/tap
+    brew trust leok7v/tap
     brew install --cask chatokf
 
 The middle line is Homebrew's gate on taps that are not its own; it asks for
-it by name if you skip it. The cask lives in a separate repository because
-`brew tap` clones a whole repo and this one carries a 132 MB Git LFS object
-that brew's git cannot check out.
+it by name if you skip it. The cask lives in
+[leok7v/homebrew-tap](https://github.com/leok7v/homebrew-tap), beside md.too's,
+because `brew tap` clones a whole repo and this one carries a 132 MB Git LFS
+object that brew's git cannot check out.
 
 The iPhone and iPad build is not published yet.
 

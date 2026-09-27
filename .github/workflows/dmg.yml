@@ -326,7 +326,7 @@ jobs:
           hdiutil detach /tmp/dmg
 
       # Published beside the DMG because the tap reads it from there:
-      # github.com/leok7v/ChatOKF.tap turns it into the cask's sha256.
+      # github.com/leok7v/homebrew-tap turns it into the cask's sha256.
       - name: DMG digest
         run: shasum -a 256 ChatOKF.dmg | tee ChatOKF.dmg.sha256
 
