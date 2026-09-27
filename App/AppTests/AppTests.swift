@@ -1,4 +1,5 @@
 import Chat
+import LLM
 import XCTest
 @testable import ChatOKF
 
@@ -127,6 +128,53 @@ final class AttachmentRefsTests: XCTestCase {
         XCTAssertEqual(
             ConversationSearch.rank([convo], index, "harvest wombat").count,
             0)
+    }
+
+}
+
+@MainActor final class SavedStatsTests: XCTestCase {
+
+    private func event(_ kind: TraceEvent.Kind, tokens: Int, ctx: Int,
+                       seconds: Double, summary: String = "") -> TraceEvent {
+        let t0 = Date(timeIntervalSince1970: 1000)
+        return TraceEvent(kind: kind, t0: t0,
+                          t1: t0.addingTimeInterval(seconds), ctx: ctx,
+                          tokens: tokens, summary: summary, text: "")
+    }
+
+    func testSavedStatsAverageOverTheWholeTranscript() {
+        let events = [
+            event(.user, tokens: 0, ctx: 10, seconds: 0),
+            event(.prefill, tokens: 200, ctx: 210, seconds: 2),
+            event(.decode, tokens: 100, ctx: 310, seconds: 5,
+                  summary: "eos (think 40, content 60, tg 20.0 t/s)"),
+            event(.answer, tokens: 60, ctx: -1, seconds: 0),
+            event(.user, tokens: 0, ctx: 310, seconds: 0),
+            event(.prefill, tokens: 100, ctx: 410, seconds: 1),
+            event(.decode, tokens: 50, ctx: 460, seconds: 5,
+                  summary: "loop-breaker"),
+        ]
+        let stats = ChatModel.savedStats(events)
+        XCTAssertEqual(stats, ChatModel.SavedStats(
+            ctx: 460, think: 40, content: 110, pp: 100, tg: 15, turns: 2))
+        XCTAssertTrue(ChatModel.savedLabel(events).hasSuffix("2 turns"))
+    }
+
+    func testATranscriptWithoutATraceHasNoLabel() {
+        XCTAssertNil(ChatModel.savedStats([]))
+        XCTAssertEqual(ChatModel.savedLabel(
+            [event(.user, tokens: 0, ctx: 0, seconds: 0)]), "")
+    }
+
+    func testASingleTurnDoesNotSayOneTurn() {
+        let label = ChatModel.savedLabel([
+            event(.user, tokens: 0, ctx: 10, seconds: 0),
+            event(.prefill, tokens: 100, ctx: 110, seconds: 1),
+            event(.decode, tokens: 50, ctx: 160, seconds: 5,
+                  summary: "eos (think 0, content 50, tg 10.0 t/s)"),
+        ])
+        XCTAssertFalse(label.contains("turn"))
+        XCTAssertTrue(label.hasPrefix("\u{21C4} 160"))
     }
 
 }

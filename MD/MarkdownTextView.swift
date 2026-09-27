@@ -2,7 +2,7 @@ import SwiftUI
 
 // The whole document as one selectable native text surface. Drag-selection
 // snaps around atomic code / table / image units (see Bridges-macOS).
-public struct MarkdownTextView: View {
+public struct MarkdownTextView: View, Equatable {
 
     let document: Markdown.Document
     let style: MarkdownStyle
@@ -16,6 +16,16 @@ public struct MarkdownTextView: View {
     let speaking: String?
     @State private var images: [URL: PlatformImage] = [:]
     @State private var available: CGFloat = 0
+    @State private var cache = DocumentText.RenderCache()
+
+    @MainActor static var bodyEvaluations = 0
+
+    nonisolated public static func == (a: MarkdownTextView,
+                                       b: MarkdownTextView) -> Bool {
+        a.document == b.document && a.style == b.style
+            && a.findId == b.findId && a.scrolls == b.scrolls
+            && a.speaking == b.speaking
+    }
 
     public init(_ document: Markdown.Document,
                 style: MarkdownStyle = .default,
@@ -45,8 +55,11 @@ public struct MarkdownTextView: View {
     }
 
     public var body: some View {
+        Self.bodyEvaluations += 1
         let need = DocumentText.minimumWidth(of: document, style: style,
-                                             formulas: false)
+                                             formulas: false, images: images,
+                                             cache: cache)
+        let urls = ImagePrefetch.collectURLs(in: document)
         return surface(width: max(available, need),
                        sideways: available > 0 && need > available)
             .onGeometryChange(for: CGFloat.self, of: { proxy in
@@ -56,11 +69,15 @@ public struct MarkdownTextView: View {
             })
             // Keyed on the image URLs: keying on the streaming document would
             // restart the fetch on every token.
-            .task(id: ImagePrefetch.collectURLs(in: document)) {
-                images = await ImagePrefetch.fetchAndDecode(
-                    in: document, decode: { data in
-                        platformDocumentImage(data)
-                    })
+            .task(id: urls) {
+                let missing = urls.subtracting(images.keys)
+                if !missing.isEmpty {
+                    let fetched = await ImagePrefetch.fetchAndDecode(
+                        missing, decode: { data in
+                            platformDocumentImage(data)
+                        })
+                    images.merge(fetched) { _, fresh in fresh }
+                }
             }
     }
 
@@ -79,7 +96,7 @@ public struct MarkdownTextView: View {
         SelectableText(
             ns: DocumentText.attributed(from: document, style: style,
                                         images: images, width: available,
-                                        wide: wide),
+                                        wide: wide, cache: cache),
             font: FontRole.body(style.bodySize).platformFont,
             selectable: style.selectable, scrolls: scrolls, find: find,
             findId: findId, speaking: speaking)

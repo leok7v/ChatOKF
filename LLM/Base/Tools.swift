@@ -111,8 +111,36 @@ public final class TurnMemo: @unchecked Sendable {
     }
 }
 
+public final class WikiIndex: @unchecked Sendable {
+    private enum State {
+        case unopened
+        case missing
+        case open(WikiSlugs)
+    }
+
+    private let lock = NSLock()
+    private let path: String
+    private var state = State.unopened
+
+    public init(path: String) {
+        self.path = path
+    }
+
+    func with<T>(_ body: (WikiSlugs) -> T) -> T? {
+        lock.lock()
+        defer { lock.unlock() }
+        if case .unopened = state {
+            state = WikiSlugs(ggufPath: path).map { w in State.open(w) }
+                ?? .missing
+        }
+        var result: T? = nil
+        if case .open(let w) = state { result = body(w) }
+        return result
+    }
+}
+
 public struct SafeToolRunner: ToolRunner {
-    let slugsPath: String?
+    let slugs: WikiIndex?
     let wikipedia: Bool
     let network: Bool
     let calculator = Calculator()
@@ -120,7 +148,7 @@ public struct SafeToolRunner: ToolRunner {
 
     public init(slugsPath: String? = nil, wikipedia: Bool = true,
                 network: Bool = true) {
-        self.slugsPath = slugsPath
+        self.slugs = slugsPath.map { path in WikiIndex(path: path) }
         self.wikipedia = wikipedia
         self.network = network
     }
@@ -130,14 +158,14 @@ public struct SafeToolRunner: ToolRunner {
         if network {
             if SearchProvider.any {
                 t.append(Tools.webSearchSpec(
-                    wikiAdvertised: wikipedia && slugsPath != nil))
+                    wikiAdvertised: wikipedia && slugs != nil))
             }
             t.append(Tools.fetchUrlSpec)
             t.append(Tools.getWeatherSpec)
         }
         if wikipedia {
             t.append(Tools.getNewsSpec)
-            if slugsPath != nil { t.append(Tools.wikipediaSpec) }
+            if slugs != nil { t.append(Tools.wikipediaSpec) }
         }
         return t
     }
@@ -160,9 +188,8 @@ public struct SafeToolRunner: ToolRunner {
         } else if name == "calculator" {
             let expr = args.first { arg in arg.name == "expression" }?.value
             result = await calculator.evaluate(expr ?? "")
-        } else if name == "wikipedia_query", let path = slugsPath {
-            result = await Tools.runWikipedia(args, slugsPath: path,
-                                              memo: memo)
+        } else if name == "wikipedia_query", let slugs {
+            result = await Tools.runWikipedia(args, slugs: slugs, memo: memo)
         } else {
             result = await Tools.executeSafe(name, args, memo: memo)
         }
@@ -1017,15 +1044,33 @@ public enum Tools {
             var req = URLRequest(url: url)
             req.setValue("Mozilla/5.0 (compatible; chatokf-agent/1.0)",
                          forHTTPHeaderField: "User-Agent")
-            let fetched = try? await URLSession.shared.data(for: req)
-            if let (data, _) = fetched {
-                let text = htmlToText(String(decoding: data, as: UTF8.self))
+            if let page = await body(req) {
+                let text = htmlToText(page)
                 memo?.notePage(href, text)
                 memo?.noteSlice(href, offset)
                 result = deliverText(text, limit, offset)
             }
         }
         return result
+    }
+
+    static let maxBodyBytes = 4 << 20
+
+    private static func body(_ req: URLRequest) async -> [UInt8]? {
+        var out: [UInt8]? = nil
+        do {
+            let (stream, _) = try await URLSession.shared.bytes(for: req)
+            var bytes: [UInt8] = []
+            var it = stream.makeAsyncIterator()
+            while bytes.count < maxBodyBytes, let byte = try await it.next() {
+                bytes.append(byte)
+            }
+            out = bytes
+        } catch {
+            diag("fetch_url \(req.url?.absoluteString ?? "") transport "
+                + "error: " + error.localizedDescription)
+        }
+        return out
     }
 
     static func deliverText(_ text: String, _ limit: Int,
@@ -1333,12 +1378,11 @@ public enum Tools {
         wmoCodes[code] ?? "code \(code)"
     }
 
-    static func runWikipedia(_ args: [ToolArg], slugsPath: String,
+    static func runWikipedia(_ args: [ToolArg], slugs: WikiIndex,
                              memo: TurnMemo? = nil) async -> String {
         var result = "error: missing 'query' argument"
         if let query = findArg(args, "query"), !query.isEmpty {
-            result = await wikipediaQuery(query, slugsPath: slugsPath,
-                                          memo: memo)
+            result = await wikipediaQuery(query, slugs: slugs, memo: memo)
         }
         return result
     }
@@ -1365,25 +1409,30 @@ public enum Tools {
         return rescue
     }
 
-    public static func wikipediaQuery(_ query: String, slugsPath: String,
+    private static func pick(_ w: WikiSlugs, _ cleaned: String,
+                             _ topK: Int) -> SlugHit? {
+        var best = w.query(cleaned, topK: max(1, topK)).first
+        if Tools.needsTitleRescue(best, cleaned),
+           let hit = w.titleMatch(cleaned) {
+            diag("wikipedia_query title match \"\(hit.title)\""
+                + (best.map { b in
+                    " (embedding picked \"\(b.title)\" d=\(b.distance))"
+                } ?? ""))
+            best = hit
+        }
+        return best
+    }
+
+    public static func wikipediaQuery(_ query: String, slugs: WikiIndex,
                                       topK: Int = 5, limit: Int = 4000,
                                       memo: TurnMemo? = nil) async -> String {
         var result = "error: wikipedia index unavailable"
-        if let w = WikiSlugs(ggufPath: slugsPath) {
-            let cleaned = Tools.stripMetaWords(query)
+        let cleaned = Tools.stripMetaWords(query)
+        if let best = slugs.with({ w in pick(w, cleaned, topK) }) {
             if cleaned != query.lowercased()
                 .trimmingCharacters(in: .whitespaces) {
                 diag("wikipedia_query embedding \"\(cleaned)\" "
                     + "(meta words stripped)")
-            }
-            var best = w.query(cleaned, topK: max(1, topK)).first
-            if Tools.needsTitleRescue(best, cleaned),
-               let hit = w.titleMatch(cleaned) {
-                diag("wikipedia_query title match \"\(hit.title)\""
-                    + (best.map { b in
-                        " (embedding picked \"\(b.title)\" d=\(b.distance))"
-                    } ?? ""))
-                best = hit
             }
             let dup = best.flatMap { b in
                 b.isConfident ? memo?.title(for: b.id) : nil
@@ -1483,66 +1532,156 @@ public enum Tools {
         return out
     }
 
+    private static let paragraphBreak = Array("\n\n".utf8)
+    private static let sentenceBreak = Array(". ".utf8)
+    private static let wordBreak = Array(" ".utf8)
+    private static let whitespace: Set<UInt8> = [9, 10, 11, 12, 13, 32]
+
     static func clampText(_ text: String, _ limit: Int) -> String {
-        var s = text
-        while s.count > limit,
-              let r = s.range(of: "\n\n", options: .backwards) {
-            s = String(s[..<r.lowerBound])
+        let b = Array(text.utf8)
+        var start = 0
+        var end = b.count
+        if scalars(b, start, end) > limit {
+            var cut = cutBack(b, start, end, paragraphBreak, keep: 0, limit)
+            end = cut.end
+            if !cut.fits {
+                let lead = leadingBlanks(b, start, end)
+                cut = cutBack(b, lead, end, sentenceBreak, keep: 1, limit)
+                if cut.found { start = lead }
+                end = cut.end
+            }
+            if !cut.fits {
+                cut = cutBack(b, start, end, wordBreak, keep: 0, limit)
+                end = cut.end
+            }
+            if !cut.fits { end = scalarEnd(b, start, limit) }
         }
-        while s.count > limit, let r = s.range(of: ". ", options: .backwards) {
-            s = String(s[..<r.upperBound])
-                .trimmingCharacters(in: .whitespaces)
-        }
-        while s.count > limit, let r = s.range(of: " ", options: .backwards) {
-            s = String(s[..<r.lowerBound])
-        }
-        if s.count > limit { s = String(s.prefix(limit)) }
-        return s.trimmingCharacters(in: .whitespacesAndNewlines)
+        return String(decoding: b[trimmed(b, start, end)], as: UTF8.self)
     }
+
+    private static func cutBack(_ b: [UInt8], _ start: Int, _ end: Int,
+                                _ sep: [UInt8], keep: Int, _ limit: Int)
+        -> (end: Int, found: Bool, fits: Bool) {
+        var chars = scalars(b, start, end)
+        var bound = end
+        var fits = false
+        var i = end - 1
+        while !fits && i >= start {
+            if (b[i] & 0xC0) != 0x80 { chars -= 1 }
+            if i + sep.count <= bound && startsAt(b, i, sep) {
+                bound = i + keep
+                fits = chars + keep <= limit
+            }
+            i -= 1
+        }
+        return (bound, bound < end, fits)
+    }
+
+    private static func scalars(_ b: [UInt8], _ start: Int,
+                                _ end: Int) -> Int {
+        var n = 0
+        var i = start
+        while i < end {
+            if (b[i] & 0xC0) != 0x80 { n += 1 }
+            i += 1
+        }
+        return n
+    }
+
+    private static func scalarEnd(_ b: [UInt8], _ start: Int,
+                                  _ limit: Int) -> Int {
+        var i = start
+        var taken = 0
+        while i < b.count && (taken < limit || (b[i] & 0xC0) == 0x80) {
+            if (b[i] & 0xC0) != 0x80 { taken += 1 }
+            i += 1
+        }
+        return i
+    }
+
+    private static func leadingBlanks(_ b: [UInt8], _ start: Int,
+                                      _ end: Int) -> Int {
+        var i = start
+        while i < end && (b[i] == space || b[i] == tab) { i += 1 }
+        return i
+    }
+
+    private static func trimmed(_ b: [UInt8], _ start: Int,
+                                _ end: Int) -> Range<Int> {
+        var lo = start
+        var hi = end
+        while lo < hi && whitespace.contains(b[lo]) { lo += 1 }
+        while hi > lo && whitespace.contains(b[hi - 1]) { hi -= 1 }
+        return lo..<hi
+    }
+
+    private static let lt = UInt8(ascii: "<")
+    private static let gt = UInt8(ascii: ">")
+    private static let amp = UInt8(ascii: "&")
+    private static let hash = UInt8(ascii: "#")
+    private static let semicolon = UInt8(ascii: ";")
+    private static let slash = UInt8(ascii: "/")
+    private static let space = UInt8(ascii: " ")
+    private static let tab = UInt8(ascii: "\t")
+    private static let cr = UInt8(ascii: "\r")
+    private static let newline = UInt8(ascii: "\n")
+    private static let gtBytes = [gt]
+    private static let closeOpen = Array("</".utf8)
+    private static let commentOpen = Array("<!--".utf8)
+    private static let commentClose = Array("-->".utf8)
+    private static let mainTag = Array("main".utf8)
+    private static let articleTag = Array("article".utf8)
+    private static let tagDelims: Set<UInt8> = [gt, space, slash, tab,
+                                                 newline, cr]
 
     static func htmlToText(_ html: String) -> String {
-        collapseWhitespace(htmlStripped(mainContent(Array(html))))
+        htmlToText(Array(html.utf8))
     }
 
-    private static func htmlStripped(_ cs: [Character]) -> [Character] {
-        var raw: [Character] = []
+    static func htmlToText(_ html: [UInt8]) -> String {
+        collapseWhitespace(htmlStripped(mainContent(html)))
+    }
+
+    private static func htmlStripped(_ b: [UInt8]) -> [UInt8] {
+        var raw: [UInt8] = []
+        raw.reserveCapacity(b.count)
         var p = 0
-        let n = cs.count
+        let n = b.count
         while p < n {
-            let c = cs[p]
-            if c == "&" {
-                if let dec = decodeEntity(cs, p) {
+            let c = b[p]
+            if c == amp {
+                if let dec = decodeEntity(b, p) {
                     raw.append(contentsOf: dec.text)
                     p += dec.consumed
                 } else {
                     raw.append(c)
                     p += 1
                 }
-            } else if c != "<" {
+            } else if c != lt {
                 raw.append(c)
                 p += 1
             } else {
-                p = consumeTag(cs, p, &raw)
+                p = consumeTag(b, p, &raw)
             }
         }
         return raw
     }
 
-    private static func consumeTag(_ cs: [Character], _ p: Int,
-                                   _ raw: inout [Character]) -> Int {
-        let n = cs.count
+    private static func consumeTag(_ b: [UInt8], _ p: Int,
+                                   _ raw: inout [UInt8]) -> Int {
+        let n = b.count
         var next = n
-        if ciStarts(cs, p, Array("<!--")) {
-            next = find(cs, Array("-->"), p + 4).map { e in e + 3 } ?? n
+        if ciStarts(b, p, commentOpen) {
+            next = find(b, commentClose, p + 4).map { e in e + 3 } ?? n
         } else {
-            let closing = p + 1 < n && cs[p + 1] == "/"
+            let closing = p + 1 < n && b[p + 1] == slash
             let nameAt = closing ? p + 2 : p + 1
-            let drop = closing ? nil : dropTagAt(cs, nameAt)
+            let drop = closing ? nil : dropTagAt(b, nameAt)
             if let drop {
-                next = skipElement(cs, p, drop, &raw)
+                next = skipElement(b, p, drop, &raw)
             } else {
-                if isBlockTag(cs, nameAt) { raw.append("\n") }
-                next = find(cs, [">"], p).map { g in g + 1 } ?? n
+                if isBlockTag(b, nameAt) { raw.append(newline) }
+                next = find(b, gtBytes, p).map { g in g + 1 } ?? n
             }
         }
         return next
@@ -1550,65 +1689,63 @@ public enum Tools {
 
     private static let dropTags = ["script", "style", "nav", "header",
                                    "footer", "aside", "form", "math"]
+        .map { tag in Array(tag.utf8) }
 
-    // The delimiter check stops <form> matching <format> and <nav> <navbar>.
-    private static func dropTagAt(_ cs: [Character], _ at: Int) -> [Character]? {
-        let delims: Set<Character> = [">", " ", "/", "\t", "\n", "\r"]
-        var result: [Character]? = nil
+    private static func tagAt(_ b: [UInt8], _ at: Int,
+                              _ tag: [UInt8]) -> Bool {
+        let after = at + tag.count
+        return ciStarts(b, at, tag) && after < b.count
+            && tagDelims.contains(b[after])
+    }
+
+    private static func dropTagAt(_ b: [UInt8], _ at: Int) -> [UInt8]? {
+        var result: [UInt8]? = nil
         var k = 0
         while result == nil && k < dropTags.count {
-            let tag = Array(dropTags[k])
-            let after = at + tag.count
-            if ciStarts(cs, at, tag) && after < cs.count
-                && delims.contains(cs[after]) {
-                result = tag
-            }
+            if tagAt(b, at, dropTags[k]) { result = dropTags[k] }
             k += 1
         }
         return result
     }
 
-    private static func skipElement(_ cs: [Character], _ p: Int,
-                                    _ tag: [Character],
-                                    _ raw: inout [Character]) -> Int {
-        let close = Array("</") + tag
-        var next = cs.count
-        if let e = find(cs, close, p + 1, ci: true) {
-            next = find(cs, [">"], e).map { g in g + 1 } ?? cs.count
+    private static func skipElement(_ b: [UInt8], _ p: Int,
+                                    _ tag: [UInt8],
+                                    _ raw: inout [UInt8]) -> Int {
+        var next = b.count
+        if let e = find(b, closeOpen + tag, p + 1, ci: true) {
+            next = find(b, gtBytes, e).map { g in g + 1 } ?? b.count
         }
-        raw.append("\n")
+        raw.append(newline)
         return next
     }
 
-    private static func mainContent(_ cs: [Character]) -> [Character] {
-        let inner = elementInner(cs, Array("main"))
-            ?? elementInner(cs, Array("article"))
-        return inner ?? cs
+    private static func mainContent(_ b: [UInt8]) -> [UInt8] {
+        let inner = elementInner(b, mainTag) ?? elementInner(b, articleTag)
+        return inner ?? b
     }
 
-    private static func elementInner(_ cs: [Character],
-                                     _ tag: [Character]) -> [Character]? {
-        let delims: Set<Character> = [">", " ", "/", "\t", "\n", "\r"]
-        var result: [Character]? = nil
-        let open = Array("<") + tag
-        if let start = find(cs, open, 0, ci: true) {
+    private static func elementInner(_ b: [UInt8],
+                                     _ tag: [UInt8]) -> [UInt8]? {
+        var result: [UInt8]? = nil
+        let open = [lt] + tag
+        if let start = find(b, open, 0, ci: true) {
             let after = start + open.count
-            if after < cs.count && delims.contains(cs[after]),
-               let gt = find(cs, [">"], after),
-               let close = lastFind(cs, Array("</") + tag, gt + 1, ci: true) {
-                result = Array(cs[(gt + 1)..<close])
+            if after < b.count && tagDelims.contains(b[after]),
+               let close = find(b, gtBytes, after),
+               let end = lastFind(b, closeOpen + tag, close + 1, ci: true) {
+                result = Array(b[(close + 1)..<end])
             }
         }
         return result
     }
 
-    private static func lastFind(_ cs: [Character], _ needle: [Character],
+    private static func lastFind(_ b: [UInt8], _ needle: [UInt8],
                                  _ from: Int, ci: Bool = false) -> Int? {
         var result: Int? = nil
-        var i = cs.count - needle.count
+        var i = b.count - needle.count
         while result == nil && i >= from {
             var j = 0
-            while j < needle.count && charEq(cs[i + j], needle[j], ci) {
+            while j < needle.count && byteEq(b[i + j], needle[j], ci) {
                 j += 1
             }
             if j == needle.count { result = i }
@@ -1621,60 +1758,59 @@ public enum Tools {
         "p", "br", "div", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6",
         "ul", "ol", "table", "section", "article", "header", "footer",
         "blockquote", "pre", "hr",
-    ]
+    ].map { tag in Array(tag.utf8) }
 
-    private static func isBlockTag(_ cs: [Character], _ at: Int) -> Bool {
-        let delims: Set<Character> = [">", " ", "/", "\t", "\n", "\r"]
-        var result = false
-        var k = 0
-        while !result && k < blockTags.count {
-            let tag = Array(blockTags[k])
-            let after = at + tag.count
-            if ciStarts(cs, at, tag) && after < cs.count
-                && delims.contains(cs[after]) {
-                result = true
-            }
-            k += 1
+    private static func isBlockTag(_ b: [UInt8], _ at: Int) -> Bool {
+        blockTags.contains { tag in tagAt(b, at, tag) }
+    }
+
+    private static let entitySpan = 12
+
+    private static func entityEnd(_ b: [UInt8], _ p: Int) -> Int? {
+        var result: Int? = nil
+        var i = p + 2
+        let last = min(b.count - 1, p + entitySpan)
+        while result == nil && i <= last {
+            if b[i] == semicolon { result = i }
+            i += 1
         }
         return result
     }
 
-    private static func decodeEntity(_ cs: [Character], _ p: Int)
-        -> (text: [Character], consumed: Int)? {
-        let n = cs.count
-        var result: (text: [Character], consumed: Int)? = nil
-        if p + 1 < n, let semi = find(cs, [";"], p + 1),
-           semi - p <= 12, semi > p + 1 {
-            if cs[p + 1] == "#" {
-                result = decodeNumericEntity(cs, p, semi)
-            } else if let cp = namedEntities[String(cs[(p + 1)..<semi])] {
-                result = (utf8Chars(cp), semi - p + 1)
+    private static func decodeEntity(_ b: [UInt8], _ p: Int)
+        -> (text: [UInt8], consumed: Int)? {
+        var result: (text: [UInt8], consumed: Int)? = nil
+        if let semi = entityEnd(b, p) {
+            if b[p + 1] == hash {
+                result = decodeNumericEntity(b, p, semi)
+            } else if let cp = namedEntities[Array(b[(p + 1)..<semi])] {
+                result = (utf8Bytes(cp), semi - p + 1)
             }
         }
         return result
     }
 
-    private static func decodeNumericEntity(_ cs: [Character], _ p: Int,
+    private static func decodeNumericEntity(_ b: [UInt8], _ p: Int,
                                             _ semi: Int)
-        -> (text: [Character], consumed: Int)? {
-        let hex = p + 2 < cs.count
-            && (cs[p + 2] == "x" || cs[p + 2] == "X")
+        -> (text: [UInt8], consumed: Int)? {
+        let hex = p + 2 < b.count
+            && (b[p + 2] == UInt8(ascii: "x") || b[p + 2] == UInt8(ascii: "X"))
         let from = hex ? p + 3 : p + 2
-        var result: (text: [Character], consumed: Int)? = nil
-        if let cp = parseCodepoint(cs, from, semi, hex), cp != 0 {
-            result = (utf8Chars(cp), semi - p + 1)
+        var result: (text: [UInt8], consumed: Int)? = nil
+        if let cp = parseCodepoint(b, from, semi, hex), cp != 0 {
+            result = (utf8Bytes(cp), semi - p + 1)
         }
         return result
     }
 
-    private static func parseCodepoint(_ cs: [Character], _ from: Int,
+    private static func parseCodepoint(_ b: [UInt8], _ from: Int,
                                        _ to: Int, _ hex: Bool) -> UInt32? {
         var cp: UInt32? = from < to ? 0 : nil
         let base: UInt32 = hex ? 16 : 10
         var q = from
         while q < to {
             if let acc = cp {
-                let d = digitValue(cs[q], hex)
+                let d = digitValue(b[q], hex)
                 cp = d >= 0 ? acc &* base &+ UInt32(d) : nil
             }
             q += 1
@@ -1682,50 +1818,51 @@ public enum Tools {
         return cp
     }
 
-    private static func digitValue(_ c: Character, _ hex: Bool) -> Int {
+    private static func digitValue(_ c: UInt8, _ hex: Bool) -> Int {
         var result = -1
-        if let a = c.asciiValue {
-            if a >= 48 && a <= 57 {
-                result = Int(a - 48)
-            } else if hex && a >= 97 && a <= 102 {
-                result = Int(a - 97 + 10)
-            } else if hex && a >= 65 && a <= 70 {
-                result = Int(a - 65 + 10)
-            }
+        if c >= 48 && c <= 57 {
+            result = Int(c - 48)
+        } else if hex && c >= 97 && c <= 102 {
+            result = Int(c - 97 + 10)
+        } else if hex && c >= 65 && c <= 70 {
+            result = Int(c - 65 + 10)
         }
         return result
     }
 
-    private static let namedEntities: [String: UInt32] = [
+    private static let namedEntities: [[UInt8]: UInt32] = [
         "amp": 0x26, "lt": 0x3c, "gt": 0x3e, "quot": 0x22, "apos": 0x27,
         "nbsp": 0x20, "copy": 0xa9, "reg": 0xae, "mdash": 0x2014,
         "ndash": 0x2013, "hellip": 0x2026, "rsquo": 0x2019,
         "lsquo": 0x2018, "ldquo": 0x201c, "rdquo": 0x201d,
         "trade": 0x2122, "deg": 0xb0,
-    ]
-
-    private static func utf8Chars(_ cp: UInt32) -> [Character] {
-        Unicode.Scalar(cp).map { s in [Character(s)] } ?? []
+    ].reduce(into: [:]) { table, entry in
+        table[Array(entry.key.utf8)] = entry.value
     }
 
-    private static func collapseWhitespace(_ raw: [Character]) -> String {
-        var clean: [Character] = []
+    private static func utf8Bytes(_ cp: UInt32) -> [UInt8] {
+        Unicode.Scalar(cp).map { s in Array(String(s).utf8) } ?? []
+    }
+
+    private static func collapseWhitespace(_ raw: [UInt8]) -> String {
+        var clean: [UInt8] = []
+        clean.reserveCapacity(raw.count)
         var nl = 0
         var sp = false
         for c in raw {
-            if c == "\n" {
+            if c == newline {
                 nl += 1
                 sp = false
-            } else if c == " " || c == "\t" || c == "\r" {
+            } else if c == space || c == tab || c == cr {
                 sp = true
             } else {
                 if !clean.isEmpty {
                     if nl >= 2 {
-                        clean.append(contentsOf: "\n\n")
+                        clean.append(contentsOf: paragraphBreak)
                     } else if nl == 1 {
-                        clean.append("\n")
+                        clean.append(newline)
                     } else if sp {
-                        clean.append(" ")
+                        clean.append(space)
                     }
                 }
                 nl = 0
@@ -1733,7 +1870,51 @@ public enum Tools {
                 clean.append(c)
             }
         }
-        return String(clean)
+        return String(decoding: clean, as: UTF8.self)
+    }
+
+    private static func startsAt(_ b: [UInt8], _ at: Int,
+                                 _ prefix: [UInt8]) -> Bool {
+        var j = 0
+        while j < prefix.count && at + j < b.count
+            && b[at + j] == prefix[j] {
+            j += 1
+        }
+        return j == prefix.count
+    }
+
+    private static func ciStarts(_ b: [UInt8], _ at: Int,
+                                 _ kw: [UInt8]) -> Bool {
+        var j = 0
+        while j < kw.count && at + j < b.count
+            && lower(b[at + j]) == kw[j] {
+            j += 1
+        }
+        return j == kw.count
+    }
+
+    private static func lower(_ c: UInt8) -> UInt8 {
+        c >= 65 && c <= 90 ? c + 32 : c
+    }
+
+    private static func find(_ b: [UInt8], _ needle: [UInt8],
+                             _ from: Int, ci: Bool = false) -> Int? {
+        var result: Int? = nil
+        var i = max(from, 0)
+        let last = b.count - needle.count
+        while result == nil && i <= last {
+            var j = 0
+            while j < needle.count && byteEq(b[i + j], needle[j], ci) {
+                j += 1
+            }
+            if j == needle.count { result = i }
+            i += 1
+        }
+        return result
+    }
+
+    private static func byteEq(_ a: UInt8, _ b: UInt8, _ ci: Bool) -> Bool {
+        ci ? lower(a) == lower(b) : a == b
     }
 
     private static func starts(_ cs: [Character],

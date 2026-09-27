@@ -12,7 +12,7 @@ enum TableMetrics {
 
     static func charWidths(headers: [String], rows: [[String]]) -> [Int] {
         let n = columnCount(headers: headers, rows: rows)
-        var widths = [Int](repeating: 1, count: n)
+        var widths = [Int](repeating: 3, count: n)
         var all = rows
         all.insert(headers, at: 0)
         for cells in all {
@@ -165,19 +165,43 @@ enum TableMetrics {
     }
 
     static func serializeMonospaced(headers: [String],
-                                    rows: [[String]]) -> String {
+                                    rows: [[String]],
+                                    alignments: [Markdown.Alignment] = [])
+        -> String {
         let n = columnCount(headers: headers, rows: rows)
-        let widths = charWidths(headers: headers, rows: rows)
+        let h = headers.map { c in cellSource(c) }
+        let r = rows.map { row in row.map { c in cellSource(c) } }
+        let widths = charWidths(headers: h, rows: r)
         var lines: [String] = []
-        if !headers.isEmpty {
-            lines.append(monoRow(headers, n: n, widths: widths))
+        if !h.isEmpty {
+            lines.append(monoRow(h, n: n, widths: widths))
             let dashes = (0..<n).map { i in
-                String(repeating: "-", count: widths[i])
+                delimiter(width: widths[i],
+                          alignment: i < alignments.count
+                              ? alignments[i] : .none)
             }
             lines.append("| " + dashes.joined(separator: " | ") + " |")
         }
-        for row in rows { lines.append(monoRow(row, n: n, widths: widths)) }
+        for row in r { lines.append(monoRow(row, n: n, widths: widths)) }
         return lines.joined(separator: "\n") + "\n"
+    }
+
+    private static func delimiter(width: Int,
+                                  alignment: Markdown.Alignment) -> String {
+        let inner = String(repeating: "-", count: max(width - 2, 1))
+        let result: String
+        switch alignment {
+            case .none: result = String(repeating: "-", count: max(width, 3))
+            case .left: result = ":" + inner + "-"
+            case .right: result = "-" + inner + ":"
+            case .center: result = ":" + inner + ":"
+        }
+        return result
+    }
+
+    private static func cellSource(_ s: String) -> String {
+        s.replacingOccurrences(of: "|", with: "\\|")
+         .replacingOccurrences(of: Markdown.lineBreak, with: "<br>")
     }
 
     private static func monoRow(_ cells: [String], n: Int,

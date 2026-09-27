@@ -280,4 +280,257 @@ final class SamplerTests: XCTestCase {
         XCTAssertEqual(draw(987654321), draw(987654321),
                        "an explicit seed is not reproducible")
     }
+
+    private struct ReferencePenalties {
+        var vocabSize: Int
+        var repeatPenalty: Float
+        var presencePenalty: Float
+        var frequencyPenalty: Float
+        var dryMultiplier: Float
+        var dryBase: Float
+        var dryAllowedLength: Int
+        var penaltyExempt: Set<Int32>
+        var dryBreakers: Set<Int32>
+
+        private func seenEarlier(_ w: [Int32], _ i: Int, from: Int) -> Bool {
+            var j = from
+            while j < i && w[j] != w[i] { j += 1 }
+            return j < i
+        }
+
+        private func count(_ w: [Int32], _ tok: Int) -> Int {
+            var n = 0
+            for t in w where Int(t) == tok { n += 1 }
+            return n
+        }
+
+        func applyRecent(_ recent: [Int32], _ logits: inout [Float]) {
+            if repeatPenalty != 1 {
+                var i = 0
+                while i < recent.count {
+                    let tok = Int(recent[i])
+                    let use = tok >= 0 && tok < vocabSize
+                        && !seenEarlier(recent, i, from: 0)
+                        && !penaltyExempt.contains(recent[i])
+                    if use {
+                        if logits[tok] > 0 {
+                            logits[tok] /= repeatPenalty
+                        } else {
+                            logits[tok] *= repeatPenalty
+                        }
+                    }
+                    i += 1
+                }
+            }
+            if presencePenalty != 0 || frequencyPenalty != 0 {
+                var i = 0
+                while i < recent.count {
+                    let tok = Int(recent[i])
+                    let use = tok >= 0 && tok < vocabSize
+                        && !seenEarlier(recent, i, from: 0)
+                        && !penaltyExempt.contains(recent[i])
+                    if use {
+                        logits[tok] -= presencePenalty
+                            + frequencyPenalty * Float(count(recent, tok))
+                    }
+                    i += 1
+                }
+            }
+        }
+
+        private func suffixMatch(_ dry: [Int32], _ j: Int, _ n: Int) -> Int {
+            var len = 0
+            while len < j && dry[j - 1 - len] == dry[n - 1 - len]
+                  && !dryBreakers.contains(dry[n - 1 - len]) {
+                len += 1
+            }
+            return len + 1
+        }
+
+        private func bestMatch(_ dry: [Int32], _ tok: Int, _ n: Int) -> Int {
+            var best = 0
+            var k = 1
+            while k < n {
+                if Int(dry[k]) == tok {
+                    let mk = suffixMatch(dry, k, n)
+                    if mk > best { best = mk }
+                }
+                k += 1
+            }
+            return best
+        }
+
+        func applyDry(_ dry: [Int32], _ logits: inout [Float]) {
+            let n = dry.count
+            if n >= 2 && dryMultiplier > 0 {
+                let allowed = dryAllowedLength > 0 ? dryAllowedLength : 1
+                var j = 1
+                while j < n {
+                    let tok = Int(dry[j])
+                    let use = tok >= 0 && tok < vocabSize
+                        && !seenEarlier(dry, j, from: 1)
+                        && !penaltyExempt.contains(dry[j])
+                    if use {
+                        let best = bestMatch(dry, tok, n)
+                        if best > allowed {
+                            logits[tok] -= dryMultiplier
+                                * powf(dryBase, Float(best - allowed))
+                        }
+                    }
+                    j += 1
+                }
+            }
+        }
+
+        func apply(_ history: [Int32], recentCap: Int, dryCap: Int,
+                   _ logits: inout [Float]) {
+            let recent = Array(history.suffix(recentCap))
+            let dry = Array(history.suffix(dryCap))
+            applyDry(dry, &logits)
+            applyRecent(recent, &logits)
+        }
+    }
+
+    private struct Lcg {
+        var state: UInt64
+        mutating func next(_ bound: Int) -> Int {
+            state = state &* 6364136223846793005 &+ 1442695040888963407
+            return Int((state >> 33) % UInt64(bound))
+        }
+    }
+
+    private func randomHistory(_ n: Int, alphabet: Int,
+                               seed: UInt64) -> [Int32] {
+        var rng = Lcg(state: seed)
+        return (0 ..< n).map { _ in Int32(rng.next(alphabet)) }
+    }
+
+    private func repetitiveHistory(_ n: Int, period: Int,
+                                   seed: UInt64) -> [Int32] {
+        var rng = Lcg(state: seed)
+        let cycle = (0 ..< period).map { i in Int32(i + 1) }
+        return (0 ..< n).map { i in
+            rng.next(16) == 0 ? Int32(rng.next(48)) : cycle[i % period]
+        }
+    }
+
+    private func penaltyConfig(lastN: Int, heavy: Bool) -> SamplerConfig {
+        var cfg = SamplerConfig(temperature: 0, setMask: [.temperature])
+        cfg.repeatLastN = lastN
+        cfg.dryMultiplier = 0.8
+        if heavy {
+            cfg.repeatPenalty = 1.3
+            cfg.presencePenalty = 0.5
+            cfg.frequencyPenalty = 0.2
+        }
+        return cfg
+    }
+
+    private func reference(_ cfg: SamplerConfig,
+                           vocabSize: Int) -> ReferencePenalties {
+        ReferencePenalties(
+            vocabSize: vocabSize, repeatPenalty: cfg.repeatPenalty,
+            presencePenalty: cfg.presencePenalty,
+            frequencyPenalty: cfg.frequencyPenalty,
+            dryMultiplier: cfg.dryMultiplier, dryBase: cfg.dryBase,
+            dryAllowedLength: cfg.dryAllowedLength,
+            penaltyExempt: [3, 7, 40], dryBreakers: [5, 44])
+    }
+
+    private func windows(_ cfg: SamplerConfig) -> (recent: Int, dry: Int) {
+        let penalties = cfg.repeatPenalty != 1 || cfg.presencePenalty != 0
+            || cfg.frequencyPenalty != 0
+        return (penalties ? cfg.repeatLastN : 0,
+                cfg.repeatLastN > 256 ? cfg.repeatLastN : 256)
+    }
+
+    private func assertPenaltiesMatch(_ history: [Int32], lastN: Int,
+                                      heavy: Bool, _ label: String) {
+        let vocabSize = 256
+        let cfg = penaltyConfig(lastN: lastN, heavy: heavy)
+        let oracle = reference(cfg, vocabSize: vocabSize)
+        let caps = windows(cfg)
+        var s = Sampler(vocabSize: vocabSize, config: cfg)
+        s.penaltyExempt = oracle.penaltyExempt
+        s.dryBreakers = oracle.dryBreakers
+        var rng = Lcg(state: 11)
+        var i = 0
+        while i < history.count {
+            s.accept(history[i])
+            i += 1
+            if i % 37 == 0 || i == history.count {
+                let logits = (0 ..< vocabSize).map { _ in
+                    Float(rng.next(2000)) / 100 - 10
+                }
+                var want = logits
+                oracle.apply(Array(history.prefix(i)), recentCap: caps.recent,
+                             dryCap: caps.dry, &want)
+                var got = logits
+                _ = s.sample(&got)
+                XCTAssertEqual(got, want, "\(label) after \(i) tokens")
+            }
+        }
+    }
+
+    func testPenaltiesMatchTheReferenceOnRandomHistories() {
+        assertPenaltiesMatch(randomHistory(700, alphabet: 64, seed: 1),
+                             lastN: 64, heavy: false, "random dry only")
+        assertPenaltiesMatch(randomHistory(700, alphabet: 64, seed: 2),
+                             lastN: 64, heavy: true, "random all penalties")
+        assertPenaltiesMatch(randomHistory(3000, alphabet: 200, seed: 3),
+                             lastN: 2048, heavy: true, "random lastN 2048")
+    }
+
+    func testPenaltiesMatchTheReferenceOnRepetitiveHistories() {
+        assertPenaltiesMatch(repetitiveHistory(700, period: 5, seed: 4),
+                             lastN: 64, heavy: false, "cycle dry only")
+        assertPenaltiesMatch(repetitiveHistory(700, period: 7, seed: 5),
+                             lastN: 64, heavy: true, "cycle all penalties")
+        assertPenaltiesMatch(repetitiveHistory(3000, period: 9, seed: 6),
+                             lastN: 2048, heavy: true, "cycle lastN 2048")
+    }
+
+    private func perToken(_ history: [Int32], lastN: Int, heavy: Bool)
+        -> (old: Double, new: Double) {
+        let vocabSize = 256
+        let cfg = penaltyConfig(lastN: lastN, heavy: heavy)
+        let oracle = reference(cfg, vocabSize: vocabSize)
+        let caps = windows(cfg)
+        var s = Sampler(vocabSize: vocabSize, config: cfg)
+        s.penaltyExempt = oracle.penaltyExempt
+        s.dryBreakers = oracle.dryBreakers
+        let warm = max(caps.recent, caps.dry)
+        for t in history.prefix(warm) { s.accept(t) }
+        let logits = [Float](repeating: 0.5, count: vocabSize)
+        let steps = history.count - warm
+        var oldSeconds = 0.0
+        var newSeconds = 0.0
+        var i = warm
+        while i < history.count {
+            var want = logits
+            let began = Date()
+            oracle.apply(Array(history.prefix(i)), recentCap: caps.recent,
+                         dryCap: caps.dry, &want)
+            oldSeconds += Date().timeIntervalSince(began)
+            var got = logits
+            let again = Date()
+            _ = s.sample(&got)
+            newSeconds += Date().timeIntervalSince(again)
+            s.accept(history[i])
+            i += 1
+        }
+        return (oldSeconds / Double(steps) * 1e6,
+                newSeconds / Double(steps) * 1e6)
+    }
+
+    func testPenaltyCostPerToken() {
+        let short = perToken(repetitiveHistory(356, period: 7, seed: 8),
+                             lastN: 64, heavy: false)
+        let long = perToken(repetitiveHistory(2148, period: 7, seed: 9),
+                            lastN: 2048, heavy: true)
+        print(String(format: "[penalties] window 256 dry: old %.0f us, new "
+                         + "%.0f us per token", short.old, short.new))
+        print(String(format: "[penalties] lastN 2048 all: old %.0f us, new "
+                         + "%.0f us per token", long.old, long.new))
+    }
 }

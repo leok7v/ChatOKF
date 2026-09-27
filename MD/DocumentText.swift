@@ -5,18 +5,131 @@ import Foundation
 // surface. Adapted from md.too `src/DocumentText.swift`.
 @MainActor enum DocumentText {
 
+    @MainActor final class RenderCache {
+        struct Entry {
+            let block: Markdown.Block
+            let style: MarkdownStyle
+            let width: CGFloat
+            let images: [URL: ObjectIdentifier]
+            let text: NSAttributedString
+        }
+
+        struct Minimum {
+            let block: Markdown.Block
+            let style: MarkdownStyle
+            let formulas: Bool
+            let width: CGFloat
+        }
+
+        struct Table {
+            let block: Markdown.Block
+            let style: MarkdownStyle
+            let images: [URL: ObjectIdentifier]
+            let cells: TableCells
+        }
+
+        var entries: [Int: Entry] = [:]
+        var minimums: [Int: Minimum] = [:]
+        var tables: [Int: Table] = [:]
+
+        nonisolated init() {}
+    }
+
     static func attributed(from document: Markdown.Document,
                            style: MarkdownStyle,
                            images: [URL: PlatformImage] = [:],
-                           width: CGFloat = 0, wide: Bool = false)
+                           width: CGFloat = 0, wide: Bool = false,
+                           cache: RenderCache? = nil)
         -> NSAttributedString {
         let m = NSMutableAttributedString()
+        let seen = images.mapValues { image in ObjectIdentifier(image) }
+        var live: [Int: RenderCache.Entry] = [:]
         for item in document.items {
-            m.append(render(item.block, style: style, images: images,
-                            width: width))
+            var entry = cache?.entries[item.id]
+            let stale = entry?.block != item.block || entry?.style != style
+                || entry?.width != width || entry?.images != seen
+            if stale {
+                entry = RenderCache.Entry(
+                    block: item.block, style: style, width: width,
+                    images: seen,
+                    text: completed(
+                        render(item, style: style, images: images,
+                               seen: seen, width: width, cache: cache),
+                        style: style))
+            }
+            if let entry {
+                live[item.id] = entry
+                m.append(entry.text)
+            }
+        }
+        if let cache {
+            cache.entries = live
+            cache.tables = cache.tables.filter { pair in
+                live[pair.key] != nil
+            }
         }
         if wide, width > 0 { wrapProse(m, at: width) }
         return m
+    }
+
+    private static func completed(_ text: NSAttributedString,
+                                  style: MarkdownStyle)
+        -> NSAttributedString {
+        let m = NSMutableAttributedString(attributedString: text)
+        let full = NSRange(location: 0, length: m.length)
+        let base = bodyFont(style)
+        m.enumerateAttribute(.font, in: full, options: []) { value, r, _ in
+            if value == nil { m.addAttribute(.font, value: base, range: r) }
+        }
+        m.enumerateAttribute(.foregroundColor, in: full,
+                             options: []) { value, r, _ in
+            if value == nil {
+                m.addAttribute(.foregroundColor,
+                               value: platformDefaultTextColor, range: r)
+            }
+        }
+        return m
+    }
+
+    private static func render(_ item: Markdown.Document.Item,
+                               style: MarkdownStyle,
+                               images: [URL: PlatformImage],
+                               seen: [URL: ObjectIdentifier],
+                               width: CGFloat,
+                               cache: RenderCache?) -> NSAttributedString {
+        let result: NSAttributedString
+        if case .table(_, _, let aligns) = item.block,
+           let cells = tableCells(of: item, style: style, images: images,
+                                  seen: seen, cache: cache) {
+            result = table(cells, alignments: aligns, id: String(item.id),
+                           style: style, width: width)
+        } else {
+            result = render(item.block, id: String(item.id), style: style,
+                            images: images, width: width)
+        }
+        return result
+    }
+
+    private static func tableCells(of item: Markdown.Document.Item,
+                                   style: MarkdownStyle,
+                                   images: [URL: PlatformImage],
+                                   seen: [URL: ObjectIdentifier],
+                                   cache: RenderCache?) -> TableCells? {
+        var result: TableCells? = nil
+        if case .table(let headers, let rows, _) = item.block {
+            var known = cache?.tables[item.id]
+            let stale = known?.block != item.block || known?.style != style
+                || known?.images != seen
+            if stale {
+                known = RenderCache.Table(
+                    block: item.block, style: style, images: seen,
+                    cells: tableCells(headers: headers, rows: rows,
+                                      style: style, images: images))
+                cache?.tables[item.id] = known
+            }
+            result = known?.cells
+        }
+        return result
     }
 
     private static func wrapProse(_ m: NSMutableAttributedString,
@@ -43,8 +156,8 @@ import Foundation
         }
     }
 
-    static func render(_ block: Markdown.Block, style: MarkdownStyle,
-                       images: [URL: PlatformImage],
+    static func render(_ block: Markdown.Block, id: String,
+                       style: MarkdownStyle, images: [URL: PlatformImage],
                        width: CGFloat = 0) -> NSAttributedString {
         let result: NSAttributedString
         switch block {
@@ -53,24 +166,25 @@ import Foundation
             case .heading(let level, let attr):
                 result = heading(level: level, text: attr, style: style)
             case .code(let lang, let text):
-                result = code(language: lang, text: text, style: style)
+                result = code(language: lang, text: text, id: id,
+                              style: style)
             case .quote(let inner):
-                result = quote(inner, style: style, images: images,
+                result = quote(inner, id: id, style: style, images: images,
                                width: width - 18)
             case .list(let items, let tight):
-                result = list(items: items, tight: tight, depth: 0,
+                result = list(items: items, tight: tight, depth: 0, id: id,
                               style: style, images: images, width: width)
             case .table(let headers, let rows, let aligns):
                 result = table(headers: headers, rows: rows,
-                               alignments: aligns, style: style,
+                               alignments: aligns, id: id, style: style,
                                images: images, width: width)
             case .math(let tex):
-                result = math(tex, style: style)
+                result = math(tex, id: id, style: style)
             case .rule:
                 result = rule(style: style)
             case .image(let alt, let url, let w, let h):
                 result = image(alt: alt, url: url, width: w, height: h,
-                               style: style, images: images)
+                               id: id, style: style, images: images)
         }
         return result
     }
@@ -90,9 +204,30 @@ import Foundation
     // asked for less room than its content can occupy.
     static func minimumWidth(of document: Markdown.Document,
                              style: MarkdownStyle,
-                             formulas: Bool = true) -> CGFloat {
-        minimumWidth(of: document.items.map { item in item.block },
-                     style: style, formulas: formulas)
+                             formulas: Bool = true,
+                             images: [URL: PlatformImage] = [:],
+                             cache: RenderCache? = nil) -> CGFloat {
+        var widest: CGFloat = 0
+        let seen = images.mapValues { image in ObjectIdentifier(image) }
+        var live: [Int: RenderCache.Minimum] = [:]
+        for item in document.items {
+            var known = cache?.minimums[item.id]
+            let stale = known?.block != item.block || known?.style != style
+                || known?.formulas != formulas
+            if stale {
+                known = RenderCache.Minimum(
+                    block: item.block, style: style, formulas: formulas,
+                    width: minimumWidth(of: item, style: style,
+                                        formulas: formulas, images: images,
+                                        seen: seen, cache: cache))
+            }
+            if let known {
+                live[item.id] = known
+                if known.width > widest { widest = known.width }
+            }
+        }
+        cache?.minimums = live
+        return widest
     }
 
     static func minimumWidth(of blocks: [Markdown.Block],
@@ -105,6 +240,22 @@ import Foundation
             if w > widest { widest = w }
         }
         return widest
+    }
+
+    private static func minimumWidth(of item: Markdown.Document.Item,
+                                     style: MarkdownStyle, formulas: Bool,
+                                     images: [URL: PlatformImage],
+                                     seen: [URL: ObjectIdentifier],
+                                     cache: RenderCache?) -> CGFloat {
+        let result: CGFloat
+        if let cells = tableCells(of: item, style: style, images: images,
+                                  seen: seen, cache: cache) {
+            result = tableMinimumWidth(cells)
+        } else {
+            result = minimumWidth(ofBlock: item.block, style: style,
+                                  formulas: formulas)
+        }
+        return result
     }
 
     private static func minimumWidth(ofBlock block: Markdown.Block,
@@ -167,17 +318,103 @@ import Foundation
         inner > 0 ? inner + amount : 0
     }
 
-    static func longestWordWidth(_ cell: String, font: PlatformFont,
-                                 style: MarkdownStyle) -> CGFloat {
-        var widest: CGFloat = 0
-        let drawn = NSMutableAttributedString()
-        if let block = Markdown.parseCell(cell).items.first?.block {
-            switch block {
-                case .image: break
-                default: fillCell(block, text: cell, base: font, style: style,
-                                  images: [:], into: drawn)
+    static func tableMinimumWidth(headers: [String], rows: [[String]],
+                                  style: MarkdownStyle) -> CGFloat {
+        tableMinimumWidth(tableCells(headers: headers, rows: rows,
+                                     style: style, images: [:]))
+    }
+
+    static func table(headers: [String], rows: [[String]],
+                      alignments: [Markdown.Alignment], id: String,
+                      style: MarkdownStyle, images: [URL: PlatformImage],
+                      width: CGFloat) -> NSAttributedString {
+        table(tableCells(headers: headers, rows: rows, style: style,
+                         images: images),
+              alignments: alignments, id: id, style: style, width: width)
+    }
+
+    struct TableCell {
+        let text: NSAttributedString
+        let minimum: CGFloat
+        let natural: CGFloat
+    }
+
+    struct TableCells {
+        let headers: [String]
+        let rows: [[String]]
+        let cols: Int
+        let header: [TableCell]
+        let body: [[TableCell]]
+        let minimums: [CGFloat]
+        let naturals: [CGFloat]
+    }
+
+    static func tableCells(headers: [String], rows: [[String]],
+                           style: MarkdownStyle,
+                           images: [URL: PlatformImage]) -> TableCells {
+        let body = bodyFont(style)
+        let bold = boldFont(of: body)
+        let cols = max(headers.count, rows.map { r in r.count }.max() ?? 0)
+        let header = headers.map { cell in
+            tableCell(cell, base: bold, style: style, images: images)
+        }
+        let built = rows.map { row in
+            row.map { cell in
+                tableCell(cell, base: body, style: style, images: images)
             }
         }
+        var minimums = [CGFloat](repeating: 0, count: cols)
+        var naturals = [CGFloat](repeating: 0, count: cols)
+        for row in [header] + built {
+            for (c, cell) in row.enumerated() where c < cols {
+                if cell.minimum > minimums[c] { minimums[c] = cell.minimum }
+                if cell.natural > naturals[c] { naturals[c] = cell.natural }
+            }
+        }
+        return TableCells(headers: headers, rows: rows, cols: cols,
+                          header: header, body: built,
+                          minimums: minimums.map { w in ceil(w) },
+                          naturals: naturals.map { w in ceil(w) })
+    }
+
+    static func tableCell(_ text: String, base: PlatformFont,
+                          style: MarkdownStyle,
+                          images: [URL: PlatformImage]) -> TableCell {
+        let block = Markdown.parseCell(text).items.first?.block
+        let m = NSMutableAttributedString()
+        if let block {
+            fillCell(block, text: text, base: base, style: style,
+                     images: images, into: m)
+        }
+        var minimum: CGFloat = 0
+        var natural: CGFloat = 0
+        switch block {
+            case .image?:
+                break
+            case .paragraph?:
+                minimum = longestRunWidth(m)
+                natural = naturalWidth(m.string, font: base)
+            default:
+                minimum = longestRunWidth(m)
+                natural = naturalWidth(TeX.scriptsToUnicode(text),
+                                       font: base)
+        }
+        return TableCell(text: m, minimum: minimum, natural: natural)
+    }
+
+    private static func naturalWidth(_ text: String,
+                                     font: PlatformFont) -> CGFloat {
+        var result: CGFloat = 0
+        if tableUsesNaturals {
+            result = (text as NSString)
+                .size(withAttributes: [.font: font]).width
+        }
+        return result
+    }
+
+    private static func longestRunWidth(_ drawn: NSAttributedString)
+        -> CGFloat {
+        var widest: CGFloat = 0
         for run in unbreakableRuns(drawn.string as NSString) {
             let line = CTLineCreateWithAttributedString(
                 drawn.attributedSubstring(from: run))
@@ -193,7 +430,7 @@ import Foundation
         for i in 0 ..< text.length {
             let c = text.character(at: i)
             let next = i + 1 < text.length ? text.character(at: i + 1) : 0
-            let space = c == 0x20 || c == 0x09 || c == 0x0A
+            let space = c == 0x20 || c == 0x09 || c == 0x0A || c == 0x2028
             let soft = [0x2D, 0x2F, 0x2013, 0x2014].contains(c)
                 && !(0x30 ... 0x39).contains(next)
             if space || soft {
@@ -210,67 +447,6 @@ import Foundation
         return out
     }
 
-    private static func renderedText(of cell: String) -> String {
-        var result = TeX.scriptsToUnicode(cell)
-        if let first = Markdown.parseCell(cell).items.first {
-            switch first.block {
-                case .paragraph(let a): result = String(a.characters)
-                case .image: result = ""
-                default: break
-            }
-        }
-        return result
-    }
-
-    static func columnMinimums(headers: [String], rows: [[String]],
-                               cols: Int,
-                               style: MarkdownStyle) -> [CGFloat] {
-        let body = bodyFont(style)
-        let bold = boldFont(of: body)
-        var out = [CGFloat](repeating: 0, count: cols)
-        for c in 0..<cols {
-            var widest: CGFloat = 0
-            if c < headers.count {
-                let w = longestWordWidth(headers[c], font: bold,
-                                         style: style)
-                if w > widest { widest = w }
-            }
-            for row in rows where c < row.count {
-                let w = longestWordWidth(row[c], font: body, style: style)
-                if w > widest { widest = w }
-            }
-            out[c] = ceil(widest)
-        }
-        return out
-    }
-
-    static func columnNaturals(headers: [String], rows: [[String]],
-                               cols: Int,
-                               style: MarkdownStyle) -> [CGFloat] {
-        let body = bodyFont(style)
-        let bold = boldFont(of: body)
-        var out = [CGFloat](repeating: 0, count: cols)
-        for c in 0..<cols {
-            var widest: CGFloat = 0
-            if c < headers.count {
-                let w = cellWidth(headers[c], font: bold)
-                if w > widest { widest = w }
-            }
-            for row in rows where c < row.count {
-                let w = cellWidth(row[c], font: body)
-                if w > widest { widest = w }
-            }
-            out[c] = ceil(widest)
-        }
-        return out
-    }
-
-    private static func cellWidth(_ cell: String,
-                                  font: PlatformFont) -> CGFloat {
-        (renderedText(of: cell) as NSString)
-            .size(withAttributes: [.font: font]).width
-    }
-
     static func wrapCell(_ cell: NSAttributedString,
                          width: CGFloat) -> [NSAttributedString] {
         var out: [NSAttributedString] = []
@@ -285,18 +461,6 @@ import Foundation
             at += take
         }
         return out
-    }
-
-    static func tableCell(_ text: String, base: PlatformFont,
-                          style: MarkdownStyle,
-                          images: [URL: PlatformImage]) -> NSAttributedString {
-        let parsed = Markdown.parseCell(text)
-        let m = NSMutableAttributedString()
-        if let first = parsed.items.first {
-            fillCell(first.block, text: text, base: base, style: style,
-                     images: images, into: m)
-        }
-        return m
     }
 
     private static func fillCell(_ block: Markdown.Block, text: String,
@@ -335,15 +499,15 @@ import Foundation
         }
     }
 
-    private static func quote(_ blocks: [Markdown.Block],
+    private static func quote(_ blocks: [Markdown.Block], id: String,
                               style: MarkdownStyle,
                               images: [URL: PlatformImage],
                               width: CGFloat)
         -> NSAttributedString {
         let m = NSMutableAttributedString()
-        for inner in blocks {
-            m.append(render(inner, style: style, images: images,
-                            width: width))
+        for (i, inner) in blocks.enumerated() {
+            m.append(render(inner, id: id + "." + String(i), style: style,
+                            images: images, width: width))
         }
         let full = NSRange(location: 0, length: m.length)
         m.enumerateAttribute(.paragraphStyle, in: full,
@@ -362,7 +526,7 @@ import Foundation
     }
 
     private static func list(items: [Markdown.ListItem], tight: Bool,
-                             depth: Int, style: MarkdownStyle,
+                             depth: Int, id: String, style: MarkdownStyle,
                              images: [URL: PlatformImage],
                              width: CGFloat)
         -> NSAttributedString {
@@ -380,15 +544,15 @@ import Foundation
                 para.paragraphSpacing = style.blockSpacing
             }
             m.append(listItem(item, para: para, depth: depth,
-                              style: style, images: images,
-                              width: width - indent))
+                              id: id + "." + String(idx), style: style,
+                              images: images, width: width - indent))
         }
         return m
     }
 
     private static func listItem(_ item: Markdown.ListItem,
                                  para: NSParagraphStyle, depth: Int,
-                                 style: MarkdownStyle,
+                                 id: String, style: MarkdownStyle,
                                  images: [URL: PlatformImage],
                                  width: CGFloat)
         -> NSAttributedString {
@@ -411,19 +575,20 @@ import Foundation
             headHandled = true
         }
         if !headHandled, let first = item.blocks.first {
-            line.append(render(first, style: style, images: images,
-                               width: width))
+            line.append(render(first, id: id + ".0", style: style,
+                               images: images, width: width))
         }
         line.append(NSAttributedString(string: "\n"))
-        for rest in item.blocks.dropFirst() {
-            line.append(render(rest, style: style, images: images,
-                               width: width))
+        for (k, rest) in item.blocks.enumerated().dropFirst() {
+            line.append(render(rest, id: id + "." + String(k),
+                               style: style, images: images, width: width))
         }
         return line
     }
 
     private static func image(alt: String, url: URL, width: CGFloat?,
-                              height: CGFloat?, style: MarkdownStyle,
+                              height: CGFloat?, id: String,
+                              style: MarkdownStyle,
                               images: [URL: PlatformImage])
         -> NSAttributedString {
         let m = NSMutableAttributedString()
@@ -432,7 +597,7 @@ import Foundation
         let full = NSRange(location: 0, length: m.length)
         m.addAttribute(atomicKindKey, value: AtomicKind.image.rawValue,
                        range: full)
-        m.addAttribute(atomicIdKey, value: UUID().uuidString, range: full)
+        m.addAttribute(atomicIdKey, value: id, range: full)
         m.addAttribute(.paragraphStyle, value: blockParagraph(style),
                        range: full)
         m.append(NSAttributedString(string: "\n"))
@@ -448,7 +613,7 @@ import Foundation
         return CGRect(x: 0, y: 0, width: fit.width, height: fit.height)
     }
 
-    private static func code(language: String?, text: String,
+    private static func code(language: String?, text: String, id: String,
                              style: MarkdownStyle) -> NSAttributedString {
         let font = FontRole.mono(style.codeSize).platformFont
         let highlighted = style.highlightCode
@@ -465,7 +630,7 @@ import Foundation
                        value: platformWhite(0.5, alpha: 0.10), range: full)
         m.addAttribute(atomicKindKey, value: AtomicKind.code.rawValue,
                        range: full)
-        m.addAttribute(atomicIdKey, value: UUID().uuidString, range: full)
+        m.addAttribute(atomicIdKey, value: id, range: full)
         m.addAttribute(atomicCopyKey, value: text, range: full)
         m.addAttribute(.paragraphStyle, value: blockParagraph(style),
                        range: full)
@@ -475,7 +640,7 @@ import Foundation
 
     // A display carries its TeX on atomicCopyKey so Copy yields the
     // formula, not the object-replacement character.
-    private static func math(_ tex: String,
+    private static func math(_ tex: String, id: String,
                              style: MarkdownStyle) -> NSAttributedString {
         let base = bodyFont(style)
         let m = NSMutableAttributedString()
@@ -489,7 +654,7 @@ import Foundation
         let content = NSRange(location: 0, length: m.length)
         m.addAttribute(atomicKindKey, value: AtomicKind.math.rawValue,
                        range: content)
-        m.addAttribute(atomicIdKey, value: UUID().uuidString, range: content)
+        m.addAttribute(atomicIdKey, value: id, range: content)
         m.addAttribute(atomicCopyKey, value: tex, range: content)
         m.append(NSAttributedString(string: "\n"))
         let para = NSMutableParagraphStyle()
@@ -545,6 +710,9 @@ import Foundation
             var attrs: [NSAttributedString.Key: Any] = [
                 .foregroundColor: platformDefaultTextColor,
             ]
+            if run[SmallAttribute.self] == true {
+                runFont = smallRunFont(base: runFont)
+            }
             if let level = run[ScriptAttribute.self] {
                 let script = scriptRunFont(level, base: runFont)
                 runFont = script.font
@@ -553,6 +721,9 @@ import Foundation
             attrs[.font] = runFont
             if intent.contains(.strikethrough) {
                 attrs[.strikethroughStyle] = NSUnderlineStyle.single.rawValue
+            }
+            if run.underlineStyle != nil {
+                attrs[.underlineStyle] = NSUnderlineStyle.single.rawValue
             }
             if let url = run.link { attrs[.link] = url }
             m.append(NSAttributedString(string: segment, attributes: attrs))

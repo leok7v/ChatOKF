@@ -87,7 +87,8 @@ import XCTest
                                                 "garden/basil",
                                                 "tech/wifi-mesh"])
         XCTAssertNil(again)
-        XCTAssertTrue(memories.map.contains("house/"))
+        let map = await memories.map()
+        XCTAssertTrue(map.contains("house/"))
         try? FileManager.default.removeItem(at: memories.root)
     }
 
@@ -108,7 +109,8 @@ import XCTest
         let off = await memories.recall("basil", also: [], pp: 400,
                                         excluding: [])
         XCTAssertNil(off)
-        XCTAssertEqual(memories.map, "")
+        let map = await memories.map()
+        XCTAssertEqual(map, "")
         memories.enabled = true
         try? FileManager.default.removeItem(at: memories.root)
     }
@@ -261,9 +263,9 @@ import XCTest
         let m = try await opened()
         let wiring = m.root.appendingPathComponent("house/wiring.md")
         XCTAssertEqual(m.list.count, 2)
-        XCTAssertEqual(m.store?.concept("house/wiring")?.links,
+        XCTAssertEqual(m.note(detail: "house/wiring")?.links,
                        ["tech/wifi-mesh"])
-        m.trash("tech/wifi-mesh")
+        await m.trash("tech/wifi-mesh")
         XCTAssertEqual(m.list.map { row in row.id }, ["house/wiring"])
         XCTAssertEqual(m.trashed.map { row in row.id }, ["tech/wifi-mesh"])
         XCTAssertNil(m.note("tech/wifi-mesh"))
@@ -273,30 +275,30 @@ import XCTest
         var text = try String(contentsOf: wiring, encoding: .utf8)
         XCTAssertTrue(text.contains("feeds the mesh setup upstairs."), text)
         XCTAssertFalse(text.contains("wifi-mesh.md"), text)
-        XCTAssertEqual(m.store?.concept("house/wiring")?.links, [])
-        m.restore("tech/wifi-mesh")
+        XCTAssertEqual(m.note(detail: "house/wiring")?.links, [])
+        await m.restore("tech/wifi-mesh")
         XCTAssertEqual(m.trashed.count, 0)
         XCTAssertNotNil(m.note("tech/wifi-mesh"))
         text = try String(contentsOf: wiring, encoding: .utf8)
         XCTAssertTrue(
             text.contains("[the mesh setup](/tech/wifi-mesh.md)"), text)
-        XCTAssertEqual(m.store?.concept("house/wiring")?.links,
+        XCTAssertEqual(m.note(detail: "house/wiring")?.links,
                        ["tech/wifi-mesh"])
         try? FileManager.default.removeItem(at: m.root)
     }
 
     func testDeleteForeverAndEmptyTrashLeaveNoFile() async throws {
         let m = try await opened()
-        m.trash("tech/wifi-mesh")
+        await m.trash("tech/wifi-mesh")
         let kept = m.root.appendingPathComponent(
             Memories.trashFolder + "/tech/wifi-mesh.md")
         XCTAssertTrue(FileManager.default.fileExists(atPath: kept.path))
-        m.deleteForever("tech/wifi-mesh")
+        await m.deleteForever("tech/wifi-mesh")
         XCTAssertFalse(FileManager.default.fileExists(atPath: kept.path))
         XCTAssertEqual(m.trashed.count, 0)
-        m.trash("house/wiring")
+        await m.trash("house/wiring")
         XCTAssertEqual(m.trashed.count, 1)
-        m.emptyTrash()
+        await m.emptyTrash()
         XCTAssertEqual(m.trashed.count, 0)
         XCTAssertFalse(FileManager.default.fileExists(
             atPath: m.root.appendingPathComponent(
@@ -322,7 +324,7 @@ import XCTest
 
     func testTrashSurvivesAReopenAndAreasGroupEveryNote() async throws {
         let m = try await opened()
-        m.trash("tech/wifi-mesh")
+        await m.trash("tech/wifi-mesh")
         m.reopen()
         await m.awaitOpen()
         XCTAssertEqual(m.trashed.map { row in row.id }, ["tech/wifi-mesh"])

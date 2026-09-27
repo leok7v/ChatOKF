@@ -392,18 +392,6 @@ final class MiniLM {
         }
     }
 
-    private func softmax(_ s: inout [Float], n: Int) {
-        var mx = s[0]
-        for i in 1..<n where s[i] > mx { mx = s[i] }
-        var sum: Float = 0
-        for i in 0..<n {
-            s[i] = expf(s[i] - mx)
-            sum += s[i]
-        }
-        let inv = 1 / sum
-        for i in 0..<n { s[i] *= inv }
-    }
-
     private func encoderLayer(_ L: Layer, _ x: inout [Float], T: Int) {
         let ne = nEmbd, hd = nEmbd / nHead
         let scale = 1 / Float(hd).squareRoot()
@@ -414,7 +402,7 @@ final class MiniLM {
         linearBatch(L.wq, L.bq, x, T: T, inn: ne, out: ne, &q)
         linearBatch(L.wk, L.bk, x, T: T, inn: ne, out: ne, &k)
         linearBatch(L.wv, L.bv, x, T: T, inn: ne, out: ne, &vv)
-        attention(&q, &k, &vv, &ctx, T: T, ne: ne, hd: hd, scale: scale)
+        attention(q, k, vv, &ctx, T: T, ne: ne, hd: hd, scale: scale)
         var proj = [Float](repeating: 0, count: T * ne)
         var ff = [Float](repeating: 0, count: T * nFF)
         linearBatch(L.wo, L.bo, ctx, T: T, inn: ne, out: ne, &proj)
@@ -431,30 +419,128 @@ final class MiniLM {
         }
     }
 
-    private func attention(_ q: inout [Float], _ k: inout [Float],
-                           _ vv: inout [Float], _ ctx: inout [Float],
+    private static func softmax(_ s: UnsafeMutablePointer<Float>, n: Int) {
+        var mx = s[0]
+        for i in 1..<n where s[i] > mx { mx = s[i] }
+        var sum: Float = 0
+        for i in 0..<n {
+            s[i] = expf(s[i] - mx)
+            sum += s[i]
+        }
+        let inv = 1 / sum
+        for i in 0..<n { s[i] *= inv }
+    }
+
+    private static func transposed(_ k: [Float], T: Int, ne: Int) -> [Float] {
+        var kT = [Float](repeating: 0, count: T * ne)
+        for j in 0..<T {
+            for c in 0..<ne { kT[c * T + j] = k[j * ne + c] }
+        }
+        return kT
+    }
+
+    private static func wide(_ p: UnsafeRawPointer,
+                             _ i: Int) -> SIMD16<Float> {
+        p.loadUnaligned(fromByteOffset: i * 4, as: SIMD16<Float>.self)
+    }
+
+    private static func scores(_ qi: UnsafePointer<Float>,
+                               _ kT: UnsafePointer<Float>,
+                               _ s: UnsafeMutablePointer<Float>,
+                               T: Int, hd: Int, scale: Float) {
+        let kr = UnsafeRawPointer(kT)
+        let sr = UnsafeMutableRawPointer(s)
+        var j = 0
+        while j + 16 <= T {
+            var acc = SIMD16<Float>(repeating: 0)
+            for d in 0..<hd { acc += qi[d] * MiniLM.wide(kr, d * T + j) }
+            sr.storeBytes(of: acc * scale, toByteOffset: j * 4,
+                          as: SIMD16<Float>.self)
+            j += 16
+        }
+        while j + 4 <= T {
+            var acc = SIMD4<Float>(repeating: 0)
+            for d in 0..<hd { acc += qi[d] * MiniLM.quad(kr, d * T + j) }
+            sr.storeBytes(of: acc * scale, toByteOffset: j * 4,
+                          as: SIMD4<Float>.self)
+            j += 4
+        }
+        while j < T {
+            var acc: Float = 0
+            for d in 0..<hd { acc += qi[d] * kT[d * T + j] }
+            s[j] = acc * scale
+            j += 1
+        }
+    }
+
+    private static func weighted(_ s: UnsafePointer<Float>,
+                                 _ v: UnsafePointer<Float>,
+                                 _ c: UnsafeMutablePointer<Float>,
+                                 T: Int, ne: Int, hd: Int) {
+        for d in 0..<hd { c[d] = 0 }
+        let cr = UnsafeMutableRawPointer(c)
+        for j in 0..<T {
+            let wj = s[j]
+            let vj = UnsafeRawPointer(v + j * ne)
+            var d = 0
+            while d + 16 <= hd {
+                cr.storeBytes(of: MiniLM.wide(cr, d) + wj * MiniLM.wide(vj, d),
+                              toByteOffset: d * 4, as: SIMD16<Float>.self)
+                d += 16
+            }
+            while d + 4 <= hd {
+                cr.storeBytes(of: MiniLM.quad(cr, d) + wj * MiniLM.quad(vj, d),
+                              toByteOffset: d * 4, as: SIMD4<Float>.self)
+                d += 4
+            }
+            while d < hd {
+                c[d] += wj * v[j * ne + d]
+                d += 1
+            }
+        }
+    }
+
+    private static func attendRows(_ q: UnsafePointer<Float>,
+                                   _ kT: UnsafePointer<Float>,
+                                   _ v: UnsafePointer<Float>,
+                                   _ c: UnsafeMutablePointer<Float>,
+                                   rows: Range<Int>, T: Int, ne: Int,
+                                   hd: Int, scale: Float) {
+        var s = [Float](repeating: 0, count: T)
+        s.withUnsafeMutableBufferPointer { sp in
+            let sb = sp.baseAddress!
+            for i in rows {
+                scores(q + i * ne, kT, sb, T: T, hd: hd, scale: scale)
+                softmax(sb, n: T)
+                weighted(sb, v, c + i * ne, T: T, ne: ne, hd: hd)
+            }
+        }
+    }
+
+    private func attention(_ q: [Float], _ k: [Float], _ vv: [Float],
+                           _ ctx: inout [Float],
                            T: Int, ne: Int, hd: Int, scale: Float) {
-        var scores = [Float](repeating: 0, count: T)
-        for h in 0..<nHead {
-            let off = h * hd
-            for i in 0..<T {
-                q.withUnsafeBufferPointer { qp in
-                    k.withUnsafeBufferPointer { kp in
-                        let qi = qp.baseAddress! + i * ne + off
-                        for j in 0..<T {
-                            let kj = kp.baseAddress! + j * ne + off
-                            var acc: Float = 0
-                            for d in 0..<hd { acc += qi[d] * kj[d] }
-                            scores[j] = acc * scale
+        let kT = MiniLM.transposed(k, T: T, ne: ne)
+        let heads = nHead
+        let block = 32
+        let blocks = (T + block - 1) / block
+        q.withUnsafeBufferPointer { qp in
+            kT.withUnsafeBufferPointer { kp in
+                vv.withUnsafeBufferPointer { vp in
+                    ctx.withUnsafeMutableBufferPointer { cp in
+                        nonisolated(unsafe) let qb = qp.baseAddress!
+                        nonisolated(unsafe) let kb = kp.baseAddress!
+                        nonisolated(unsafe) let vb = vp.baseAddress!
+                        nonisolated(unsafe) let cb = cp.baseAddress!
+                        DispatchQueue.concurrentPerform(
+                            iterations: heads * blocks) { item in
+                            let off = (item / blocks) * hd
+                            let first = (item % blocks) * block
+                            MiniLM.attendRows(
+                                qb + off, kb + off * T, vb + off, cb + off,
+                                rows: first ..< min(T, first + block),
+                                T: T, ne: ne, hd: hd, scale: scale)
                         }
-                    }
-                }
-                softmax(&scores, n: T)
-                for d in 0..<hd { ctx[i * ne + off + d] = 0 }
-                for j in 0..<T {
-                    let wj = scores[j]
-                    for d in 0..<hd {
-                        ctx[i * ne + off + d] += wj * vv[j * ne + off + d]
                     }
                 }
             }
@@ -484,10 +570,7 @@ final class MiniLM {
         return x
     }
 
-    @discardableResult
-    func embed(_ text: String, into out: inout [Float]) -> Int {
-        let ne = nEmbd
-        let x = encode(text)
+    static func pooled(_ x: [Float], width ne: Int, into out: inout [Float]) {
         let T = x.count / ne
         if T > 0 {
             for d in 0..<ne { out[d] = 0 }
@@ -501,7 +584,13 @@ final class MiniLM {
             let inv = ss > 0 ? 1 / ss.squareRoot() : 0
             for d in 0..<ne { out[d] *= inv }
         }
-        return T
+    }
+
+    @discardableResult
+    func embed(_ text: String, into out: inout [Float]) -> Int {
+        let x = encode(text)
+        MiniLM.pooled(x, width: nEmbd, into: &out)
+        return x.count / nEmbd
     }
 
     func embed(_ text: String) -> [Float] {

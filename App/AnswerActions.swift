@@ -51,11 +51,10 @@ struct AnswerActions: View {
     }
 
     private func copy() {
-        MarkdownCopy.put(ConversationExport.document(text: text),
-                         title: title)
-        copied = true
         copiedReset?.cancel()
         copiedReset = Task { @MainActor in
+            await MarkdownCopy.put(text: text, title: title)
+            copied = true
             try? await Task.sleep(for: .seconds(1.2))
             if !Task.isCancelled { copied = false }
         }

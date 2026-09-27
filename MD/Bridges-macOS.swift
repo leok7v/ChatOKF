@@ -128,14 +128,7 @@ extension NativeText: NSViewRepresentable {
     func updateNSView(_ v: ResizingTextView, context: Context) {
         v.nowrap = nowrap
         v.isSelectable = selectable
-        let next = resolved()
-        if let ts = v.textStorage, !ts.isEqual(to: next) {
-            ts.beginEditing()
-            applyIncremental(ts, next)
-            ts.endEditing()
-            v.invalidateIntrinsicContentSize()
-            v.reapplyFind()
-        }
+        v.applyResolved(resolved())
         v.setSpoken(speaking)
     }
 
@@ -143,6 +136,8 @@ extension NativeText: NSViewRepresentable {
 
         var nowrap: Bool = false
         private var lastBounds: NSSize = .zero
+        private var contentGeneration = 0
+        private var overlayGeneration = -1
         private var copyButtons: [String: CopyRunButton] = [:]
         private var copyRects: [(id: String, rect: NSRect)] = []
         private var findMatches: [NSRange] = []
@@ -153,6 +148,15 @@ extension NativeText: NSViewRepresentable {
         private var spokenRange: NSRange?
 
         var liveFindCount: Int { findMatches.count }
+
+        func applyResolved(_ next: NSAttributedString) {
+            if let ts = textStorage, applyIncremental(ts, next) {
+                contentGeneration += 1
+                invalidateIntrinsicContentSize()
+                needsLayout = true
+                if !findQuery.isEmpty || spokenText != nil { reapplyFind() }
+            }
+        }
 
         // The active match's vertical center as a fraction of the laid-out
         // height, so the transcript can scroll the exact line into view.
@@ -412,11 +416,15 @@ extension NativeText: NSViewRepresentable {
 
         override func layout() {
             super.layout()
-            if bounds.size != lastBounds {
+            let resized = bounds.size != lastBounds
+            if resized {
                 lastBounds = bounds.size
                 invalidateIntrinsicContentSize()
             }
-            rebuildCopyOverlays()
+            if resized || overlayGeneration != contentGeneration {
+                overlayGeneration = contentGeneration
+                rebuildCopyOverlays()
+            }
         }
 
         // A corner Copy button per atomic block, reused across layouts by

@@ -40,23 +40,25 @@ public struct DocRef: Hashable, Sendable {
     }
 }
 
-public struct ImageAttachment: Identifiable, @unchecked Sendable {
+public struct ImageAttachment: Identifiable, Sendable {
     public let id = UUID()
     public let name: String
     public let file: String
     public let data: Data
-    public let thumbnail: CGImage?
+    public var thumbnail: CGImage?
+    public var preview: CGImage?
 
     public init(name: String, file: String, data: Data,
-                thumbnail: CGImage?) {
+                thumbnail: CGImage? = nil, preview: CGImage? = nil) {
         self.name = name
         self.file = file
         self.data = data
         self.thumbnail = thumbnail
+        self.preview = preview
     }
 }
 
-public struct ClipAttachment: Identifiable, @unchecked Sendable {
+public struct ClipAttachment: Identifiable, Sendable {
     public let id = UUID()
     public let name: String
     public let file: String
@@ -101,7 +103,7 @@ public struct ClipAttachment: Identifiable, @unchecked Sendable {
     }
 }
 
-public struct ToolRound: Identifiable {
+public struct ToolRound: Identifiable, Sendable {
     public let id: Int
     public let emitted: String
     public let label: String
@@ -120,7 +122,7 @@ public struct ToolRound: Identifiable {
     }
 }
 
-public struct Message: Identifiable {
+public struct Message: Identifiable, Sendable {
     public let id = UUID()
     public let fromUser: Bool
     public var text: String
@@ -134,8 +136,8 @@ public struct Message: Identifiable {
     public var loopStopped = false
     public var answerDoc = Markdown.Document.empty
     public var reasoningDoc = Markdown.Document.empty
-    public let answerStream = MarkdownStream()
-    public let reasoningStream = MarkdownStream()
+    public var prompt = ""
+    public var soft: URL? = nil
 
     public init(fromUser: Bool, text: String, images: [CGImage] = [],
                 clips: [URL] = [], posters: [CGImage] = [],
@@ -143,7 +145,8 @@ public struct Message: Identifiable {
                 toolRounds: [ToolRound] = [], reasoning: String = "",
                 placeholder: Bool = false, loopStopped: Bool = false,
                 answerDoc: Markdown.Document = .empty,
-                reasoningDoc: Markdown.Document = .empty) {
+                reasoningDoc: Markdown.Document = .empty,
+                prompt: String = "", soft: URL? = nil) {
         self.fromUser = fromUser
         self.text = text
         self.images = images
@@ -156,5 +159,9 @@ public struct Message: Identifiable {
         self.loopStopped = loopStopped
         self.answerDoc = answerDoc
         self.reasoningDoc = reasoningDoc
+        self.prompt = prompt
+        self.soft = soft
     }
+
+    public var laid: String { prompt.isEmpty ? text : prompt }
 }

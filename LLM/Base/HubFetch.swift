@@ -29,6 +29,7 @@ public struct HubFetch: Sendable {
     static let chunk = 1 << 20
     static let span: Int64 = 32 << 20
     static let lanes = 4
+    static let lead = 2 * lanes
 
     public static func fetch(
         repo: String,
@@ -168,7 +169,7 @@ public struct HubFetch: Sendable {
         var verified: URL? = nil
         var last: Error? = nil
         while attempt < retries && verified == nil {
-            let had = size(part)
+            let had = committed(part)
             do {
                 Diag.memoryDetail?("fetch start \(e.path)")
                 if background {
@@ -190,9 +191,10 @@ public struct HubFetch: Sendable {
                 last = error
             }
             if verified == nil {
-                attempt = size(part) > had ? 1 : attempt + 1
+                attempt = committed(part) > had ? 1 : attempt + 1
                 Diag.shared.report(.net, "fetch \(e.path) attempt \(attempt) "
-                    + "at \(size(part)): \(last.map { err in "\(err)" } ?? "")")
+                    + "at \(committed(part)): "
+                    + "\(last.map { err in "\(err)" } ?? "")")
                 if attempt < retries {
                     try await Task.sleep(
                         for: .seconds(min(backoff, 1 << (attempt - 1))))
@@ -207,52 +209,57 @@ public struct HubFetch: Sendable {
     }
 
     static func fill(_ url: URL, _ e: Entry, _ part: URL, _ pump: Pump,
-                     _ onBytes: @escaping @Sendable (Int64) -> Void)
+                     _ onBytes: @escaping @Sendable (Int64) -> Void,
+                     span: Int64 = HubFetch.span)
         async throws {
         let fm = FileManager.default
         if !fm.fileExists(atPath: part.path) {
             fm.createFile(atPath: part.path, contents: nil)
         }
-        var have = try assemble(part)
-        while have < e.size && !BackgroundGate.shared.parked {
-            try Task.checkCancellation()
-            let wave = Wave(base: have, onBytes: onBytes)
-            var pieces: [(Int, URL)] = []
-            try await withThrowingTaskGroup(of: (Int, URL).self) { group in
-                var lane = 0
-                var at = have
-                while lane < lanes && at < e.size {
-                    let from = at
-                    let to = min(from + span, e.size) - 1
-                    let idx = lane
+        let have = try assemble(part)
+        if have < e.size {
+            try reserve(part, e.size)
+            let ledger = Ledger(part, have, e.size, span, onBytes)
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                for lane in 0..<lanes {
                     group.addTask {
-                        var req = URLRequest(url: url)
-                        req.setValue("bytes=\(from)-\(to)",
-                                     forHTTPHeaderField: "Range")
-                        let u = try await pump.body(req, lane: idx) { n in
-                            wave.live(idx, n)
-                        }
-                        return (idx, u)
+                        try await run(lane, url, pump, ledger)
                     }
-                    at = to + 1
-                    lane += 1
                 }
-                for try await got in group {
-                    pieces.append(got)
-                }
+                for try await _ in group {}
             }
-            pieces.sort { a, b in a.0 < b.0 }
-            for piece in pieces {
-                try append(piece.1, to: part)
-                try? fm.removeItem(at: piece.1)
+        }
+    }
+
+    static func run(_ lane: Int, _ url: URL, _ pump: Pump,
+                    _ ledger: Ledger) async throws {
+        while let from = try await ledger.take() {
+            let to = min(from + ledger.span, ledger.size) - 1
+            var req = URLRequest(url: url)
+            req.setValue("bytes=\(from)-\(to)", forHTTPHeaderField: "Range")
+            let n = try await pump.body(req, lane: lane, into: ledger.part,
+                                        at: from) { n in
+                ledger.live(lane, n)
             }
-            let now = try assemble(part)
-            if now <= have {
+            if n != to - from + 1 {
                 throw HubError.http(0, url.absoluteString)
             }
-            have = now
-            onBytes(have)
+            try ledger.land(lane, from, n)
         }
+    }
+
+    static func reserve(_ part: URL, _ size: Int64) throws {
+        let h = try FileHandle(forWritingTo: part)
+        let end = Int64(try h.seekToEnd())
+        if end < size {
+            var store = fstore_t(fst_flags: UInt32(F_ALLOCATEALL),
+                                 fst_posmode: F_PEOFPOSMODE, fst_offset: 0,
+                                 fst_length: off_t(size - end),
+                                 fst_bytesalloc: 0)
+            _ = fcntl(h.fileDescriptor, F_PREALLOCATE, &store)
+            try h.truncate(atOffset: UInt64(size))
+        }
+        try h.close()
     }
 
     static func sweep(_ part: URL) {
@@ -271,16 +278,34 @@ public struct HubFetch: Sendable {
         return (a?[.size] as? NSNumber)?.int64Value ?? 0
     }
 
-    static func append(_ src: URL, to dst: URL) throws {
+    static func mark(_ part: URL) -> URL {
+        part.deletingLastPathComponent()
+            .appendingPathComponent(part.lastPathComponent + ".have")
+    }
+
+    static func committed(_ part: URL) -> Int64 {
+        let text = try? String(contentsOf: mark(part), encoding: .utf8)
+        let have = text.flatMap { s in Int64(s) } ?? Int64.max
+        return min(have, size(part))
+    }
+
+    static func commit(_ part: URL, _ have: Int64) throws {
+        try Data(String(have).utf8).write(to: mark(part), options: .atomic)
+    }
+
+    static func splice(_ src: URL, into dst: URL,
+                       at offset: Int64) throws -> Int64 {
         let r = try FileHandle(forReadingFrom: src)
         let w = try FileHandle(forWritingTo: dst)
-        try w.seekToEnd()
+        try w.seek(toOffset: UInt64(offset))
+        var end = offset
         var more = true
         while more {
             try autoreleasepool {
                 let c = try r.read(upToCount: chunk)
                 if let c, !c.isEmpty {
                     try w.write(contentsOf: c)
+                    end += Int64(c.count)
                 } else {
                     more = false
                 }
@@ -288,6 +313,7 @@ public struct HubFetch: Sendable {
         }
         try r.close()
         try w.close()
+        return end
     }
 
     static func verify(_ file: URL, _ e: Entry) throws {
@@ -420,39 +446,127 @@ private final class ByteMeter: @unchecked Sendable {
     }
 }
 
-private final class Wave: @unchecked Sendable {
+final class Ledger: @unchecked Sendable {
+    let part: URL
+    let size: Int64
+    let span: Int64
     private let lock = NSLock()
-    private let base: Int64
     private let onBytes: @Sendable (Int64) -> Void
-    private var lanes: [Int: Int64] = [:]
+    private var have: Int64
+    private var next: Int64
+    private var landed: [Int64: Int64] = [:]
+    private var live: [Int: Int64] = [:]
 
-    init(base: Int64, onBytes: @escaping @Sendable (Int64) -> Void) {
-        self.base = base
+    init(_ part: URL, _ have: Int64, _ size: Int64, _ span: Int64,
+         _ onBytes: @escaping @Sendable (Int64) -> Void) {
+        self.part = part
+        self.size = size
+        self.span = span
         self.onBytes = onBytes
+        self.have = have
+        self.next = have
+    }
+
+    private enum Offer {
+        case piece(Int64)
+        case wait
+        case done
+    }
+
+    private func offer() -> Offer {
+        lock.lock()
+        defer { lock.unlock() }
+        var out = Offer.wait
+        if next >= size || BackgroundGate.shared.parked {
+            out = .done
+        } else if next < have + span * Int64(HubFetch.lead) {
+            out = .piece(next)
+            next += span
+        }
+        return out
+    }
+
+    func take() async throws -> Int64? {
+        var out: Int64? = nil
+        var wait = true
+        while wait {
+            try Task.checkCancellation()
+            switch offer() {
+            case .piece(let at):
+                out = at
+                wait = false
+            case .done:
+                wait = false
+            case .wait:
+                try await Task.sleep(for: .milliseconds(100))
+            }
+        }
+        return out
     }
 
     func live(_ lane: Int, _ n: Int64) {
         lock.lock()
-        lanes[lane] = n
-        let sum = lanes.values.reduce(Int64(0)) { acc, v in acc + v }
+        live[lane] = n
+        let sum = total()
         lock.unlock()
-        onBytes(base + sum)
+        onBytes(sum)
+    }
+
+    func land(_ lane: Int, _ from: Int64, _ n: Int64) throws {
+        let sum = try record(lane, from, n)
+        onBytes(sum)
+    }
+
+    private func record(_ lane: Int, _ from: Int64,
+                        _ n: Int64) throws -> Int64 {
+        lock.lock()
+        defer { lock.unlock() }
+        live[lane] = 0
+        landed[from] = n
+        let before = have
+        while let len = landed[have] {
+            landed[have] = nil
+            have += len
+        }
+        if have > before { try HubFetch.commit(part, have) }
+        return total()
+    }
+
+    private func total() -> Int64 {
+        let ahead = landed.values.reduce(Int64(0)) { acc, v in acc + v }
+        let flowing = live.values.reduce(Int64(0)) { acc, v in acc + v }
+        return have + ahead + flowing
     }
 }
 
-final class Pump: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
-    private struct Waiter {
-        let cont: CheckedContinuation<URL, Error>
+final class Pump: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    private final class Waiter {
+        let cont: CheckedContinuation<Int64, Error>
+        let sink: FileHandle
         let onBytes: @Sendable (Int64) -> Void
+        var written: Int64 = 0
+
+        init(_ cont: CheckedContinuation<Int64, Error>, _ sink: FileHandle,
+             _ onBytes: @escaping @Sendable (Int64) -> Void) {
+            self.cont = cont
+            self.sink = sink
+            self.onBytes = onBytes
+        }
     }
 
     static let recycle = 8
 
+    private let configuration: URLSessionConfiguration
     private let lock = NSLock()
     private var waiters: [Int: Waiter] = [:]
     private var live: [Int: URLSession] = [:]
     private var served: [Int: Int] = [:]
     private var seq = 0
+
+    init(configuration: URLSessionConfiguration = .default) {
+        self.configuration = configuration
+        super.init()
+    }
 
     private func session(_ lane: Int) -> URLSession {
         lock.lock()
@@ -462,8 +576,8 @@ final class Pump: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
             s?.finishTasksAndInvalidate()
             s = nil
         }
-        let out = s ?? URLSession(configuration: .default, delegate: self,
-                                  delegateQueue: nil)
+        let out = s ?? URLSession(configuration: configuration,
+                                  delegate: self, delegateQueue: nil)
         served[lane] = s == nil ? 1 : n
         live[lane] = out
         lock.unlock()
@@ -488,62 +602,71 @@ final class Pump: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
         return w
     }
 
+    private func settle(_ task: URLSessionTask, _ error: Error?) {
+        if let w = take(task) {
+            try? w.sink.close()
+            if let error {
+                w.cont.resume(throwing: error)
+            } else {
+                w.cont.resume(returning: w.written)
+            }
+        }
+    }
+
     static func token(_ task: URLSessionTask) -> Int {
         Int(task.taskDescription ?? "") ?? -1
     }
 
-    func body(_ req: URLRequest, lane: Int,
+    func body(_ req: URLRequest, lane: Int, into part: URL, at offset: Int64,
               _ onBytes: @escaping @Sendable (Int64) -> Void)
-        async throws -> URL {
-        try await withCheckedThrowingContinuation { cont in
+        async throws -> Int64 {
+        let sink = try FileHandle(forWritingTo: part)
+        try sink.seek(toOffset: UInt64(offset))
+        return try await withCheckedThrowingContinuation { cont in
             let s = session(lane)
-            let task = s.downloadTask(with: req)
+            let task = s.dataTask(with: req)
             lock.lock()
             seq += 1
             let key = seq
-            waiters[key] = Waiter(cont: cont, onBytes: onBytes)
+            waiters[key] = Waiter(cont, sink, onBytes)
             lock.unlock()
             task.taskDescription = String(key)
             task.resume()
         }
     }
 
-    func urlSession(_ session: URLSession,
-                    downloadTask: URLSessionDownloadTask,
-                    didFinishDownloadingTo location: URL) {
-        let dst = FileManager.default.temporaryDirectory
-            .appendingPathComponent(
-                ProcessInfo.processInfo.globallyUniqueString)
-        let code = (downloadTask.response as? HTTPURLResponse)?.statusCode ?? 0
-        let w = take(downloadTask)
-        if code != 200 && code != 206 {
-            w?.cont.resume(throwing: HubError.http(
-                code, downloadTask.originalRequest?.url?.absoluteString ?? ""))
-        } else {
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
+                    didReceive response: URLResponse,
+                    completionHandler: @escaping @Sendable
+                        (URLSession.ResponseDisposition) -> Void) {
+        let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+        let ok = code == 200 || code == 206
+        if !ok {
+            settle(dataTask, HubError.http(
+                code, dataTask.originalRequest?.url?.absoluteString ?? ""))
+        }
+        completionHandler(ok ? .allow : .cancel)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
+                    didReceive data: Data) {
+        lock.lock()
+        let w = waiters[Pump.token(dataTask)]
+        lock.unlock()
+        if let w {
             do {
-                try FileManager.default.moveItem(at: location, to: dst)
-                w?.cont.resume(returning: dst)
+                try w.sink.write(contentsOf: data)
+                w.written += Int64(data.count)
+                w.onBytes(w.written)
             } catch {
-                w?.cont.resume(throwing: error)
+                settle(dataTask, error)
+                dataTask.cancel()
             }
         }
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask,
                     didCompleteWithError error: Error?) {
-        if let error {
-            take(task)?.cont.resume(throwing: error)
-        }
-    }
-
-    func urlSession(_ session: URLSession,
-                    downloadTask: URLSessionDownloadTask,
-                    didWriteData bytesWritten: Int64,
-                    totalBytesWritten: Int64,
-                    totalBytesExpectedToWrite: Int64) {
-        lock.lock()
-        let w = waiters[Pump.token(downloadTask)]
-        lock.unlock()
-        w?.onBytes(totalBytesWritten)
+        settle(task, error)
     }
 }

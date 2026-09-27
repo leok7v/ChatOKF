@@ -64,9 +64,14 @@ enum HtmlExport {
         var out = ""
         for run in attr.runs {
             let segment = esc(String(attr[run.range].characters))
+                .replacingOccurrences(of: Markdown.lineBreak, with: "<br>")
             let intent = run.inlinePresentationIntent ?? []
             var open: [String] = []
             var close: [String] = []
+            if run[SmallAttribute.self] == true {
+                open.append("<small>")
+                close.insert("</small>", at: 0)
+            }
             if let url = run.link {
                 open.append("<a href=\"\(escAttr(url.absoluteString))\">")
                 close.insert("</a>", at: 0)
@@ -86,6 +91,10 @@ enum HtmlExport {
             if intent.contains(.strikethrough) {
                 open.append("<del>")
                 close.insert("</del>", at: 0)
+            }
+            if run.underlineStyle != nil {
+                open.append("<u>")
+                close.insert("</u>", at: 0)
             }
             // Back to the tag the source wrote.
             if let level = run[ScriptAttribute.self] {

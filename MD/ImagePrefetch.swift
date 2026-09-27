@@ -105,6 +105,12 @@ enum ImagePrefetch {
         async -> [URL: T] {
         await fetch(document).compactMapValues(decode)
     }
+
+    static func fetchAndDecode<T>(_ urls: Set<URL>,
+                                  decode: @Sendable (Data) -> T?)
+        async -> [URL: T] {
+        await fetch(urls).compactMapValues(decode)
+    }
 }
 
 public enum MarkdownImages {

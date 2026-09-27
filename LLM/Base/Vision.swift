@@ -18,6 +18,20 @@ public enum VisionPreprocess {
         decode(data, maxPx: maxPx, transform: true)
     }
 
+    public static func scaled(_ cg: CGImage, maxPx: Int) -> CGImage? {
+        let longest = max(cg.width, cg.height, 1)
+        let scale = min(1, Double(maxPx) / Double(longest))
+        let w = max(Int((Double(cg.width) * scale).rounded()), 1)
+        let h = max(Int((Double(cg.height) * scale).rounded()), 1)
+        let ctx = CGContext(
+            data: nil, width: w, height: h, bitsPerComponent: 8,
+            bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        ctx?.interpolationQuality = .high
+        ctx?.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+        return ctx?.makeImage()
+    }
+
     public static func image(_ data: Data) -> CGImage? {
         CGImageSourceCreateWithData(data as CFData, nil).flatMap { src in
             CGImageSourceCreateImageAtIndex(src, 0, nil)

@@ -4,13 +4,46 @@ import SwiftUI
 // Not a layout engine; complex layouts degrade to readable text.
 enum TeX {
 
+    private struct LayoutKey: Hashable {
+        let tex: String
+        let size: CGFloat
+    }
+
+    private static let layoutLock = NSLock()
+    private static let layoutCapacity = 256
+    nonisolated(unsafe) private static var layouts: [LayoutKey: MathLayout?]
+        = [:]
+
     // KaTeX typesets a display where there is a context to draw into; nil
     // means it refused and the caller falls back to render(_:display:).
     static func layout(_ tex: String, size: CGFloat) -> MathLayout? {
-        var settings = MathSettings()
-        settings.displayMode = true
-        settings.fontSize = size
-        return try? KaTeX.layout(tex, settings: settings)
+        let key = LayoutKey(tex: tex, size: size)
+        layoutLock.lock()
+        defer { layoutLock.unlock() }
+        let result: MathLayout?
+        if let known = layouts[key] {
+            result = known
+        } else {
+            var settings = MathSettings()
+            settings.displayMode = true
+            settings.fontSize = size
+            result = try? KaTeX.layout(tex, settings: settings)
+            if layouts.count >= layoutCapacity { layouts.removeAll() }
+            layouts.updateValue(result, forKey: key)
+        }
+        return result
+    }
+
+    static var cachedLayoutCount: Int {
+        layoutLock.lock()
+        defer { layoutLock.unlock() }
+        return layouts.count
+    }
+
+    static func forgetLayouts() {
+        layoutLock.lock()
+        layouts.removeAll()
+        layoutLock.unlock()
     }
 
     // Display maths is set larger than the prose around it, the way a TeX
@@ -359,59 +392,58 @@ enum TeX {
         return result
     }
 
-    private enum TokenRule {
-        case bounded(NSRegularExpression, String)
-        case literal(String, String)
-    }
-
-    private static let tokenRules: [TokenRule] = tokenMap
-        .sorted { a, b in
-            a.key.count > b.key.count
-                || (a.key.count == b.key.count && a.key > b.key)
-        }
-        .compactMap { pair in tokenRule(pair.key, pair.value) }
-
-    private static func replaceTokens(_ s: String) -> String {
-        var out = s
-        for rule in tokenRules {
-            switch rule {
-                case .bounded(let re, let template):
-                    let ns = out as NSString
-                    out = re.stringByReplacingMatches(
-                        in: out,
-                        range: NSRange(location: 0, length: ns.length),
-                        withTemplate: template)
-                case .literal(let key, let value):
-                    out = out.replacingOccurrences(of: key, with: value)
+    static func replaceTokens(_ s: String) -> String {
+        let scalars = Array(s.unicodeScalars)
+        var out = String.UnicodeScalarView()
+        var i = 0
+        while i < scalars.count {
+            let taken = scalars[i] == "\\" ? expansion(scalars, at: i) : nil
+            if let taken {
+                out.append(contentsOf: taken.value.unicodeScalars)
+                i = taken.end
+            } else {
+                out.append(scalars[i])
+                i += 1
             }
         }
-        return out
+        return String(out)
+    }
+
+    private static func isAsciiLetter(_ c: Unicode.Scalar) -> Bool {
+        (c >= "a" && c <= "z") || (c >= "A" && c <= "Z")
     }
 
     // A control word ends where a non-letter begins, or \ne fires inside
     // \newcommand. Keys not ending in a letter have no boundary.
-    private static func tokenRule(_ key: String,
-                                  _ value: String) -> TokenRule? {
-        var result: TokenRule? = nil
-        if let last = key.last, last.isLetter {
-            let pattern = NSRegularExpression.escapedPattern(for: key)
-                        + "(?![A-Za-z])"
-            // Case-sensitive, as TeX is, except where the expansion is
-            // empty and dropping a mis-cased command loses nothing.
-            let folding: NSRegularExpression.Options =
-                value.isEmpty ? [.caseInsensitive] : []
-            if let re = try? NSRegularExpression(pattern: pattern,
-                                                 options: folding) {
-                result = .bounded(
-                    re, NSRegularExpression.escapedTemplate(for: value))
-            }
-        } else {
-            result = .literal(key, value)
+    private static func controlWordEnd(_ s: [Unicode.Scalar],
+                                       at i: Int) -> Int {
+        var end = i + 1
+        if end < s.count, isAsciiLetter(s[end]) {
+            while end < s.count, isAsciiLetter(s[end]) { end += 1 }
+        } else if end < s.count {
+            end += 1
+        }
+        return end
+    }
+
+    private static func expansion(_ s: [Unicode.Scalar], at i: Int)
+        -> (value: String, end: Int)? {
+        let end = controlWordEnd(s, at: i)
+        var word = ""
+        word.unicodeScalars.append(contentsOf: s[i..<end])
+        var result: (value: String, end: Int)? = nil
+        if end + 2 < s.count, s[end] == "{", s[end + 2] == "}",
+           let braced = tokenMap[word + "{" + String(s[end + 1]) + "}"] {
+            result = (braced, end + 3)
+        } else if let plain = tokenMap[word] {
+            result = (plain, end)
+        } else if let folded = tokenMap[word.lowercased()], folded.isEmpty {
+            result = ("", end)
         }
         return result
     }
 
-    private static let tokenMap: [String: String] = [
+    static let tokenMap: [String: String] = [
         "\\alpha": "\u{03B1}", "\\beta": "\u{03B2}", "\\gamma": "\u{03B3}",
         "\\delta": "\u{03B4}", "\\epsilon": "\u{03B5}",
         "\\varepsilon": "\u{03B5}", "\\zeta": "\u{03B6}",

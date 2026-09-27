@@ -33,9 +33,9 @@ enum PlainExport {
                 result = quote(inner)
             case .list(let items, _):
                 result = renderList(items)
-            case .table(let h, let rows, _):
-                result = TableMetrics.serializeMonospaced(headers: h,
-                                                          rows: rows)
+            case .table(let h, let rows, let alignments):
+                result = TableMetrics.serializeMonospaced(
+                    headers: h, rows: rows, alignments: alignments)
             case .math(let tex):
                 // The source, not the rendering, so a display pastes back
                 // as the markdown it was written in.
@@ -87,6 +87,8 @@ enum PlainExport {
                 out += segment
             }
         }
-        return out
+        return out.replacingOccurrences(
+            of: "[ \t]*" + Markdown.lineBreak + "[ \t]*", with: "  \n",
+            options: .regularExpression)
     }
 }

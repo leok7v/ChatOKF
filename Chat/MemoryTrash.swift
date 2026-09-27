@@ -25,9 +25,9 @@ public struct MemoryNote: Sendable {
     public let retired: Bool
 }
 
-struct TrashedMemory: Codable {
+struct TrashedMemory: Codable, Sendable {
 
-    struct Cut: Codable {
+    struct Cut: Codable, Sendable {
         let referrer: String
         let markup: String
         let label: String
@@ -45,19 +45,8 @@ struct TrashedMemory: Codable {
 
 extension Memories {
 
-    public static let trashFolder = ".trash"
-    public static let retention = ConversationStore.trashRetention
-
-    static let sourceMark = "chatokf://conversation/"
-
-    func refresh() {
-        list = (store?.concepts ?? [])
-            .map { concept in Memories.row(concept) }
-            .sorted { a, b in a.updated > b.updated }
-        trashed = readTrash()
-            .sorted { a, b in a.trashedAt > b.trashedAt }
-            .map { entry in Memories.row(entry) }
-    }
+    nonisolated public static let trashFolder = ".trash"
+    nonisolated public static let retention = ConversationStore.trashRetention
 
     public func notes(from conversation: UUID) -> [MemoryRow] {
         list.filter { row in row.source == conversation }
@@ -65,8 +54,9 @@ extension Memories {
 
     public func note(detail id: String) -> MemoryNote? {
         var out: MemoryNote? = nil
-        if let concept = store?.concept(id) {
-            out = MemoryNote(row: Memories.row(concept), type: concept.type,
+        if let concept = concepts[id],
+           let row = list.first(where: { row in row.id == id }) {
+            out = MemoryNote(row: row, type: concept.type,
                              body: concept.body, links: concept.links,
                              backlinks: concept.backlinks,
                              retired: concept.isDeprecated)
@@ -74,10 +64,32 @@ extension Memories {
         return out
     }
 
-    public func trash(_ id: String) {
+    public func trash(_ id: String) async {
+        adopt(await owner.trash(id))
+    }
+
+    public func restore(_ id: String) async {
+        adopt(await owner.restore(id))
+    }
+
+    public func deleteForever(_ id: String) async {
+        adopt(await owner.deleteForever(id))
+    }
+
+    public func emptyTrash() async {
+        adopt(await owner.emptyTrash())
+    }
+}
+
+extension MemoryStore {
+
+    static let sourceMark = "chatokf://conversation/"
+
+    func trash(_ id: String) -> MemorySnapshot? {
+        var out: MemorySnapshot? = nil
         if let store, let concept = store.concept(id) {
-            let cuts = Memories.locked { (try? store.unlink(id)) ?? [] }
-            let row = Memories.row(concept)
+            let cuts = (try? store.unlink(id)) ?? []
+            let row = MemoryStore.row(concept)
             let to = trashURL(id)
             let fm = FileManager.default
             try? fm.createDirectory(at: to.deletingLastPathComponent(),
@@ -95,44 +107,53 @@ extension Memories {
                                       markup: cut.markup, label: cut.label)
                 }))
             writeTrash(kept)
-            Memories.locked { store.load() }
-            refresh()
+            store.reload(id: id)
+            for referrer in Set(cuts.map { cut in cut.referrer }) {
+                store.reload(id: referrer)
+            }
+            out = snapshot(trashed: kept)
             Diag.shared.report(.turn, "[memories] trashed \(id), "
                 + "\(cuts.count) link(s) collapsed")
         }
+        return out
     }
 
-    public func restore(_ id: String) {
+    func restore(_ id: String) -> MemorySnapshot? {
         let kept = readTrash()
+        var out: MemorySnapshot? = nil
         if let store, let entry = kept.first(where: { e in e.id == id }) {
             let to = root.appendingPathComponent(id + ".md")
             let fm = FileManager.default
             try? fm.createDirectory(at: to.deletingLastPathComponent(),
                                     withIntermediateDirectories: true)
             try? fm.moveItem(at: trashURL(id), to: to)
-            Memories.locked {
-                store.relink(entry.unlinked.map { cut in
-                    RemovedLink(referrer: cut.referrer, markup: cut.markup,
-                                label: cut.label)
-                })
+            store.relink(entry.unlinked.map { cut in
+                RemovedLink(referrer: cut.referrer, markup: cut.markup,
+                            label: cut.label)
+            })
+            let remaining = kept.filter { e in e.id != id }
+            writeTrash(remaining)
+            store.reload(id: id)
+            for referrer in Set(entry.unlinked.map { cut in cut.referrer }) {
+                store.reload(id: referrer)
             }
-            writeTrash(kept.filter { e in e.id != id })
-            Memories.locked { store.load() }
-            refresh()
+            out = snapshot(trashed: remaining)
         }
+        return out
     }
 
-    public func deleteForever(_ id: String) {
+    func deleteForever(_ id: String) -> MemorySnapshot {
         let url = trashURL(id)
         try? FileManager.default.removeItem(at: url)
         prune(url.deletingLastPathComponent(), under: trashDir())
-        writeTrash(readTrash().filter { entry in entry.id != id })
-        refresh()
+        let remaining = readTrash().filter { entry in entry.id != id }
+        writeTrash(remaining)
+        return snapshot(trashed: remaining)
     }
 
-    public func emptyTrash() {
+    func emptyTrash() -> MemorySnapshot {
         try? FileManager.default.removeItem(at: trashDir())
-        refresh()
+        return snapshot()
     }
 
     func purgeExpired() {
@@ -155,8 +176,8 @@ extension Memories {
         MemoryRow(id: concept.id, area: Store.area(of: concept.id),
                   title: concept.title, description: concept.description,
                   tags: concept.tags,
-                  source: Memories.source(concept.extraFrontmatter),
-                  updated: Memories.modified(concept.path))
+                  source: MemoryStore.source(concept.extraFrontmatter),
+                  updated: MemoryStore.modified(concept.path))
     }
 
     static func row(_ entry: TrashedMemory) -> MemoryRow {
@@ -172,7 +193,7 @@ extension Memories {
     static func source(_ lines: [String]) -> UUID? {
         var out: UUID? = nil
         for line in lines where out == nil {
-            if let at = line.range(of: Memories.sourceMark) {
+            if let at = line.range(of: MemoryStore.sourceMark) {
                 out = UUID(uuidString: String(line[at.upperBound...])
                     .trimmingCharacters(in: .whitespaces))
             }

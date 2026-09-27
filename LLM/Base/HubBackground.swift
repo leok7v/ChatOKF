@@ -197,14 +197,14 @@ extension HubFetch {
 
     static func assemble(_ part: URL) throws -> Int64 {
         let fm = FileManager.default
-        var have = size(part)
+        var have = committed(part)
         var more = true
         while more {
             let next = piece(part, have)
             if fm.fileExists(atPath: next.path) {
-                try append(next, to: part)
+                have = try splice(next, into: part, at: have)
+                try commit(part, have)
                 try? fm.removeItem(at: next)
-                have = size(part)
                 Diag.shared.report(.net, "assembled to \(have)")
             } else {
                 more = false
@@ -216,7 +216,7 @@ extension HubFetch {
     static func carry(_ url: URL, _ e: Entry, _ part: URL, _ pump: Pump,
                       _ onBytes: @escaping @Sendable (Int64) -> Void)
         async throws {
-        var have = size(part)
+        var have = committed(part)
         while have < e.size {
             if BackgroundGate.shared.parked {
                 try await drain(url, e, part, onBytes)

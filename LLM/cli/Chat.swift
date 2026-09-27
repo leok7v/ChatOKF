@@ -241,7 +241,7 @@ func benchIds(_ encode: (String) -> [Int32]) -> [Int32] {
     }
     if rawArgs.contains("--wiki") {
         let text = turnArgs.first ?? ""
-        print(await Tools.wikipediaQuery(text, slugsPath: arg1))
+        print(await Tools.wikipediaQuery(text, slugs: WikiIndex(path: arg1)))
         exit(0)
     }
     if args.flag("--tok") {

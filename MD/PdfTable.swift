@@ -12,6 +12,8 @@ final class PDFTable {
     let aligns: [Markdown.Alignment]
     let cols: Int
     let rowPad: CGFloat = 4
+    private static let numeric =
+        try? NSRegularExpression(pattern: #"\d[\d.,]*\d"#)
 
     init(renderer: PDFRenderer, headers: [String], rows: [[String]],
          aligns: [Markdown.Alignment], cols: Int) {
@@ -23,30 +25,32 @@ final class PDFTable {
     }
 
     func draw() {
-        let widths = columnWidths()
-        if !headers.isEmpty {
-            drawRow(headers, bold: true, shade: r.headerShadeColor,
-                    widths: widths)
+        let header = headers.enumerated().map { pair in
+            cellAttributed(pair.element, bold: true, col: pair.offset)
         }
-        for (idx, row) in rows.enumerated() {
-            drawRow(row, bold: false,
-                    shade: idx % 2 == 1 ? r.rowShadeColor : nil,
+        let body = rows.map { row in
+            row.enumerated().map { pair in
+                cellAttributed(pair.element, bold: false, col: pair.offset)
+            }
+        }
+        let widths = columnWidths(header: header, body: body)
+        if !header.isEmpty {
+            drawRow(header, shade: r.headerShadeColor, widths: widths)
+        }
+        for (idx, row) in body.enumerated() {
+            drawRow(row, shade: idx % 2 == 1 ? r.rowShadeColor : nil,
                     widths: widths)
         }
     }
 
-    private func columnWidths() -> [CGFloat] {
-        let mins: [CGFloat] = (0..<cols).map { c in
-            var widest: CGFloat = 0
-            if c < headers.count {
-                let w = renderedWidth(headers[c], bold: true)
-                if w > widest { widest = w }
+    private func columnWidths(header: [NSAttributedString],
+                              body: [[NSAttributedString]]) -> [CGFloat] {
+        var mins = [CGFloat](repeating: 2 * rowPad, count: cols)
+        for row in [header] + body {
+            for (c, cell) in row.enumerated() where c < cols {
+                let w = renderedWidth(cell) + 2 * rowPad
+                if w > mins[c] { mins[c] = w }
             }
-            for row in rows where c < row.count {
-                let w = renderedWidth(row[c], bold: false)
-                if w > widest { widest = w }
-            }
-            return widest + 2 * rowPad
         }
         var widths = TableMetrics.pointWidths(headers: headers, rows: rows,
                                               available: r.contentWidth,
@@ -59,12 +63,13 @@ final class PDFTable {
         return widths
     }
 
-    private func drawRow(_ cells: [String], bold: Bool, shade: CGColor?,
+    private func drawRow(_ cells: [NSAttributedString], shade: CGColor?,
                          widths: [CGFloat]) {
+        let empty = NSAttributedString()
         var rowH: CGFloat = r.bodySize * 1.3
         for c in 0..<cols {
-            let txt = c < cells.count ? cells[c] : ""
-            let h = cellHeight(txt, bold: bold, width: widths[c] - 2 * rowPad)
+            let cell = c < cells.count ? cells[c] : empty
+            let h = cellHeight(cell, width: widths[c] - 2 * rowPad)
             if h > rowH { rowH = h }
         }
         r.ensureSpace(rowH + rowPad * 2)
@@ -78,9 +83,9 @@ final class PDFTable {
         var maxUsed: CGFloat = 0
         var x = r.contentLeft
         for c in 0..<cols {
-            let txt = c < cells.count ? cells[c] : ""
-            let used = drawCell(txt, bold: bold, x: x + rowPad, topY: savedY,
-                                width: widths[c] - 2 * rowPad, col: c)
+            let cell = c < cells.count ? cells[c] : empty
+            let used = drawCell(cell, x: x + rowPad, topY: savedY,
+                                width: widths[c] - 2 * rowPad)
             if used > maxUsed { maxUsed = used }
             x += widths[c]
         }
@@ -93,9 +98,8 @@ final class PDFTable {
         r.y -= rowPad
     }
 
-    private func drawCell(_ txt: String, bold: Bool, x: CGFloat, topY: CGFloat,
-                          width: CGFloat, col: Int) -> CGFloat {
-        let inner = cellAttributed(txt, bold: bold, col: col)
+    private func drawCell(_ inner: NSAttributedString, x: CGFloat,
+                          topY: CGFloat, width: CGFloat) -> CGFloat {
         let fs = CTFramesetterCreateWithAttributedString(inner)
         let rect = CGRect(x: x, y: r.contentBottom, width: width,
                           height: topY - r.contentBottom)
@@ -107,15 +111,13 @@ final class PDFTable {
         return used
     }
 
-    private func renderedWidth(_ text: String, bold: Bool) -> CGFloat {
-        let line = CTLineCreateWithAttributedString(
-            cellAttributed(text, bold: bold, col: 0))
+    private func renderedWidth(_ inner: NSAttributedString) -> CGFloat {
+        let line = CTLineCreateWithAttributedString(inner)
         return CTLineGetBoundsWithOptions(line, []).width
     }
 
-    private func cellHeight(_ txt: String, bold: Bool,
+    private func cellHeight(_ inner: NSAttributedString,
                             width: CGFloat) -> CGFloat {
-        let inner = cellAttributed(txt, bold: bold, col: 0)
         let fs = CTFramesetterCreateWithAttributedString(inner)
         let rect = CGRect(x: 0, y: 0, width: width, height: r.pageSize.height)
         let path = CGPath(rect: rect, transform: nil)
@@ -126,7 +128,7 @@ final class PDFTable {
 
     private func cellAttributed(_ text: String, bold: Bool,
                                 col: Int) -> NSAttributedString {
-        let parsed = Markdown.parse(text)
+        let parsed = Markdown.parseCell(text)
         var attr = AttributedString(text)
         if let first = parsed.items.first,
            case .paragraph(let a) = first.block {
@@ -139,7 +141,11 @@ final class PDFTable {
         let m = NSMutableAttributedString()
         for run in attr.runs {
             let intent = run.inlinePresentationIntent ?? []
-            let font = runFont(intent: intent, size: baseSize, bold: bold)
+            let small = run[SmallAttribute.self] == true
+            let font = runFont(intent: intent,
+                               size: small ? (baseSize * 0.85).rounded()
+                                           : baseSize,
+                               bold: bold)
             var attrs: [NSAttributedString.Key: Any] = [
                 .font: font,
                 .foregroundColor: r.textColor,
@@ -193,7 +199,7 @@ final class PDFTable {
     // a number like "70.1" or "1,234.56" across lines in a narrow cell.
     private func protectNumerics(_ s: String) -> String {
         var result = s
-        if let re = try? NSRegularExpression(pattern: #"\d[\d.,]*\d"#) {
+        if let re = PDFTable.numeric {
             let ns = s as NSString
             let full = NSRange(location: 0, length: ns.length)
             let matches = re.matches(in: s, range: full)

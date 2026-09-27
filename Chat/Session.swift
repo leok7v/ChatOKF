@@ -9,6 +9,7 @@ public enum TurnEvent: Sendable {
     case toolRound(ToolRoundEvent)
     case looking(VideoPeek)
     case doneLooking
+    case soft(URL)
     case stats(TurnMetrics)
     case finished(ChatSession.TurnOutcome, TurnMetrics)
     case cancelled
@@ -23,6 +24,7 @@ public enum TurnEvent: Sendable {
         public let onToolRound: @Sendable (ToolRoundEvent) -> Void
         public let onLooking: @Sendable (VideoPeek) -> Void
         public let onDoneLooking: @Sendable () -> Void
+        public let onSoft: @Sendable (URL) -> Void
     }
 
     public var modelName: String
@@ -36,7 +38,7 @@ public enum TurnEvent: Sendable {
     private var ggufTemplate = ""
     private var ggufVocabCount = 0
     private var activePresets: SamplingPresets?
-    private var media: (any MediaEncoder)?
+    var media: (any MediaEncoder)?
     public var audioSampleRate: Double? { media?.audioSampleRate }
     public var maxAudioSeconds: Double? { media?.maxAudioSeconds }
     var session: ChatSession?
@@ -55,6 +57,8 @@ public enum TurnEvent: Sendable {
 
     public var hasSession: Bool { session != nil }
     public var metaTaskRunning: Bool { metaTask != nil }
+    public internal(set) var storage = StorageReport()
+    @ObservationIgnored var storageAsked = 0
 
     private let traceFile: TraceFile? =
         DiagGate.transcript.on ? TraceFile() : nil
@@ -159,6 +163,7 @@ public enum TurnEvent: Sendable {
         ggufTemplate = template
         ggufVocabCount = vocabSize
         activePresets = presets
+        turnTables = nil
     }
 
     public func buildGguf(name: String, path: String) async -> String? {
@@ -176,6 +181,7 @@ public enum TurnEvent: Sendable {
             activePresets = built.presets
             modelShape = built.shape
             pendingWarm = built.warm
+            turnTables = (built.breakers, built.grammarVocab)
             media = loaded.media
             modelName = name
             failure = nil
@@ -190,7 +196,11 @@ public enum TurnEvent: Sendable {
         let presets: SamplingPresets
         let shape: ModelShape
         let warm: WeightWarm
+        let breakers: Set<Int32>
+        let grammarVocab: GrammarVocab?
     }
+
+    private var turnTables: (breakers: Set<Int32>, vocab: GrammarVocab?)?
 
     nonisolated private static func loadHeavy(name: String, path: String)
         async -> (built: HeavyBuild?, media: (any MediaEncoder)?) {
@@ -201,10 +211,9 @@ public enum TurnEvent: Sendable {
             if Gemma4Model.isGemma4(path: path) {
                 let c = try GemmaChat(ggufPath: path)
                 let gpu = try c.metalBackend()
-                built = HeavyBuild(
-                    backend: gpu, template: c.chatTemplate,
-                    vocab: c.vocabCount, presets: c.samplingPresets,
-                    shape: c.shape,
+                built = Session.built(
+                    gpu, template: c.chatTemplate, vocab: c.vocabCount,
+                    presets: c.samplingPresets, shape: c.shape,
                     warm: c.weightWarm(drafting: gpu.draftWidth > 1))
                 Session.draftCount = gpu.draftWidth
                 if await gpu.supportsSoftTokens() {
@@ -215,8 +224,8 @@ public enum TurnEvent: Sendable {
                 c.engine.loadMTP(drafts: c.mtpDrafts)
                 Session.draftCount = c.mtpDrafts
                 let backend = c.backend()
-                built = HeavyBuild(
-                    backend: backend, template: c.chatTemplate,
+                built = Session.built(
+                    backend, template: c.chatTemplate,
                     vocab: c.tokenizer.vocabCount,
                     presets: c.samplingPresets, shape: c.shape,
                     warm: c.weightWarm(drafting: c.mtpDrafts > 0))
@@ -228,6 +237,23 @@ public enum TurnEvent: Sendable {
         }
         Footprint.report(.load, "loaded \(name)")
         return (built, loadedMedia)
+    }
+
+    nonisolated private static func built(
+        _ backend: any AgentBackend, template: String, vocab: Int,
+        presets: SamplingPresets, shape: ModelShape,
+        warm: WeightWarm) -> HeavyBuild {
+        let began = Date()
+        let breakers = ChatSession.sequenceBreakers(backend, vocabSize: vocab)
+        let grammar = ChatSession.grammarVocab(backend, vocabSize: vocab,
+                                               template: template)
+        Diag.shared.report(.load, String(
+            format: "[chat] %d breakers, grammar %@, over %d tokens in %.0f ms",
+            breakers.count, grammar == nil ? "none" : "table", vocab,
+            Date().timeIntervalSince(began) * 1000))
+        return HeavyBuild(backend: backend, template: template, vocab: vocab,
+                          presets: presets, shape: shape, warm: warm,
+                          breakers: breakers, grammarVocab: grammar)
     }
 
     private var pendingWarm: WeightWarm?
@@ -348,7 +374,7 @@ public enum TurnEvent: Sendable {
         return note
     }
 
-    public static func rate(_ v: Double) -> String {
+    nonisolated public static func rate(_ v: Double) -> String {
         v > 0 ? String(format: "%.1f", v) : "-"
     }
 
@@ -477,7 +503,9 @@ public enum TurnEvent: Sendable {
                 softReasoningCap: config.thinkTokenCap,
                 overthink: Session.overthinkLambda,
                 seed: Flags.uint64("seed") ?? 0, runner: toolRunner,
-                readGuard: Session.memoryGuard)
+                readGuard: Session.memoryGuard,
+                breakers: turnTables?.breakers,
+                grammarVocab: turnTables?.vocab)
             Diag.shared.report(.load, "[chat] session \(modelName): thinking "
                 + (thinkingActive ? "on" : "off, reasoning suppressed")
                 + ", asked " + (config.thinking ? "on" : "off")
@@ -500,7 +528,7 @@ public enum TurnEvent: Sendable {
         return out
     }
 
-    private static var precookDir: URL {
+    nonisolated private static var precookDir: URL {
         FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
             .appendingPathComponent(Bundle.main.bundleIdentifier ?? "app")
             .appendingPathComponent("precook", isDirectory: true)
@@ -513,9 +541,9 @@ public enum TurnEvent: Sendable {
     }
 
     // A 27B cooks to hundreds of MB.
-    private static let precookBudget = 4 << 30
+    nonisolated private static let precookBudget = 4 << 30
 
-    private static func prunePrecook(keeping: URL) {
+    nonisolated private static func prunePrecook(keeping: URL) {
         let fm = FileManager.default
         let keys: [URLResourceKey] = [.contentModificationDateKey]
         let found = (try? fm.contentsOfDirectory(
@@ -535,7 +563,7 @@ public enum TurnEvent: Sendable {
         }
     }
 
-    private static func isStampNamed(_ url: URL) -> Bool {
+    nonisolated private static func isStampNamed(_ url: URL) -> Bool {
         let stamp = url.lastPathComponent.split(separator: ".").last ?? ""
         return stamp.count == 16
             && stamp.allSatisfy { c in c.isHexDigit && !c.isUppercase }
@@ -576,13 +604,15 @@ public enum TurnEvent: Sendable {
             await s.primeOrCook(at: url, resetFirst: reset)
             await s.awaitPriming()
             Session.recordParkRate(modelName, await s.lastSaved)
-            Session.prunePrecook(keeping: url)
+            Task.detached { Session.prunePrecook(keeping: url) }
         }
     }
 
     public func primeSession(resetFirst: Bool = false) {
         if let session {
+            let prior = primingTask
             primingTask = Task {
+                await prior?.value
                 await self.primeOrCookInternal(session, reset: resetFirst)
             }
         }
@@ -590,6 +620,10 @@ public enum TurnEvent: Sendable {
 
     public func awaitPrimed() async {
         await primingTask?.value
+    }
+
+    public func awaitMeta() async {
+        await metaTask?.value
     }
 
     public func pushSpeculation(_ on: Bool) async {
@@ -624,7 +658,8 @@ public enum TurnEvent: Sendable {
         await session?.setThinking(on)
         await session?.setSuppressReasoning(!on)
         if fresh {
-            if let session { await primeOrCookInternal(session, reset: true) }
+            primeSession(resetFirst: true)
+            await awaitPrimed()
         }
     }
 
@@ -760,7 +795,8 @@ public enum TurnEvent: Sendable {
                 Task { @MainActor in self.noteToolRound(event) }
             },
             onLooking: { peek in cont.yield(.looking(peek)) },
-            onDoneLooking: { cont.yield(.doneLooking) })
+            onDoneLooking: { cont.yield(.doneLooking) },
+            onSoft: { url in cont.yield(.soft(url)) })
     }
 
     private func statsTicker(_ session: ChatSession,
@@ -852,6 +888,11 @@ public enum TurnEvent: Sendable {
             hooks.onDoneLooking()
             try Task.checkCancellation()
             if built.perImage > 0 { self.perImageTokens = built.perImage }
+            if Session.resumable, let kept = await Session.keep(SoftTurn(
+                stamp: Session.parkStamp(self.modelName), labelled: labelled,
+                parts: built.parts, spans: built.spans)) {
+                hooks.onSoft(kept)
+            }
             let ask = typed.isEmpty
                 ? Session.softDefaultPrompt(built.parts) : typed
             return session.replySoft(
@@ -868,7 +909,7 @@ public enum TurnEvent: Sendable {
         -> (asked: Message, events: AsyncStream<TurnEvent>)? {
         var result: (asked: Message, events: AsyncStream<TurnEvent>)? = nil
         if session != nil {
-            var asked = Message(fromUser: true, text: display)
+            var asked = Message(fromUser: true, text: display, prompt: prompt)
             asked.docs = docs
             let events = runTurn(thinkTokenCap: thinkTokenCap,
                                  thinkingActive: thinkingActive,
@@ -892,12 +933,13 @@ public enum TurnEvent: Sendable {
         var result: (asked: Message, events: AsyncStream<TurnEvent>)? = nil
         if let media, session != nil {
             let previews = images.compactMap { img in
-                VisionPreprocess.thumbnail(img.data, maxPx: 640)
+                img.preview ?? VisionPreprocess.thumbnail(img.data, maxPx: 640)
             }
             var asked = Message(
                 fromUser: true, text: display, images: previews,
                 clips: clips.filter { c in c.isVideo }.map { c in c.url },
-                posters: clips.compactMap { c in c.thumbnail })
+                posters: clips.compactMap { c in c.thumbnail },
+                prompt: typed)
             asked.docs = docs
             asked.placeholder = placeholder
             let events = softTurn(typed, labelled: labelled,
@@ -921,13 +963,14 @@ public enum TurnEvent: Sendable {
         if let media, session != nil {
             let secs = said.reduce(0.0) { sum, u in sum + u.seconds }
             let previews = images.compactMap { img in
-                VisionPreprocess.thumbnail(img.data, maxPx: 640)
+                img.preview ?? VisionPreprocess.thumbnail(img.data, maxPx: 640)
             }
             var asked = Message(
                 fromUser: true, text: String(format: "Spoken, %.1fs", secs),
                 images: previews,
                 clips: clips.filter { c in c.isVideo }.map { c in c.url },
-                posters: clips.compactMap { c in c.thumbnail })
+                posters: clips.compactMap { c in c.thumbnail },
+                prompt: typed.isEmpty ? Session.spokenPrompt : typed)
             asked.docs = docs
             asked.placeholder = true
             let seen = !images.isEmpty || !clips.isEmpty
@@ -971,14 +1014,15 @@ public enum TurnEvent: Sendable {
                 await running?.value
                 if titled, !Task.isCancelled {
                     let t = await session.makeTitle()
-                    if !t.isEmpty { onTitle(t) }
+                    if !t.isEmpty, !Task.isCancelled { onTitle(t) }
                 }
                 if wantsFollowup, !Task.isCancelled {
-                    onFollowup(await session.makeFollowup())
+                    let hint = await session.makeFollowup()
+                    if !Task.isCancelled { onFollowup(hint) }
                 }
                 if let extraction, !Task.isCancelled {
                     let got = await extract(extraction)
-                    if !got.isEmpty { onRemembered(got) }
+                    if !got.isEmpty, !Task.isCancelled { onRemembered(got) }
                 }
                 self.metaTask = nil
             }
@@ -1016,7 +1060,28 @@ public enum TurnEvent: Sendable {
 
     public static let spokenPrompt = "Reply to what I just said."
 
-    private static func softDefaultPrompt(_ parts: [ContentPart]) -> String {
+    nonisolated static var resumable: Bool { Flags.on("resumable") }
+
+    nonisolated static func keep(_ turn: SoftTurn) async -> URL? {
+        await Task.detached {
+            let url = SoftFile.url(UUID().uuidString + ".soft")
+            let t0 = Date()
+            var out: URL? = nil
+            do {
+                try SoftFile.write(turn, to: url)
+                out = url
+                Diag.shared.report(.turn, String(
+                    format: "[soft] kept %d rows, %d KB in %.2fs", turn.rows,
+                    Session.treeBytes(url) >> 10,
+                    Date().timeIntervalSince(t0)))
+            } catch {
+                Diag.shared.report("[soft] not kept: \(error)")
+            }
+            return out
+        }.value
+    }
+
+    nonisolated static func softDefaultPrompt(_ parts: [ContentPart]) -> String {
         var images = 0, videos = 0, sounds = 0
         for part in parts {
             switch part {

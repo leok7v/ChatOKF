@@ -83,6 +83,19 @@ struct ContentView: View {
     @State private var actionsHovering = false
     @State private var actionsExporting = false
     @State private var shellWidth: CGFloat = 0
+    @State private var warmed: (conversation: UUID?, ids: Set<UUID>) =
+        (nil, [])
+
+    static let deferAbove = 40
+    static let warmTail = 12
+
+    private var warmedIds: Set<UUID> {
+        warmed.conversation == model.currentConversationId ? warmed.ids : []
+    }
+
+    private func warm(_ id: UUID) {
+        warmed = (model.currentConversationId, warmedIds.union([id]))
+    }
 
     var body: some View {
         content
@@ -99,6 +112,19 @@ struct ContentView: View {
                 Button("OK") { }
             } message: {
                 Text(model.downloadFailure ?? "")
+            }
+            .alert("Download \(Models.display(model.resumeAsk ?? ""))?",
+                   isPresented: Binding(
+                get: { model.resumeAsk != nil },
+                set: { shown in if !shown { model.resumeAsk = nil } }
+            )) {
+                Button("Download") { model.downloadForResume() }
+                Button("Read Only", role: .cancel) { model.resumeAsk = nil }
+            } message: {
+                Text("The pictures or speech in this conversation were kept "
+                   + "for \(Models.display(model.resumeAsk ?? "")), which is "
+                   + "not on this device. Download it to continue the "
+                   + "conversation, or read it as it is.")
             }
     }
 
@@ -158,7 +184,7 @@ struct ContentView: View {
     private var newChatShortcut: some View {
         Button("", action: openNewChat)
             .keyboardShortcut("n", modifiers: .command)
-            .disabled(model.busy)
+            .disabled(model.locked)
             .hidden()
     }
 
@@ -181,7 +207,7 @@ struct ContentView: View {
             Image(systemName: "square.and.pencil")
         }
         .help("New chat")
-        .disabled(model.busy)
+        .disabled(model.locked)
         .simultaneousGesture(revealHidden, including: isOS ? .all : .none)
     }
 
@@ -202,7 +228,7 @@ struct ContentView: View {
                     }
                     .help("Hide actions")
                     TranscriptActions(
-                        document: model.transcriptDocument,
+                        messages: model.messages,
                         title: model.transcriptTitle,
                         renderMarkdown: $model.renderMarkdown,
                         exporting: $actionsExporting,
@@ -354,7 +380,7 @@ struct ContentView: View {
             as? String) ?? "ChatOKF"
 
     private var pickable: [String] {
-        Models.offered(unlocked: model.unlocked)
+        model.offered(unlocked: model.unlocked)
     }
 
     private func pick(_ name: String) {
@@ -613,7 +639,11 @@ struct ContentView: View {
                 .simultaneousGesture(pinchZoom,
                                      including: isOS ? .all : .none)
                 .modifier(Shimmer(active: ContentView.stallProbeOn))
-            if !model.readOnly { composerBar }
+            if !model.readOnly || model.replaying {
+                composerBar
+            } else if model.statusLine, !model.savedLabel.isEmpty {
+                savedStatusLine
+            }
         }
         .dropDestination(for: URL.self) { urls, _ in
             model.handleDrop(urls, at: model.caret)
@@ -651,10 +681,7 @@ struct ContentView: View {
                 .textFieldStyle(.plain)
                 .focused($findFocused)
                 .onSubmit { findStep(findController.findNext) }
-                .onChange(of: findQuery) { _, q in
-                    findCount = findController.find(q)
-                    findCurrent = findController.currentMatch
-                }
+                .task(id: findQuery) { await runFind() }
             if findCount > 0 {
                 Text("\(findCurrent)/\(findCount)")
                     .appFont(.caption).monospacedDigit()
@@ -679,6 +706,14 @@ struct ContentView: View {
         .background(.bar)
         .overlay(alignment: .bottom) { Divider() }
         .transition(.move(edge: .top).combined(with: .opacity))
+    }
+
+    private func runFind() async {
+        try? await Task.sleep(for: .milliseconds(120))
+        if !Task.isCancelled {
+            findCount = findController.find(findQuery)
+            findCurrent = findController.currentMatch
+        }
     }
 
     private func openFind() {
@@ -831,6 +866,25 @@ struct ContentView: View {
         .padding(.vertical, 4)
     }
 
+    private var savedStatusLine: some View {
+        VStack(spacing: 0) {
+            Divider()
+            HStack {
+                Text(model.savedLabel)
+                    .font(.system(size: statusPoints))
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.5)
+                Spacer()
+            }
+            .padding(.leading, 16)
+            .padding(.trailing, 12)
+            .padding(.vertical, 4)
+        }
+        .background(.bar)
+    }
+
     @ViewBuilder
     private var statusText: some View {
         if model.statsLabel.isEmpty {
@@ -872,8 +926,15 @@ struct ContentView: View {
                 // its top scrolls off-screen; a long answer is one such row.
                 VStack(alignment: .leading, spacing: 12) {
                     let _ = Instrument.beat("transcript")
+                    let title = model.transcriptTitle
+                    let firstReasoning = firstReasoningId
+                    let warm = warmIds
                     ForEach(model.messages) { m in
-                        bubble(m).id(m.id)
+                        bubble(m, title: title, firstReasoning: firstReasoning,
+                               cold: warm.map { ids in
+                                   !ids.contains(m.id)
+                               } ?? false)
+                            .id(m.id)
                     }
                     if model.showSamples { samplePills }
                     Color.clear
@@ -1044,7 +1105,17 @@ struct ContentView: View {
         .buttonStyle(.plain)
     }
 
-    private func bubble(_ m: Message) -> some View {
+    private var warmIds: Set<UUID>? {
+        var out: Set<UUID>? = nil
+        if model.messages.count > ContentView.deferAbove {
+            out = warmedIds.union(
+                model.messages.suffix(ContentView.warmTail).map { m in m.id })
+        }
+        return out
+    }
+
+    private func bubble(_ m: Message, title: String,
+                        firstReasoning: UUID?, cold: Bool) -> some View {
         HStack {
             if m.fromUser { Spacer(minLength: 40) }
             VStack(alignment: m.fromUser ? .trailing : .leading,
@@ -1075,7 +1146,7 @@ struct ContentView: View {
                                   label: isThinking(m)
                                          ? model.thinkLabel : "Thoughts",
                                   maxHeight: chatHeight / 3,
-                                  first: m.id == firstReasoningId)
+                                  first: m.id == firstReasoning)
                 }
                 if !m.fromUser, !m.toolRounds.isEmpty {
                     ToolCallStrip(messageId: m.id, rounds: m.toolRounds,
@@ -1084,10 +1155,9 @@ struct ContentView: View {
                 // Answer text on screen outranks the status line: a tool
                 // round raises `prefilling` again and would blink it away.
                 if let answer = answerText(m) {
-                    answerBubble(m, answer)
+                    answerBubble(m, answer, cold: cold)
                     if !m.fromUser, !isLive(m) {
-                        AnswerActions(text: answer,
-                                      title: model.transcriptTitle)
+                        AnswerActions(text: answer, title: title)
                     }
                 } else if !m.fromUser, isPrefilling(m) {
                     prefillWhimsical
@@ -1101,6 +1171,9 @@ struct ContentView: View {
                    alignment: .leading)
             .frame(maxWidth: m.fromUser ? nil : .infinity,
                    alignment: .leading)
+        }
+        .onScrollVisibilityChange(threshold: 0.05) { visible in
+            if visible && cold { warm(m.id) }
         }
     }
 
@@ -1157,10 +1230,10 @@ struct ContentView: View {
         m.id == model.messages.last?.id ? model.speech.spokenText : nil
     }
 
-    private func answerBubble(_ m: Message,
-                              _ answer: String) -> some View {
+    private func answerBubble(_ m: Message, _ answer: String,
+                              cold: Bool) -> some View {
         Group {
-            if !m.fromUser && model.renderMarkdown
+            if !m.fromUser && model.renderMarkdown && !cold
                 && !m.answerDoc.items.isEmpty {
                 MarkdownTextView(m.answerDoc,
                                  style: ContentView.scaled(

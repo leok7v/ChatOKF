@@ -285,6 +285,24 @@ final class JinjaGoldenTests: XCTestCase {
         expect("{{ xs[3:0:-1]|join(',') }}", "4,3,2", [("xs", xs)], m)
     }
 
+    func testStringIndexingByCodePoint() {
+        let s: [(String, JinjaValue)] = [("s", .str("h\u{E9}llo w\u{F6}rld"))]
+        expect("{{ s[1:4] }}", "\u{E9}ll", s)
+        expect("{{ s[-5:] }}", "w\u{F6}rld", s)
+        expect("{{ s[::-1] }}", "dlr\u{F6}w oll\u{E9}h", s)
+        expect("{{ s[::2] }}", "hlowrd", s)
+        expect("{{ s[7:1:-2] }}", "\u{F6} l", s)
+        expect("{{ s[:3] }}", "h\u{E9}l", s)
+        expect("[{{ s[20:] }}]", "[]", s)
+        expect("{{ s[-3:-1] }}", "rl", s)
+        expect("{{ s[1] }}/{{ s[-1] }}/{{ s[10] }}", "\u{E9}/d/d", s)
+        expect("{{ s|length }}/{{ s|first }}/{{ s|last }}", "11/h/d", s)
+        expect("{{ '\u{F6}' in s }}/{{ 'x' in s }}", "True/False", s)
+        let t: [(String, JinjaValue)] = [("t", .str("a\u{1F600}b"))]
+        expect("{{ t[1] }}/{{ t|length }}", "\u{1F600}/3", t)
+        expect("{{ t[::-1] }}/{{ t[1:] }}", "b\u{1F600}a/\u{1F600}b", t)
+    }
+
     func testLiteralsAndLogic() {
         let m = Model()
         expect("{{ {'a': 1, 'b': 2}|length }}", "2")

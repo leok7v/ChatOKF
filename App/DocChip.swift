@@ -11,12 +11,9 @@ struct DocChip: View {
 
     private var name: String { doc.url.lastPathComponent }
 
-    private var present: Bool {
-        FileManager.default.fileExists(atPath: doc.url.path)
-    }
-
     var body: some View {
-        Button {
+        let present = FileManager.default.fileExists(atPath: doc.url.path)
+        return Button {
             if present { previewing = doc.url }
         } label: {
             HStack(spacing: 10) {
@@ -45,7 +42,7 @@ struct DocChip: View {
         .buttonStyle(.plain)
         .disabled(!present)
         .quickLookPreview($previewing)
-        .task { page = DocChip.firstPage(doc.url) }
+        .task { page = await DocChip.firstPage(doc.url) }
     }
 
     private var size: String {
@@ -88,7 +85,11 @@ struct DocChip: View {
         }
     }
 
-    private static func firstPage(_ url: URL) -> CGImage? {
+    private static func firstPage(_ url: URL) async -> CGImage? {
+        await Task.detached { DocChip.render(url) }.value
+    }
+
+    nonisolated private static func render(_ url: URL) -> CGImage? {
         var out: CGImage? = nil
         // `file` must stay bound: a page whose PDFDocument has been released
         // draws nothing, and says so at runtime rather than at compile time.

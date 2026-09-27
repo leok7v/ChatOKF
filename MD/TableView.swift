@@ -9,27 +9,27 @@ struct TableBlock: View {
     let alignments: [Markdown.Alignment]
     let style: MarkdownStyle
     @State private var available: CGFloat = 0
+    @State private var measure = TableMeasure()
 
     var body: some View {
-        let h = headers.map { s in TableMetrics.normalize(s) }
-        let r = rows.map { row in row.map { s in TableMetrics.normalize(s) } }
-        let n = TableMetrics.columnCount(headers: h, rows: r)
-        let layout = columnLayout(n, headers: h, rows: r)
+        let t = measure.measured(headers: headers, rows: rows, style: style)
+        let layout = columnLayout(t)
         let fills = layout.wrap && !layout.scrolls
         let fitWidth: CGFloat? = fills ? max(0, available - 16) : nil
         ScrollView(.horizontal, showsIndicators: false) {
             VStack(alignment: .leading, spacing: 0) {
-                if !h.isEmpty {
-                    rowView(h, bold: true, shade: style.tableHeaderShade,
-                            n: n, widths: layout.widths, wrap: layout.wrap,
+                if !t.headers.isEmpty {
+                    rowView(t.headers, bold: true,
+                            shade: style.tableHeaderShade, n: t.cols,
+                            widths: layout.widths, wrap: layout.wrap,
                             fills: fills)
                     Divider()
                 }
-                ForEach(Array(r.enumerated()), id: \.offset) { pair in
+                ForEach(Array(t.rows.enumerated()), id: \.offset) { pair in
                     rowView(pair.element, bold: false,
                             shade: pair.offset % 2 == 1
                                 ? style.tableRowShade : Color.clear,
-                            n: n, widths: layout.widths, wrap: layout.wrap,
+                            n: t.cols, widths: layout.widths, wrap: layout.wrap,
                             fills: fills)
                 }
             }
@@ -44,24 +44,21 @@ struct TableBlock: View {
             if w > 0, w != available { available = w }
         })
         .overlay(alignment: .topTrailing) {
-            CopyButton(text: TableMetrics.serializeMonospaced(
-                headers: h, rows: r), style: style).padding(6)
+            CopyButton(text: t.monospaced, style: style).padding(6)
         }
     }
 
     // Natural widths when they fit; else fit-to-available floored at each
     // column's longest word. nil until the first geometry pass lands.
-    private func columnLayout(_ n: Int, headers h: [String],
-                              rows r: [[String]])
+    private func columnLayout(_ t: TableMeasure.Measured)
         -> (widths: [CGFloat]?, wrap: Bool, scrolls: Bool) {
         var result: (widths: [CGFloat]?, wrap: Bool, scrolls: Bool) =
             (nil, false, false)
-        let usable = available - CGFloat(max(n - 1, 0)) * 12 - 16
-        if available > 0, n > 0 {
+        let usable = available - CGFloat(max(t.cols - 1, 0)) * 12 - 16
+        if available > 0, t.cols > 0 {
             let fit = TableMetrics.scrollingLayout(
-                headers: h, rows: r,
-                natural: naturalWidths(n, headers: h, rows: r),
-                minimums: minimumWidths(n, headers: h, rows: r),
+                headers: t.headers, rows: t.rows,
+                natural: t.naturals, minimums: t.minimums,
                 available: usable)
             if !fit.widths.isEmpty {
                 result = (fit.widths, fit.wrap, fit.scrolls)
@@ -88,7 +85,7 @@ struct TableBlock: View {
     @ViewBuilder
     private func cell(_ text: String, bold: Bool, width: CGFloat?,
                       wrap: Bool, align: Alignment) -> some View {
-        let parsed = Markdown.parse(text)
+        let parsed = Markdown.parseCell(text)
         if let first = parsed.items.first,
            case .image(let alt, let url, let w, let h) = first.block {
             ImageBlockCell(alt: alt, url: url, width: w, height: h,
@@ -129,14 +126,51 @@ struct TableBlock: View {
         }
         return result
     }
+}
 
-    private func naturalWidths(_ n: Int, headers h: [String],
-                               rows r: [[String]]) -> [CGFloat] {
-        let body: [NSAttributedString.Key: Any] = [
-            .font: FontRole.body(style.bodySize).platformFont]
-        let bold: [NSAttributedString.Key: Any] = [
-            .font: boldFont(of: FontRole.body(style.bodySize).platformFont)]
-        var widths = [CGFloat](repeating: 0, count: n)
+@MainActor final class TableMeasure {
+
+    struct Measured {
+        let headers: [String]
+        let rows: [[String]]
+        let cols: Int
+        let naturals: [CGFloat]
+        let minimums: [CGFloat]
+        let monospaced: String
+    }
+
+    private var headers: [String] = []
+    private var rows: [[String]] = []
+    private var style: MarkdownStyle?
+    private var value = Measured(headers: [], rows: [], cols: 0,
+                                 naturals: [], minimums: [], monospaced: "")
+
+    nonisolated init() {}
+
+    func measured(headers: [String], rows: [[String]],
+                  style: MarkdownStyle) -> Measured {
+        let stale = self.headers != headers || self.rows != rows
+            || self.style != style
+        if stale {
+            value = TableMeasure.measure(headers: headers, rows: rows,
+                                         style: style)
+            self.headers = headers
+            self.rows = rows
+            self.style = style
+        }
+        return value
+    }
+
+    static func measure(headers: [String], rows: [[String]],
+                        style: MarkdownStyle) -> Measured {
+        let h = headers.map { s in TableMetrics.normalize(s) }
+        let r = rows.map { row in row.map { s in TableMetrics.normalize(s) } }
+        let n = TableMetrics.columnCount(headers: h, rows: r)
+        let font = FontRole.body(style.bodySize).platformFont
+        let body: [NSAttributedString.Key: Any] = [.font: font]
+        let bold: [NSAttributedString.Key: Any] = [.font: boldFont(of: font)]
+        var naturals = [CGFloat](repeating: 0, count: n)
+        var minimums = [CGFloat](repeating: 0, count: n)
         for c in 0..<n {
             var maxW: CGFloat = 0
             if c < h.count {
@@ -147,26 +181,17 @@ struct TableBlock: View {
                 let s = (row[c] as NSString).size(withAttributes: body).width
                 if s > maxW { maxW = s }
             }
-            widths[c] = ceil(maxW) + 6
-        }
-        return widths
-    }
-
-    private func minimumWidths(_ n: Int, headers h: [String],
-                               rows r: [[String]]) -> [CGFloat] {
-        let body: [NSAttributedString.Key: Any] = [
-            .font: FontRole.body(style.bodySize).platformFont]
-        let bold: [NSAttributedString.Key: Any] = [
-            .font: boldFont(of: FontRole.body(style.bodySize).platformFont)]
-        var widths = [CGFloat](repeating: 0, count: n)
-        for c in 0..<n {
+            naturals[c] = ceil(maxW) + 6
             let head = TableMetrics.longestWord(headers: h, rows: [], col: c)
             let cell = TableMetrics.longestWord(headers: [], rows: r, col: c)
             let hw = (head as NSString).size(withAttributes: bold).width
             let cw = (cell as NSString).size(withAttributes: body).width
-            widths[c] = ceil(max(hw, cw)) + 6
+            minimums[c] = ceil(max(hw, cw)) + 6
         }
-        return widths
+        return Measured(headers: h, rows: r, cols: n, naturals: naturals,
+                        minimums: minimums,
+                        monospaced: TableMetrics.serializeMonospaced(
+                            headers: h, rows: r))
     }
 }
 

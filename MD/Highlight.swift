@@ -34,14 +34,11 @@ enum Highlight {
         applyKeywords(spec.keywords, code, full, data.keyword, ns, mask)
     }
 
-    private static func apply(_ pattern: String?, _ code: String,
+    private static func apply(_ re: NSRegularExpression?, _ code: String,
                               _ full: NSRange, _ color: PlatformColor,
                               _ ns: NSMutableAttributedString,
                               _ mask: inout [Bool]) {
-        let opts: NSRegularExpression.Options =
-            [.dotMatchesLineSeparators, .anchorsMatchLines]
-        if let pattern,
-           let re = try? NSRegularExpression(pattern: pattern, options: opts) {
+        if let re {
             re.enumerateMatches(in: code, options: [],
                                 range: full) { m, _, _ in
                 if let m, canColor(m.range, mask) {
@@ -53,25 +50,41 @@ enum Highlight {
         }
     }
 
-    private static func applyKeywords(_ words: [String], _ code: String,
-                                      _ full: NSRange, _ color: PlatformColor,
+    private static func applyKeywords(_ re: NSRegularExpression?,
+                                      _ code: String, _ full: NSRange,
+                                      _ color: PlatformColor,
                                       _ ns: NSMutableAttributedString,
                                       _ mask: [Bool]) {
+        if let re {
+            re.enumerateMatches(in: code, options: [],
+                                range: full) { m, _, _ in
+                if let m, canColor(m.range, mask) {
+                    ns.addAttribute(.foregroundColor, value: color,
+                                    range: m.range)
+                }
+            }
+        }
+    }
+
+    private static func compiled(_ pattern: String?) -> NSRegularExpression? {
+        let opts: NSRegularExpression.Options =
+            [.dotMatchesLineSeparators, .anchorsMatchLines]
+        return pattern.flatMap { text in
+            try? NSRegularExpression(pattern: text, options: opts)
+        }
+    }
+
+    private static func keywordPattern(_ words: [String])
+        -> NSRegularExpression? {
+        var out: NSRegularExpression? = nil
         if !words.isEmpty {
             let escaped = words
                 .map { w in NSRegularExpression.escapedPattern(for: w) }
                 .joined(separator: "|")
-            let pattern = "(?<![\\w@])(" + escaped + ")(?![\\w])"
-            if let re = try? NSRegularExpression(pattern: pattern) {
-                re.enumerateMatches(in: code, options: [],
-                                    range: full) { m, _, _ in
-                    if let m, canColor(m.range, mask) {
-                        ns.addAttribute(.foregroundColor, value: color,
-                                        range: m.range)
-                    }
-                }
-            }
+            out = try? NSRegularExpression(
+                pattern: "(?<![\\w@])(" + escaped + ")(?![\\w])")
         }
+        return out
     }
 
     private static func canColor(_ r: NSRange, _ mask: [Bool]) -> Bool {
@@ -88,16 +101,16 @@ enum Highlight {
     }
 
     private struct Spec {
-        let keywords: [String]
-        let lineComment: String?
-        let blockComment: String?
-        let string: String?
-        let number: String?
-        let tag: String?
-        let attr: String?
-        let meta: String?
-        let type: String?
-        let builtin: String?
+        let keywords: NSRegularExpression?
+        let lineComment: NSRegularExpression?
+        let blockComment: NSRegularExpression?
+        let string: NSRegularExpression?
+        let number: NSRegularExpression?
+        let tag: NSRegularExpression?
+        let attr: NSRegularExpression?
+        let meta: NSRegularExpression?
+        let type: NSRegularExpression?
+        let builtin: NSRegularExpression?
     }
 
     private struct Loaded {
@@ -198,13 +211,15 @@ enum Highlight {
         var aliases: [String: String] = [:]
         for (id, fields) in langs {
             let family = families[fields["family"] ?? ""] ?? [:]
-            func pick(_ k: String) -> String? { fields[k] ?? family[k] }
+            func pick(_ k: String) -> NSRegularExpression? {
+                compiled(fields[k] ?? family[k])
+            }
             let keywords = (fields["keywords"] ?? "")
                 .split(separator: ",")
                 .map { s in s.trimmingCharacters(in: .whitespaces) }
                 .filter { s in !s.isEmpty }
             languages[id] = Spec(
-                keywords: keywords,
+                keywords: keywordPattern(keywords),
                 lineComment: pick("lineComment"),
                 blockComment: pick("blockComment"),
                 string: pick("string"), number: pick("number"),

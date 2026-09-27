@@ -60,6 +60,15 @@ enum ConversationExport {
         return stream.finish()
     }
 
+    static func document(messages: [Message]) -> Markdown.Document {
+        let stream = MarkdownStream()
+        for m in messages {
+            stream.append(block(fromUser: m.fromUser, text: m.text,
+                                reasoning: m.reasoning))
+        }
+        return stream.finish()
+    }
+
     private static func attachURL(_ i: Int, _ kind: String,
                                   _ j: Int) -> URL {
         URL(string: "chatokf://attachment/\(i)/\(kind)/\(j)")!
@@ -130,14 +139,26 @@ enum ConversationExport {
         return stream.finish()
     }
 
-    static func pdfFile(text: String, title: String) async throws -> URL {
+    static func rendered(messages: [Message], title: String,
+                         as type: UTType) async -> Data? {
+        let document = document(messages: messages)
+        var out: Data? = nil
+        if type == .pdf {
+            out = await MarkdownPDF.export(document, title: title)
+        } else {
+            let html = await Markdown.htmlPrefetching(document, title: title)
+            out = Data(html.utf8)
+        }
+        return out
+    }
+
+    private static func written(_ data: Data?, folder: String,
+                                name: String) throws -> URL {
         let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("Answers", isDirectory: true)
+            .appendingPathComponent(folder, isDirectory: true)
         try FileManager.default.createDirectory(
             at: dir, withIntermediateDirectories: true)
-        let url = dir.appendingPathComponent(filename(title) + ".pdf")
-        let data = await MarkdownPDF.export(document(text: text),
-                                            title: title)
+        let url = dir.appendingPathComponent(name)
         if let data, !data.isEmpty {
             try data.write(to: url, options: .atomic)
         } else {
@@ -146,34 +167,62 @@ enum ConversationExport {
         return url
     }
 
-    // A real file on disk: a share EXTENSION runs out of process and reads
-    // the attachment by URL; handed raw bytes, Mail and Gmail attach nothing.
-    static func pdfFile(_ convo: ConversationStore.Convo) async throws -> URL {
-        let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("Conversations", isDirectory: true)
-        try FileManager.default.createDirectory(
-            at: dir, withIntermediateDirectories: true)
-        let url = dir.appendingPathComponent(filename(convo.title) + ".pdf")
-        let data = await pdf(convo)
-        // Never a zero-byte stand-in: an empty PDF is one some receivers
-        // accept and show as a broken attachment.
-        if let data, !data.isEmpty {
-            try data.write(to: url, options: .atomic)
-        } else {
-            throw ExportFailure.render
-        }
-        return url
+    static func pdfFile(text: String, title: String) async throws -> URL {
+        try written(await MarkdownPDF.export(document(text: text),
+                                             title: title),
+                    folder: "Answers", name: filename(title) + ".pdf")
+    }
+
+    static func pdfFile(_ id: UUID) async throws -> URL {
+        let convo = await saved(id)
+        var data: Data? = nil
+        if let convo { data = await pdf(convo) }
+        return try written(data, folder: "Conversations",
+                           name: filename(convo?.title ?? "") + ".pdf")
+    }
+
+    @MainActor private static func saved(_ id: UUID) async
+        -> ConversationStore.Convo? {
+        let store = ConversationStore.shared
+        var out = await store.load(id)
+        if out == nil { out = await store.loadTrashed(id) }
+        return out
+    }
+
+    static func file(messages: [Message], title: String,
+                     as type: UTType) async throws -> URL {
+        try written(await rendered(messages: messages, title: title,
+                                   as: type),
+                    folder: "Transcripts",
+                    name: filename(title) + "." + (type == .pdf ? "pdf"
+                                                                : "html"))
     }
 
 }
 
 enum ExportFailure: Error { case render }
 
-enum MarkdownCopy {
+@MainActor enum MarkdownCopy {
 
-    static func put(_ document: Markdown.Document, title: String) {
-        setClipboard(Markdown.plainText(document),
-                     html: Markdown.html(document, title: title))
+    static func put(messages: [Message], title: String) async {
+        await put(title: title) {
+            ConversationExport.document(messages: messages)
+        }
+    }
+
+    static func put(text: String, title: String) async {
+        await put(title: title) { ConversationExport.document(text: text) }
+    }
+
+    private static func put(title: String,
+                            _ make: @escaping @Sendable ()
+                                -> Markdown.Document) async {
+        let rendered = await Task.detached {
+            let document = make()
+            return (plain: Markdown.plainText(document),
+                    html: Markdown.html(document, title: title))
+        }.value
+        setClipboard(rendered.plain, html: rendered.html)
     }
 
 }
@@ -195,19 +244,52 @@ struct AnswerPDF: Transferable {
 
 }
 
-// The exporting closure is async and the share sheet calls it only once a
-// destination is chosen, so nothing is rendered until something asks.
 struct ConversationPDF: Transferable {
 
-    let convo: ConversationStore.Convo
+    let id: UUID
+    let title: String
 
     static var transferRepresentation: some TransferRepresentation {
         FileRepresentation(exportedContentType: .pdf) { item in
             SentTransferredFile(try await ConversationExport
-                .pdfFile(item.convo))
+                .pdfFile(item.id))
         }
         .suggestedFileName { item in
-            ConversationExport.filename(item.convo.title) + ".pdf"
+            ConversationExport.filename(item.title) + ".pdf"
+        }
+    }
+
+}
+
+struct TranscriptPDF: Transferable {
+
+    let messages: [Message]
+    let title: String
+
+    static var transferRepresentation: some TransferRepresentation {
+        FileRepresentation(exportedContentType: .pdf) { item in
+            SentTransferredFile(try await ConversationExport.file(
+                messages: item.messages, title: item.title, as: .pdf))
+        }
+        .suggestedFileName { item in
+            ConversationExport.filename(item.title) + ".pdf"
+        }
+    }
+
+}
+
+struct TranscriptHTML: Transferable {
+
+    let messages: [Message]
+    let title: String
+
+    static var transferRepresentation: some TransferRepresentation {
+        FileRepresentation(exportedContentType: .html) { item in
+            SentTransferredFile(try await ConversationExport.file(
+                messages: item.messages, title: item.title, as: .html))
+        }
+        .suggestedFileName { item in
+            ConversationExport.filename(item.title) + ".html"
         }
     }
 

@@ -46,7 +46,7 @@ struct ReadingView: View {
             TextField("Find in transcript", text: $query)
                 .textFieldStyle(.plain)
                 .onSubmit { currentMatch = find.findNext() }
-                .onChange(of: query) { _, q in runFind(q) }
+                .task(id: query) { await runFind() }
             if matchCount > 0 {
                 Text("\(currentMatch)/\(matchCount)")
                     .appFont(.caption).monospacedDigit()
@@ -70,9 +70,12 @@ struct ReadingView: View {
         .padding(.vertical, 8)
     }
 
-    private func runFind(_ q: String) {
-        matchCount = find.find(q)
-        currentMatch = find.currentMatch
+    private func runFind() async {
+        try? await Task.sleep(for: .milliseconds(120))
+        if !Task.isCancelled {
+            matchCount = find.find(query)
+            currentMatch = find.currentMatch
+        }
     }
 
 }

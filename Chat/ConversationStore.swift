@@ -1,8 +1,9 @@
 import Foundation
+import LLM
 
 @MainActor @Observable public final class ConversationStore {
 
-    public static let shared = ConversationStore()
+    public static let shared = ConversationStore(root: defaultRoot)
 
     public struct Round: Codable, Sendable {
         public let emitted: String
@@ -33,11 +34,14 @@ import Foundation
         public let clips: [String]?
         public let docs: [StoredDoc]?
         public let posters: [Data]?
+        public let soft: String?
+        public let prompt: String?
 
         public init(fromUser: Bool, text: String, reasoning: String,
                     rounds: [Round], images: [Data], loopStopped: Bool,
                     clips: [String]?, docs: [StoredDoc]?,
-                    posters: [Data]?) {
+                    posters: [Data]?, soft: String? = nil,
+                    prompt: String? = nil) {
             self.fromUser = fromUser
             self.text = text
             self.reasoning = reasoning
@@ -47,6 +51,8 @@ import Foundation
             self.clips = clips
             self.docs = docs
             self.posters = posters
+            self.soft = soft
+            self.prompt = prompt
         }
     }
 
@@ -99,10 +105,12 @@ import Foundation
         public var trace: [Trace]? = nil
         public var trashedAt: Date? = nil
         public var extracted: Date? = nil
+        public var followup: String? = nil
 
         public init(id: UUID, title: String, created: Date, updated: Date,
                     messages: [Msg], trace: [Trace]? = nil,
-                    trashedAt: Date? = nil, extracted: Date? = nil) {
+                    trashedAt: Date? = nil, extracted: Date? = nil,
+                    followup: String? = nil) {
             self.id = id
             self.title = title
             self.created = created
@@ -111,171 +119,150 @@ import Foundation
             self.trace = trace
             self.trashedAt = trashedAt
             self.extracted = extracted
+            self.followup = followup
         }
     }
 
-    public static let trashRetention: TimeInterval = 30 * 24 * 3600
+    nonisolated public static let trashRetention: TimeInterval =
+        30 * 24 * 3600
+
+    public static let defaultRoot: URL = FileManager.default
+        .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        .appendingPathComponent("conversations", isDirectory: true)
+
+    public let root: URL
+    let files: ConversationFiles
 
     public private(set) var list: [Convo] = []
     public private(set) var trashed: [Convo] = []
-
     public private(set) var words: [UUID: [String: Int]] = [:]
+    public private(set) var revision = 0
 
-    private init() {
+    private var loading: Task<Void, Never>?
+    private var lastCommit: Task<Void, Never>?
+
+    public init(root: URL) {
+        self.root = root
+        files = ConversationFiles(root: root)
         reload()
     }
 
     public func reload() {
-        purgeExpired()
-        list = read(conversationsDir()).sorted { a, b in a.updated > b.updated }
-        trashed = read(trashDir()).sorted { a, b in
-            (a.trashedAt ?? a.updated) > (b.trashedAt ?? b.updated)
-        }
-        words = [:]
-        for convo in list { words[convo.id] = Self.wordCounts(convo) }
-    }
-
-    private func read(_ dir: URL) -> [Convo] {
-        let names = (try? FileManager.default
-            .contentsOfDirectory(atPath: dir.path)) ?? []
-        var convos: [Convo] = []
-        for name in names where name.hasSuffix(".json") {
-            if let convo = decodeConvo(dir.appendingPathComponent(name)) {
-                convos.append(convo)
-            }
-        }
-        return convos
-    }
-
-    public func save(_ convo: Convo) {
-        if let data = try? JSONEncoder().encode(convo) {
-            try? data.write(to: fileURL(convo.id))
-        }
-        upsert(convo)
-    }
-
-    public func trash(_ id: UUID) {
-        if var convo = decodeConvo(fileURL(id)) {
-            convo.trashedAt = Date()
-            if let data = try? JSONEncoder().encode(convo) {
-                try? data.write(to: trashURL(id))
-                try? FileManager.default.removeItem(at: fileURL(id))
-                list.removeAll { existing in existing.id == id }
-                words[id] = nil
-                trashed.insert(convo, at: 0)
+        let files = self.files
+        loading = Task { [weak self] in
+            let snapshot = await files.reload()
+            if let self, !Task.isCancelled {
+                self.list = snapshot.list
+                self.trashed = snapshot.trashed
+                self.words = snapshot.words
+                self.revision += 1
             }
         }
     }
 
-    public func trashAll() {
-        for convo in list { trash(convo.id) }
+    public func loaded() async {
+        await loading?.value
     }
 
-    public func restore(_ id: UUID) {
-        if var convo = decodeConvo(trashURL(id)) {
-            convo.trashedAt = nil
-            if let data = try? JSONEncoder().encode(convo) {
-                try? data.write(to: fileURL(id))
-                try? FileManager.default.removeItem(at: trashURL(id))
-                trashed.removeAll { existing in existing.id == id }
-                upsert(convo)
-            }
+    public func settled() async {
+        await loading?.value
+        await lastCommit?.value
+    }
+
+    @discardableResult
+    public func commit(id: UUID, title: String?, fallbackTitle: String,
+                       messages: [Message], trace: [TraceEvent],
+                       extracted: Date?,
+                       followup: String? = nil) -> Task<Void, Never> {
+        let files = self.files
+        let task = Task { [weak self] in
+            await self?.loaded()
+            let prior = self?.list.first { convo in convo.id == id }
+            let indexed = await files.commit(
+                id: id, title: title ?? prior?.title ?? fallbackTitle,
+                created: prior?.created,
+                extracted: extracted ?? prior?.extracted,
+                messages: messages, trace: trace, followup: followup)
+            if let indexed { self?.upsert(indexed) }
         }
+        lastCommit = task
+        return task
     }
 
-    public func deleteForever(_ id: UUID) {
-        try? FileManager.default.removeItem(at: trashURL(id))
-        trashed.removeAll { convo in convo.id == id }
+    public func save(_ convo: Convo) async {
+        upsert(await files.save(convo))
     }
 
-    public func emptyTrash() {
-        for convo in trashed {
-            try? FileManager.default.removeItem(at: trashURL(convo.id))
-        }
-        trashed = []
+    public func rename(_ id: UUID, to title: String) async -> Bool {
+        let renamed = await files.rename(id, to: title)
+        if let renamed { upsert(renamed) }
+        return renamed != nil
     }
 
-    public func eraseAll() {
-        try? FileManager.default.removeItem(at: conversationsDir())
-        list = []
-        trashed = []
-        words = [:]
-    }
-
-    // A stamp rather than the file's mtime, which a copy or a restore from
-    // backup would reset.
-    private func purgeExpired() {
-        let now = Date()
-        for convo in read(trashDir()) {
-            let since = now.timeIntervalSince(convo.trashedAt ?? now)
-            if since > Self.trashRetention {
-                try? FileManager.default.removeItem(at: trashURL(convo.id))
-            }
-        }
-    }
-
-    public func load(_ id: UUID) -> Convo? {
-        decodeConvo(fileURL(id))
+    public func load(_ id: UUID) async -> Convo? {
+        await files.load(id)
     }
 
     // Not `load`: a trashed conversation read through it and saved back
     // would land in `list` and undelete itself.
-    public func loadTrashed(_ id: UUID) -> Convo? {
-        decodeConvo(trashURL(id))
+    public func loadTrashed(_ id: UUID) async -> Convo? {
+        await files.loadTrashed(id)
     }
 
-    private func upsert(_ convo: Convo) {
-        var next = list.filter { existing in existing.id != convo.id }
-        next.append(convo)
-        list = next.sorted { a, b in a.updated > b.updated }
-        words[convo.id] = Self.wordCounts(convo)
+    func open(_ id: UUID) async -> ConversationFiles.Restored? {
+        let ticket = files.opens.take()
+        return await files.open(id, ticket: ticket)
     }
 
-    private static let titleWeight = 5
-
-    private static func wordCounts(_ convo: Convo) -> [String: Int] {
-        var counts: [String: Int] = [:]
-        add(convo.title, titleWeight, &counts)
-        for m in convo.messages { add(m.text, 1, &counts) }
-        return counts
+    public func trash(_ id: UUID) async {
+        if let convo = await files.trash(id) { moved(convo) }
     }
 
-    private static func add(_ text: String, _ weight: Int,
-                            _ counts: inout [String: Int]) {
-        for token in text.lowercased().split(whereSeparator: { c in
-            !c.isLetter && !c.isNumber
-        }) {
-            counts[String(token), default: 0] += weight
+    public func trashAll() async {
+        let ids = list.map { convo in convo.id }
+        for convo in await files.trashAll(ids) { moved(convo) }
+    }
+
+    private func moved(_ convo: Convo) {
+        list.removeAll { existing in existing.id == convo.id }
+        words[convo.id] = nil
+        trashed.insert(convo, at: 0)
+        revision += 1
+    }
+
+    public func restore(_ id: UUID) async {
+        if let indexed = await files.restore(id) {
+            trashed.removeAll { existing in existing.id == id }
+            upsert(indexed)
         }
     }
 
-    private func decodeConvo(_ url: URL) -> Convo? {
-        (try? JSONDecoder().decode(Convo.self, from: Data(contentsOf: url)))
+    public func deleteForever(_ id: UUID) async {
+        await files.deleteForever(id)
+        trashed.removeAll { convo in convo.id == id }
+        revision += 1
     }
 
-    private func conversationsDir() -> URL {
-        let fm = FileManager.default
-        let base = fm.urls(for: .applicationSupportDirectory,
-                           in: .userDomainMask)[0]
-            .appendingPathComponent("conversations", isDirectory: true)
-        try? fm.createDirectory(at: base, withIntermediateDirectories: true)
-        return base
+    public func emptyTrash() async {
+        await files.emptyTrash(trashed.map { convo in convo.id })
+        trashed = []
+        revision += 1
     }
 
-    private func trashDir() -> URL {
-        let fm = FileManager.default
-        let base = conversationsDir()
-            .appendingPathComponent("trash", isDirectory: true)
-        try? fm.createDirectory(at: base, withIntermediateDirectories: true)
-        return base
+    public func eraseAll() {
+        try? FileManager.default.removeItem(at: root)
+        list = []
+        trashed = []
+        words = [:]
+        revision += 1
     }
 
-    private func fileURL(_ id: UUID) -> URL {
-        conversationsDir().appendingPathComponent("\(id.uuidString).json")
-    }
-
-    private func trashURL(_ id: UUID) -> URL {
-        trashDir().appendingPathComponent("\(id.uuidString).json")
+    private func upsert(_ indexed: ConversationFiles.Indexed) {
+        var next = list.filter { existing in existing.id != indexed.convo.id }
+        next.append(indexed.convo)
+        list = next.sorted { a, b in a.updated > b.updated }
+        words[indexed.convo.id] = indexed.words
+        revision += 1
     }
 
 }

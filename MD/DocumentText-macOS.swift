@@ -160,24 +160,23 @@ extension DocumentText {
     // be subtracted from the column-share budget in the same unit.
     private static var cellPad: CGFloat { 0.6 }
 
+    static var tableUsesNaturals: Bool { false }
+
     private static func contentBudget(cols: Int) -> CGFloat {
         max(100 - CGFloat(cols) * cellPad * 2, 50)
     }
 
     // Solved against the SHARES the table will actually be built with, not
     // against the bare sum of the minimums.
-    static func tableMinimumWidth(headers: [String], rows: [[String]],
-                                  style: MarkdownStyle) -> CGFloat {
+    static func tableMinimumWidth(_ cells: TableCells) -> CGFloat {
         var result: CGFloat = 0
-        let cols = max(headers.count, rows.map { r in r.count }.max() ?? 0)
-        if cols > 0 {
-            let mins = columnMinimums(headers: headers, rows: rows,
-                                      cols: cols, style: style)
+        if cells.cols > 0 {
             let fractions = TableMetrics.pointWidths(
-                headers: headers, rows: rows,
-                available: contentBudget(cols: cols) / 100)
-            for c in 0..<cols where c < fractions.count && fractions[c] > 0 {
-                let need = mins[c] / fractions[c]
+                headers: cells.headers, rows: cells.rows,
+                available: contentBudget(cols: cells.cols) / 100)
+            for c in 0..<cells.cols
+                where c < fractions.count && fractions[c] > 0 {
+                let need = cells.minimums[c] / fractions[c]
                 if need > result { result = need }
             }
             result = ceil(result)
@@ -185,14 +184,14 @@ extension DocumentText {
         return result
     }
 
-    static func table(headers: [String], rows: [[String]],
-                      alignments: [Markdown.Alignment], style: MarkdownStyle,
-                      images: [URL: PlatformImage],
+    static func table(_ cells: TableCells,
+                      alignments: [Markdown.Alignment], id: String,
+                      style: MarkdownStyle,
                       width: CGFloat) -> NSAttributedString {
         let m = NSMutableAttributedString()
-        let cols = max(headers.count, rows.map { r in r.count }.max() ?? 0)
+        let cols = cells.cols
         if cols > 0 {
-            let atomicId = UUID().uuidString
+            let atomicId = id
             let textTable = NSTextTable()
             textTable.numberOfColumns = cols
             // Automatic layout: a fixed cell that outgrows its width spills
@@ -201,26 +200,25 @@ extension DocumentText {
             // The shares leave room for the padding, or the table wants 100%
             // plus padding and the last columns are squeezed off.
             let shares = TableMetrics.pointWidths(
-                headers: headers, rows: rows,
+                headers: cells.headers, rows: cells.rows,
                 available: contentBudget(cols: cols))
             var rowIdx = 0
-            if !headers.isEmpty {
-                m.append(tableRow(headers, table: textTable, rowIdx: rowIdx,
-                                  cols: cols, shares: shares,
+            if !cells.header.isEmpty {
+                m.append(tableRow(cells.header, table: textTable,
+                                  rowIdx: rowIdx, cols: cols, shares: shares,
                                   alignments: alignments, bold: true,
                                   tint: platformWhite(0.5, alpha: 0.14),
-                                  atomicId: atomicId, style: style,
-                                  images: images))
+                                  atomicId: atomicId, style: style))
                 rowIdx += 1
             }
-            for (idx, row) in rows.enumerated() {
+            for (idx, row) in cells.body.enumerated() {
                 let tint: PlatformColor = idx % 2 == 1
                     ? platformWhite(0.5, alpha: 0.07) : platformClearColor
                 m.append(tableRow(row, table: textTable, rowIdx: rowIdx,
                                   cols: cols, shares: shares,
                                   alignments: alignments, bold: false,
                                   tint: tint, atomicId: atomicId,
-                                  style: style, images: images))
+                                  style: style))
                 rowIdx += 1
             }
             // One CONTIGUOUS atomic id and kind over the whole table, stamped
@@ -231,24 +229,25 @@ extension DocumentText {
                            value: AtomicKind.table.rawValue, range: content)
             m.addAttribute(atomicCopyKey,
                            value: TableMetrics.serializeMonospaced(
-                               headers: headers, rows: rows),
+                               headers: cells.headers, rows: cells.rows,
+                               alignments: alignments),
                            range: content)
             m.append(NSAttributedString(string: "\n"))
         }
         return m
     }
 
-    private static func tableRow(_ cells: [String], table: NSTextTable,
+    private static func tableRow(_ cells: [TableCell], table: NSTextTable,
                                  rowIdx: Int, cols: Int, shares: [CGFloat],
                                  alignments: [Markdown.Alignment], bold: Bool,
                                  tint: PlatformColor, atomicId: String,
-                                 style: MarkdownStyle,
-                                 images: [URL: PlatformImage])
+                                 style: MarkdownStyle)
         -> NSAttributedString {
         let m = NSMutableAttributedString()
         let base = bold ? boldFont(of: bodyFont(style)) : bodyFont(style)
         for col in 0..<cols {
-            let cellText = col < cells.count ? cells[col] : ""
+            let text = col < cells.count ? cells[col].text
+                                         : NSAttributedString()
             let block = NSTextTableBlock(table: table, startingRow: rowIdx,
                                          rowSpan: 1, startingColumn: col,
                                          columnSpan: 1)
@@ -271,9 +270,7 @@ extension DocumentText {
             para.lineBreakMode = .byWordWrapping
             para.textBlocks = [block]
             para.alignment = nsAlignment(col, alignments)
-            let cellAttr = NSMutableAttributedString(
-                attributedString: tableCell(cellText, base: base,
-                                            style: style, images: images))
+            let cellAttr = NSMutableAttributedString(attributedString: text)
             if cellAttr.length == 0 {
                 cellAttr.append(NSAttributedString(
                     string: "\u{00A0}",

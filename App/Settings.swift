@@ -10,6 +10,11 @@ struct SettingsView: View {
     @State private var confirmReset = false
     @State private var confirmClear = false
     @State private var confirmForget = false
+    @State private var confirmResumable = false
+    @State private var confirmEmpty = false
+    @State private var deleteKept: KeptRow?
+    @State private var storageSort: StorageSort = .size
+    @State private var modelBytes: Int64 = 0
     @ScaledMetric(relativeTo: .body) private var railWidth: CGFloat = 215
     @ScaledMetric(relativeTo: .body) private var railIcon: CGFloat = 20
     @State private var draftZoom: Int?
@@ -32,6 +37,7 @@ struct SettingsView: View {
         case view = "View"
         case intelligence = "Intelligence"
         case privacy = "Privacy"
+        case storage = "Storage"
         case misc = "Misc"
         case diagnostics = "Diagnostics"
         case about = "About"
@@ -44,6 +50,7 @@ struct SettingsView: View {
             case .view: return "paintbrush"
             case .intelligence: return "brain"
             case .privacy: return "hand.raised"
+            case .storage: return "externaldrive"
             case .misc: return "slider.horizontal.3"
             case .diagnostics: return "stethoscope"
             case .about: return "info.circle"
@@ -87,6 +94,44 @@ struct SettingsView: View {
             Text("Deletes every memory the assistant has formed from its "
                + "conversations with you, and empties the memories trash. "
                + "The conversations themselves stay.")
+        }
+        .alert("Resumable is a preview", isPresented: $confirmResumable) {
+            Button("Turn On") {
+                model.resumableNoticed = true
+                model.resumable = true
+            }
+            Button("Not Now", role: .cancel) { }
+        } message: {
+            Text("Resumable keeps your conversations ready to continue "
+               + "where you left them. It costs storage: up to a hundred "
+               + "megabytes for a long conversation on this device, and "
+               + "Settings, Storage shows what is kept and lets you clear "
+               + "it.\n\nThis is a Pro feature in the making, switched on "
+               + "here for testing and preview only. It may change or "
+               + "disappear in a later update, and what it keeps may not "
+               + "carry over. Your conversations themselves are not "
+               + "affected.")
+        }
+        .alert("Empty the trash?", isPresented: $confirmEmpty) {
+            Button("Empty", role: .destructive) { model.emptyTrash() }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("Deletes every conversation in the trash, with the "
+               + "attachments kept for them. This cannot be undone.")
+        }
+        .alert("Delete \(deleteKept?.title ?? "")?",
+               isPresented: Binding(
+            get: { deleteKept != nil },
+            set: { shown in if !shown { deleteKept = nil } }
+        )) {
+            Button("Delete", role: .destructive) {
+                if let row = deleteKept { model.deleteConversation(row.id) }
+                deleteKept = nil
+            }
+            Button("Cancel", role: .cancel) { deleteKept = nil }
+        } message: {
+            Text("Moves the conversation to the trash for 30 days and "
+               + "frees \(SettingsView.bytes(deleteKept?.bytes ?? 0)) now.")
         }
     }
 
@@ -133,9 +178,10 @@ struct SettingsView: View {
 
     private var categories: [Category] {
         Category.allCases.filter { c in
-            (c != .models || Models.all.count > 1)
+            (c != .models || model.offered(unlocked: false).count > 1)
                 && (c != .voice || model.speech.available)
                 && (c != .diagnostics || model.statusLine)
+                && (c != .storage || model.showsStorage)
         }
     }
 
@@ -190,6 +236,7 @@ struct SettingsView: View {
         case .view: viewPane
         case .intelligence: intelligencePane
         case .privacy: privacyPane
+        case .storage: storagePane
         case .misc: miscPane
         case .diagnostics: diagnosticsPane
         case .about: aboutPane
@@ -410,7 +457,7 @@ struct SettingsView: View {
 
     private var unlocked: Bool { model.unlocked }
 
-    private var listed: [String] { Models.offered(unlocked: unlocked) }
+    private var listed: [String] { model.offered(unlocked: unlocked) }
 
     private var modelsPane: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -658,17 +705,9 @@ struct SettingsView: View {
 
     private var totalRecallRow: some View {
         switchRow("Total Recall",
-                  "The assistant keeps memories: durable things it learns "
-                  + "from your conversations, saved as plain notes on this "
-                  + "device. When you ask something, it looks through them "
-                  + "first and reads the ones that fit. It is not total, "
-                  + "whatever the name says; it remembers what it can, "
-                  + "forgets some things, and gets a few wrong, which is "
-                  + "what memory does. Memories can hold private details. "
-                  + "They stay on this device unless Backup Memories is on, "
-                  + "in Settings, Privacy. Turning this off stops the "
-                  + "assistant reading or writing memories; they stay until "
-                  + "Forget Everything, in Settings, Misc.",
+                  "The assistant remembers what it learns from your chats "
+                  + "and uses it when it fits. Memories stay on this "
+                  + "device.",
                   $model.totalRecall)
     }
 
@@ -702,7 +741,7 @@ struct SettingsView: View {
             hairline
             switchRow("Export Reasoning",
                       "Include the thinking above each answer in exported "
-                      + "and shared transcripts, PDF and HTML alike.",
+                      + "and shared transcripts.",
                       $model.exportReasoning)
         }
     }
@@ -817,12 +856,13 @@ struct SettingsView: View {
                           + "at once.", $model.confirmDeleteConversation)
                 hairline
                 switchRow("Debug",
-                          "Show a status bar under the message box with "
-                          + "context, speed and memory, add a session details "
-                          + "button to the chat actions, and reveal the "
-                          + "Diagnostics pane. Nothing is written to a log "
-                          + "file while this is off, and logging starts at "
-                          + "the next launch.", $model.statusLine)
+                          "Show speed and memory under the message box, "
+                          + "and the details of each chat. Log starts at "
+                          + "the next app launch.", $model.statusLine)
+                if unlocked || model.resumable {
+                    hairline
+                    resumableRow
+                }
             }
             if model.memoriesSupported, model.hasMemories || unlocked {
                 card {
@@ -870,6 +910,182 @@ struct SettingsView: View {
                 }
             }
         }
+    }
+
+    private var resumableRow: some View {
+        switchRow("Resumable",
+                  "Pick up any saved conversation where you left it. Uses "
+                  + "more storage; Settings, Storage shows how much.",
+                  Binding(
+            get: { model.resumable },
+            set: { on in
+                if on && !model.resumableNoticed {
+                    confirmResumable = true
+                } else {
+                    model.resumable = on
+                }
+            }
+        ))
+    }
+
+    enum StorageSort: String, CaseIterable, Identifiable {
+        case size = "Size"
+        case age = "Age"
+        var id: String { rawValue }
+    }
+
+    struct KeptRow: Identifiable {
+        let id: UUID
+        let title: String
+        let updated: Date
+        let bytes: Int
+    }
+
+    private var keptRows: [KeptRow] {
+        let report = model.storage
+        var rows: [KeptRow] = []
+        for convo in ConversationStore.shared.list {
+            let bytes = report.size(of: convo.id)
+            if bytes > 0 {
+                rows.append(KeptRow(id: convo.id, title: convo.title,
+                                    updated: convo.updated, bytes: bytes))
+            }
+        }
+        return rows.sorted { a, b in
+            storageSort == .size ? a.bytes > b.bytes : a.updated < b.updated
+        }
+    }
+
+    static func bytes(_ n: Int) -> String {
+        ByteCountFormatter.string(fromByteCount: Int64(n), countStyle: .file)
+    }
+
+    private struct StorageKey: Equatable {
+        let store: Int
+        let disk: Int
+    }
+
+    private var storageKey: StorageKey {
+        StorageKey(store: ConversationStore.shared.revision,
+                   disk: model.diskRevision)
+    }
+
+    private var storagePane: some View {
+        let rows = keptRows
+        return VStack(alignment: .leading, spacing: 18) {
+            title("Storage")
+            note("What this app keeps on the device beyond the "
+                + "conversations themselves: the state that lets a "
+                + "conversation continue where it left off, the documents "
+                + "attached to it, and what waits in the trash. Deleting a "
+                + "conversation here moves it to the trash, as in the "
+                + "sidebar, and frees its state at once.")
+            let manyModels = model.downloadedModels > 1
+            let kept = model.storage.total > 0
+            if manyModels || kept || model.storage.trash > 0 {
+                card {
+                    if manyModels { modelsRow }
+                    if kept {
+                        if manyModels { hairline }
+                        sizeRow("Conversations", model.storage.total)
+                    }
+                    if model.storage.trash > 0 {
+                        if manyModels || kept { hairline }
+                        trashRow
+                    }
+                }
+            }
+            if !rows.isEmpty {
+                HStack {
+                    Spacer()
+                    Picker("Sort", selection: $storageSort) {
+                        ForEach(StorageSort.allCases) { sort in
+                            Text(sort.rawValue).tag(sort)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .frame(maxWidth: 160)
+                }
+                card {
+                    ForEach(rows) { row in
+                        if row.id != rows.first?.id { hairline }
+                        keptRow(row)
+                    }
+                }
+            }
+        }
+        .task(id: storageKey) {
+            model.refreshStorage()
+            modelBytes = Models.downloaded.reduce(0) { sum, name in
+                sum + (ModelCatalog.source(name)?.bytes ?? 0)
+            }
+        }
+    }
+
+    private func sizeRow(_ label: String, _ bytes: Int) -> some View {
+        row(label) {
+            Text(SettingsView.bytes(bytes))
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var modelsRow: some View {
+        row("Models") {
+            HStack(spacing: 12) {
+                Text(ByteCountFormatter.string(fromByteCount: modelBytes,
+                                               countStyle: .file))
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+                Button("Manage") {
+                    if isOS {
+                        path.append(.models)
+                    } else {
+                        model.settingsCategory = .models
+                    }
+                }
+            }
+        }
+    }
+
+    private var trashRow: some View {
+        row("Trash") {
+            HStack(spacing: 12) {
+                Text(SettingsView.bytes(model.storage.trash))
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+                Button("Empty", role: .destructive) { confirmEmpty = true }
+                    .disabled(model.busy)
+            }
+        }
+    }
+
+    private func keptRow(_ kept: KeptRow) -> some View {
+        HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(kept.title).lineLimit(1)
+                Text(Sidebar.when(kept.updated))
+                    .appFont(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Text(SettingsView.bytes(kept.bytes))
+                .appFont(.caption)
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+            Button { deleteKept = kept } label: {
+                Image(systemName: "trash")
+                    .frame(width: 22, height: 22)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(model.busy ? Color.secondary.opacity(0.4)
+                                        : Color.red)
+            .disabled(model.busy)
+            .help("Move this conversation to the trash and free its state")
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 9)
     }
 
     private var reasoningEffortRow: some View {

@@ -2,7 +2,7 @@ import SwiftUI
 
 // The App-facing look. Fonts, colors, spacing, and the code / math toggles, so
 // a host can match its own surface.
-public struct MarkdownStyle: Sendable {
+public struct MarkdownStyle: Sendable, Equatable {
 
     public var bodySize: CGFloat
     public var codeSize: CGFloat

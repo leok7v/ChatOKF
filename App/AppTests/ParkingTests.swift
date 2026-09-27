@@ -12,4 +12,25 @@ final class ParkingTests: XCTestCase {
         XCTAssertNil(phone.refusal(for: 1 << 30))
         XCTAssertTrue(phone.refusal(for: 1300 << 20)!.contains("memory"))
     }
+
+    func testTheKnobDropsOnlyAQuickTextReplay() {
+        XCTAssertEqual(Session.parkRefusal(
+            committed: 0, attached: true, resumable: true, soft: false,
+            replaySeconds: 1, budget: nil), "nothing committed")
+        XCTAssertEqual(Session.parkRefusal(
+            committed: 900, attached: true, resumable: true, soft: false,
+            replaySeconds: 6, budget: nil), "replays in 6s")
+        XCTAssertNil(Session.parkRefusal(
+            committed: 900, attached: true, resumable: false, soft: false,
+            replaySeconds: 6, budget: nil))
+        XCTAssertNil(Session.parkRefusal(
+            committed: 900, attached: true, resumable: true, soft: true,
+            replaySeconds: 6, budget: nil))
+        XCTAssertNil(Session.parkRefusal(
+            committed: 3000, attached: true, resumable: true, soft: false,
+            replaySeconds: 18, budget: nil))
+        XCTAssertEqual(Session.parkRefusal(
+            committed: 3000, attached: true, resumable: true, soft: false,
+            replaySeconds: 18, budget: "over a quarter"), "over a quarter")
+    }
 }

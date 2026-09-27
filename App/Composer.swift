@@ -213,21 +213,31 @@ struct Composer: View {
         .accessibilityLabel(label)
     }
 
-    private var controlGap: CGFloat { isOS ? slotSize * 1.6 : 8 }
+    private var controlGaps: [CGFloat] {
+        isOS ? [slotSize * 1.2, slotSize * 0.8, slotSize * 0.4, 8] : [8]
+    }
 
     private var standardControls: some View {
+        ViewThatFits(in: .horizontal) {
+            ForEach(controlGaps, id: \.self) { gap in controls(gap: gap) }
+        }
+        .font(.system(size: controlSize))
+    }
+
+    private func controls(gap: CGFloat) -> some View {
         HStack(spacing: 8) {
-            HStack(spacing: controlGap) {
+            HStack(spacing: gap) {
                 AttachButton(model: model)
                 thinkingButton
                 accessButton
             }
             Spacer()
-            if model.speech.available { speakerButton }
-            if model.canAttachAudio { micButton }
-            sendButton
+            HStack(spacing: gap) {
+                if model.speech.available { speakerButton }
+                if model.canAttachAudio { micButton }
+                sendButton
+            }
         }
-        .font(.system(size: controlSize))
     }
 
     private var speakerButton: some View {
@@ -523,6 +533,8 @@ struct Composer: View {
         let text: String
         if model.stopAsked && model.prefilling {
             text = "Answering from what was read\u{2026}"
+        } else if model.replaying {
+            text = ChatModel.resumingNotice + "\u{2026}"
         } else if model.busy, !model.listening, !model.speech.engaged,
                   model.session.metaTaskRunning {
             text = model.thinkStatus + "\u{2026}"

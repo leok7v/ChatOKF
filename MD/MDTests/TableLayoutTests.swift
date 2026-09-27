@@ -77,8 +77,8 @@ import Testing
     private func built(width: CGFloat) -> NSAttributedString {
         DocumentText.table(headers: TabStopTableTests.headers,
                            rows: TabStopTableTests.rows,
-                           alignments: [.none, .none], style: .default,
-                           images: [:], width: width)
+                           alignments: [.none, .none], id: "t",
+                           style: .default, images: [:], width: width)
     }
 
     private func lines(_ ns: NSAttributedString) -> [String] {
@@ -115,8 +115,8 @@ import Testing
             stops(DocumentText.table(
                 headers: ["One", "Two", "Three"],
                 rows: [[sentence, sentence, sentence]],
-                alignments: [.none, .none, .none], style: .default,
-                images: [:], width: width))
+                alignments: [.none, .none, .none], id: "t",
+                style: .default, images: [:], width: width))
         }
         let narrow = stopsAt(320)
         let wide = stopsAt(760)
@@ -127,9 +127,9 @@ import Testing
 
     @Test func aShortColumnIsNotPaddedPastItsContent() {
         let located = stops(built(width: 320))
-        let unforced = DocumentText.columnNaturals(
+        let unforced = DocumentText.tableCells(
             headers: TabStopTableTests.headers, rows: TabStopTableTests.rows,
-            cols: 2, style: .default)
+            style: .default, images: [:]).naturals
         #expect(located[0].location <= unforced[0] + 12)
     }
 
@@ -141,8 +141,8 @@ import Testing
             rows: [["Mississippi\u{2013}Missouri River System", "6,275 km**",
                     "United States"],
                    ["Yenisei", "5,539 km", "Mongolia/Russia"]],
-            alignments: [.none, .none, .none], style: style, images: [:],
-            width: 290)
+            alignments: [.none, .none, .none], id: "t", style: style,
+            images: [:], width: 290)
         #expect(lines(ns)[0].contains("Length"))
         #expect(DocumentText.tableMinimumWidth(
             headers: ["River", "Length", "Country"],
@@ -155,8 +155,8 @@ import Testing
             headers: ["Organism", "Instrument", "City"],
             rows: [["Hippopotamus", "Electroencephalograph",
                     "Constantinople"]],
-            alignments: [.none, .none, .none], style: .default, images: [:],
-            width: 200)
+            alignments: [.none, .none, .none], id: "t", style: .default,
+            images: [:], width: 200)
         #expect(lines(ns).count == 2)
         #expect((stops(ns).last?.location ?? 0) > 200)
     }
@@ -170,12 +170,12 @@ import Testing
     @Test func alignmentMovesTheStopNotJustTheText() {
         let left = DocumentText.table(
             headers: TabStopTableTests.headers, rows: TabStopTableTests.rows,
-            alignments: [.none, .left], style: .default, images: [:],
-            width: 320)
+            alignments: [.none, .left], id: "t", style: .default,
+            images: [:], width: 320)
         let right = DocumentText.table(
             headers: TabStopTableTests.headers, rows: TabStopTableTests.rows,
-            alignments: [.none, .right], style: .default, images: [:],
-            width: 320)
+            alignments: [.none, .right], id: "t", style: .default,
+            images: [:], width: 320)
         #expect(stops(left)[0].alignment == .left)
         #expect(stops(right)[0].alignment == .right)
         #expect(stops(right)[0].location > stops(left)[0].location)
@@ -275,5 +275,218 @@ import Testing
 
     @Test func aSurfaceThatFitsIsLeftAlone() {
         #expect(tails(wide: false).prose == 0)
+    }
+}
+
+@MainActor @Suite struct SharedTableCellsTests {
+
+    static let source = """
+    Intro paragraph.
+
+    | Term | Meaning |
+    |---|---|
+    | principal | The original sum of money borrowed or invested |
+    | `code` | x^2 and H<sub>2</sub>O |
+    |  | ![alt](https://example.com/a.png) |
+
+    > | A | B |
+    > |---|---:|
+    > | one | two three four |
+
+    - item
+      | X | Y | Z |
+      |:-:|---|--:|
+      | Mississippi\u{2013}Missouri | 24/7 | Mongolia/Russia |
+
+    | Organism | Instrument | City |
+    |---|---|---|
+    | Hippopotamus | Electroencephalograph | Constantinople |
+    """
+
+    static func fingerprint(_ ns: NSAttributedString) -> String {
+        var parts: [String] = [ns.string]
+        let full = NSRange(location: 0, length: ns.length)
+        ns.enumerateAttributes(in: full, options: []) { attrs, range, _ in
+            var line = "\(range.location)+\(range.length)"
+            if let f = attrs[.font] as? PlatformFont {
+                line += " f=\(f.fontName)@\(f.pointSize)"
+            }
+            if let p = attrs[.paragraphStyle] as? NSParagraphStyle {
+                line += " a=\(p.alignment.rawValue) h=\(p.headIndent)"
+                    + " t=\(p.tailIndent) lb=\(p.lineBreakMode.rawValue)"
+                for tab in p.tabStops {
+                    line += " tab=\(tab.location):\(tab.alignment.rawValue)"
+                }
+                #if os(macOS)
+                for case let b as NSTextTableBlock in p.textBlocks {
+                    line += " blk=\(b.startingRow),\(b.startingColumn)"
+                        + " w=\(b.value(for: .width))"
+                }
+                #endif
+            }
+            for key in [atomicIdKey, atomicKindKey, atomicCopyKey] {
+                if let v = attrs[key] as? String { line += " \(v)" }
+            }
+            parts.append(line)
+        }
+        return parts.joined(separator: "\n")
+    }
+
+    private func tables(_ doc: Markdown.Document)
+        -> [(headers: [String], rows: [[String]])] {
+        var out: [(headers: [String], rows: [[String]])] = []
+        for item in doc.items {
+            if case .table(let h, let r, _) = item.block { out.append((h, r)) }
+        }
+        return out
+    }
+
+    private func reference(_ headers: [String], _ rows: [[String]],
+                           style: MarkdownStyle)
+        -> (minimums: [CGFloat], naturals: [CGFloat]) {
+        let body = DocumentText.bodyFont(style)
+        let bold = boldFont(of: body)
+        let cols = max(headers.count, rows.map { r in r.count }.max() ?? 0)
+        var minimums = [CGFloat](repeating: 0, count: cols)
+        var naturals = [CGFloat](repeating: 0, count: cols)
+        for c in 0..<cols {
+            var cells: [(String, PlatformFont)] = []
+            if c < headers.count { cells.append((headers[c], bold)) }
+            for row in rows where c < row.count { cells.append((row[c], body)) }
+            for (cell, font) in cells {
+                let block = Markdown.parseCell(cell).items.first?.block
+                var drawn = TeX.scriptsToUnicode(cell)
+                var built = DocumentText.tableCell(cell, base: font,
+                                                   style: style,
+                                                   images: [:]).text
+                switch block {
+                    case .paragraph(let a)?: drawn = String(a.characters)
+                    case .image?:
+                        drawn = ""
+                        built = NSAttributedString()
+                    default: break
+                }
+                let natural = (drawn as NSString)
+                    .size(withAttributes: [.font: font]).width
+                if natural > naturals[c] { naturals[c] = natural }
+                let text = built.string as NSString
+                for run in DocumentText.unbreakableRuns(text) {
+                    let line = CTLineCreateWithAttributedString(
+                        built.attributedSubstring(from: run))
+                    let w = CGFloat(CTLineGetTypographicBounds(line, nil, nil,
+                                                               nil))
+                    if w > minimums[c] { minimums[c] = w }
+                }
+            }
+            minimums[c] = ceil(minimums[c])
+            let measured = DocumentText.tableUsesNaturals
+            naturals[c] = measured ? ceil(naturals[c]) : 0
+        }
+        return (minimums, naturals)
+    }
+
+    @Test func theColumnExtentsMatchThePerCellReference() {
+        let doc = Markdown.parse(SharedTableCellsTests.source)
+        for t in tables(doc) {
+            let cells = DocumentText.tableCells(headers: t.headers,
+                                                rows: t.rows,
+                                                style: .default, images: [:])
+            let want = reference(t.headers, t.rows, style: .default)
+            #expect(cells.minimums == want.minimums)
+            #expect(cells.naturals == want.naturals)
+            #expect(cells.cols == want.minimums.count)
+        }
+        #expect(tables(doc).count >= 2)
+    }
+
+    @Test func theSharedCellsRenderWhatAFreshBuildRenders() {
+        let doc = Markdown.parse(SharedTableCellsTests.source)
+        for width: CGFloat in [0, 200, 320, 760] {
+            let cache = DocumentText.RenderCache()
+            let need = DocumentText.minimumWidth(of: doc, style: .default,
+                                                 formulas: false, cache: cache)
+            let shared = DocumentText.attributed(from: doc, style: .default,
+                                                 width: width, cache: cache)
+            let fresh = DocumentText.attributed(from: doc, style: .default,
+                                                width: width)
+            #expect(need == DocumentText.minimumWidth(of: doc, style: .default,
+                                                      formulas: false))
+            #expect(SharedTableCellsTests.fingerprint(shared)
+                    == SharedTableCellsTests.fingerprint(fresh))
+            #expect(cache.tables.count == tables(doc).count)
+        }
+    }
+
+    @Test func aChangedCellRebuildsOnlyItsTable() {
+        let doc = Markdown.parse(SharedTableCellsTests.source)
+        let cache = DocumentText.RenderCache()
+        _ = DocumentText.minimumWidth(of: doc, style: .default,
+                                      formulas: false, cache: cache)
+        _ = DocumentText.attributed(from: doc, style: .default, width: 320,
+                                    cache: cache)
+        let first = cache.tables[1]?.cells.body.first?.first?.text
+        let edited = Markdown.parse(SharedTableCellsTests.source
+            .replacingOccurrences(of: "Constantinople", with: "Byzantium"))
+        _ = DocumentText.attributed(from: edited, style: .default,
+                                    width: 320, cache: cache)
+        #expect(cache.tables[1]?.cells.body.first?.first?.text === first)
+        #expect(cache.tables[4]?.cells.body.first?.last?.text.string
+                == "Byzantium")
+    }
+}
+
+@MainActor @Suite struct TableCostTests {
+
+    static let source: String = {
+        var lines = ["| Region | Population | Area km2 | Density | Capital |"
+                     + " Note |", "|---|---:|---:|---:|---|---|"]
+        for i in 0 ..< 30 {
+            lines.append("| Region \(i) with a long name | \(1000 + i * 37)"
+                         + ",512 | \(200 + i * 13).5 | 12.\(i) | Capital-\(i)"
+                         + "/City | **bold** and *italic* words here |")
+        }
+        return lines.joined(separator: "\n")
+    }()
+
+    private func millis(_ n: Int, _ body: () -> Void) -> Double {
+        let t0 = Date()
+        for _ in 0 ..< n { body() }
+        return Date().timeIntervalSince(t0) * 1000 / Double(n)
+    }
+
+    @Test func aThirtyBySixTableCostsOneBuildPerCellPerChange() {
+        let n = 20
+        let cache = DocumentText.RenderCache()
+        let docs = (0 ..< n).map { i in
+            Markdown.parse(TableCostTests.source
+                           + "\n| tail \(i) | 1 | 2 | 3 | 4 | 5 |")
+        }
+        var next = 0
+        let change = millis(n) {
+            _ = DocumentText.minimumWidth(of: docs[next], style: .default,
+                                          formulas: false, cache: cache)
+            _ = DocumentText.attributed(from: docs[next], style: .default,
+                                        width: 400, cache: cache)
+            next += 1
+        }
+        var headers: [String] = []
+        var rows: [[String]] = []
+        if case .table(let h, let r, _) = docs[0].items[0].block {
+            headers = h
+            rows = r
+        }
+        let cold = millis(n) {
+            _ = TableMeasure.measure(headers: headers, rows: rows,
+                                     style: .default)
+        }
+        let memo = TableMeasure()
+        let hit = millis(n) {
+            _ = memo.measured(headers: headers, rows: rows, style: .default)
+        }
+        let pdf = millis(5) { _ = MarkdownPDF.data(docs[0], title: "t") }
+        print("table cost ms: change \(change) measure \(cold) hit \(hit)"
+              + " pdf \(pdf)")
+        #expect(cache.tables.count == 1)
+        #expect(hit < cold)
     }
 }

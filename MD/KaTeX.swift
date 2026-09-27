@@ -396,6 +396,8 @@ public final class MathFontFile {
         return result
     }
 
+    var cachedFontCount: Int { ctCache.count }
+
     func ctFont(_ size: CGFloat) -> CTFont {
         let result: CTFont
         if let cached = ctCache[size] {
@@ -877,8 +879,18 @@ public enum TeXStyle: Int {
 final class Parser {
     private let toks: [Tok]
     private var i = 0
+    private var depth = 0
+    private static let maxDepth = 128
 
     init(_ input: String) { toks = Lexer.tokens(input) }
+
+    private func descend() throws {
+        depth += 1
+        if depth > Parser.maxDepth {
+            throw MathError.syntax("nested deeper than \(Parser.maxDepth)",
+                                   at: pos)
+        }
+    }
 
     private var peek: Tok? { i < toks.count ? toks[i] : nil }
     private func next() -> Tok? {
@@ -944,6 +956,8 @@ final class Parser {
 
     func expression(stop: Set<String>) throws -> [Node] {
         var out: [Node] = []
+        defer { depth -= 1 }
+        try descend()
         while !atStop(stop) {
             out.append(try atom())
         }
@@ -1082,6 +1096,8 @@ final class Parser {
     // character, a table lookup, and a command with a grammar of its own.
     private func nucleus() throws -> Node {
         let result: Node
+        defer { depth -= 1 }
+        try descend()
         if let t = next() {
             let s = t.text
             if s == "{" {

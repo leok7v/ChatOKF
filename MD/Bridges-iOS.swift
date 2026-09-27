@@ -95,6 +95,8 @@ extension NativeText: UIViewRepresentable {
         var findId: UUID?
         weak var findController: MarkdownFindController?
         private var lastWidth: CGFloat = 0
+        private var contentGeneration = 0
+        private var overlayGeneration = -1
         private var findMatches: [NSRange] = []
         private var activeIndex: Int? = nil
         private var findQuery = ""
@@ -125,15 +127,15 @@ extension NativeText: UIViewRepresentable {
         // Find and spoken tints are real backgrounds here: stripped before
         // the diff and re-tinted after, or the splice reads them as edits.
         func applyResolved(_ next: NSAttributedString) {
-            let active = !findQuery.isEmpty || spokenRange != nil
-            if active { clearHighlights() }
-            if !textStorage.isEqual(to: next) {
-                textStorage.beginEditing()
-                applyIncremental(textStorage, next)
-                textStorage.endEditing()
+            let tinted = !findQuery.isEmpty || spokenRange != nil
+            if tinted { clearHighlights() }
+            let changed = applyIncremental(textStorage, next)
+            if changed {
+                contentGeneration += 1
                 invalidateIntrinsicContentSize()
+                setNeedsLayout()
             }
-            if active { reapplyFind() }
+            if tinted || (changed && spokenText != nil) { reapplyFind() }
         }
 
         // Concrete (never a dynamic system color, which resolves to nil off a
@@ -289,11 +291,15 @@ extension NativeText: UIViewRepresentable {
 
         override func layoutSubviews() {
             super.layoutSubviews()
-            if bounds.size.width != lastWidth {
+            let resized = bounds.size.width != lastWidth
+            if resized {
                 lastWidth = bounds.size.width
                 invalidateIntrinsicContentSize()
             }
-            rebuildCopyOverlays()
+            if resized || overlayGeneration != contentGeneration {
+                overlayGeneration = contentGeneration
+                rebuildCopyOverlays()
+            }
         }
 
         // A REAL control, unlike the macOS twin's decorative one: a touch

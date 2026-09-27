@@ -42,12 +42,14 @@ public enum Continuation {
         var result = false
         var k = 1
         while k <= longK && !result {
-            let structural = tokenBytes.map { bytes in
-                structuralGram(ids, k, bytes)
-            } ?? false
-            let need = structural ? structuralReps
-                                  : (k <= 4 ? reps : longReps)
-            result = tailRepeats(ids, k, need)
+            if tailRepeats(ids, k, longReps) {
+                let structural = tokenBytes.map { bytes in
+                    structuralGram(ids, k, bytes)
+                } ?? false
+                let need = structural ? structuralReps
+                                      : (k <= 4 ? reps : longReps)
+                result = tailRepeats(ids, k, need)
+            }
             k += 1
         }
         return result

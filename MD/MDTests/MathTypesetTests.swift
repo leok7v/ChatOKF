@@ -53,6 +53,32 @@ final class MathTypesetTests: XCTestCase {
         XCTAssertGreaterThan(layout.height, 0)
     }
 
+    func testTwoHundredNestedBracesThrowRatherThanCrash() {
+        let deep = String(repeating: "{", count: 200) + "x"
+            + String(repeating: "}", count: 200)
+        XCTAssertThrowsError(try Parser.parse(deep))
+        XCTAssertNil(TeX.layout(deep, size: 20))
+        XCTAssertFalse(TeX.parses(deep))
+    }
+
+    func testDeepScriptsAndRadicalsThrowToo() {
+        let scripts = String(repeating: "x^{", count: 200) + "x"
+            + String(repeating: "}", count: 200)
+        XCTAssertThrowsError(try Parser.parse(scripts))
+        let radicals = String(repeating: "\\sqrt", count: 200) + "x"
+        XCTAssertThrowsError(try Parser.parse(radicals))
+        let fractions = String(repeating: "\\frac{a}{", count: 200) + "x"
+            + String(repeating: "}", count: 200)
+        XCTAssertThrowsError(try Parser.parse(fractions))
+    }
+
+    func testThirtyNestedBracesStillParse() {
+        let nested = String(repeating: "{", count: 30) + "x"
+            + String(repeating: "}", count: 30)
+        XCTAssertNoThrow(try Parser.parse(nested))
+        XCTAssertNotNil(TeX.layout(nested, size: 20))
+    }
+
     // A refusal must fall back rather than vanish: the Unicode spelling is
     // readable where an empty box is not.
     func testAnUnknownMacroStillReads() {

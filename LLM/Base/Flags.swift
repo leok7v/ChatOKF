@@ -181,6 +181,11 @@ public enum Flags {
             "background lanes that hammer the GPU on their own queue, to "
             + "provoke the interactivity abort a long buffer earns; 0 off, "
             + "8 at most", scope: .diagnostic, defaultValue: "0"),
+        Knob(name: "resumable", takesValue: false, help:
+            "keep every left conversation's state and its attachments' "
+            + "soft tokens, so a saved chat reopens live; --no-resumable "
+            + "keeps one state as before", scope: .experiment,
+            defaultValue: "0"),
         Knob(name: "gpu-fault-rate", takesValue: true, help:
             "the fraction of command buffers reported as failed, drawn from "
             + "the --seed generator, to drive the retry and the cancel on a "

@@ -40,8 +40,17 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
             ContentView(model: model)
                 .onChange(of: scenePhase) { _, phase in
                     BackgroundGate.shared.setBackgrounded(phase != .active)
-                    if phase == .background { model.commitCurrent() }
+                    if phase == .background { commitInBackground() }
                 }
+        }
+    }
+
+    private func commitInBackground() {
+        let ticket = UIApplication.shared.beginBackgroundTask()
+        model.commitCurrent()
+        Task { @MainActor in
+            await ConversationStore.shared.settled()
+            UIApplication.shared.endBackgroundTask(ticket)
         }
     }
 }

@@ -7,6 +7,11 @@ enum ScriptAttribute: AttributedStringKey {
     static let name = "md.script"
 }
 
+enum SmallAttribute: AttributedStringKey {
+    typealias Value = Bool
+    static let name = "md.small"
+}
+
 // Batch parser, adapted from md.too. `blocks` is the seam the streaming
 // parser reuses so streaming and batch results cannot diverge.
 extension Markdown {
@@ -59,16 +64,44 @@ extension Markdown {
         blockSpans(lines).map { pair in pair.block }
     }
 
+    enum OpenBlock {
+        case code(language: String?, fence: String, indent: Int,
+                  body: [String])
+        case table(headers: [String], alignments: [Alignment],
+                   rows: [[String]])
+        case list(items: [ListItem], tight: Bool)
+    }
+
+    struct Grown {
+        let block: Block
+        let open: OpenBlock?
+        let cut: Int
+    }
+
     // Same engine, recording the START line of each block.
     static func blockSpans(_ lines: [String])
         -> [(start: Int, block: Block)] {
+        openSpans(lines, resuming: nil).spans
+    }
+
+    static func openSpans(_ lines: [String], resuming carried: OpenBlock?)
+        -> (spans: [(start: Int, block: Block)], open: OpenBlock?,
+            cut: Int) {
         var out: [(start: Int, block: Block)] = []
         var i = 0
+        var grown: Grown? = nil
+        var grownAt = -1
+        func grow(_ g: Grown, at start: Int) {
+            out.append((start, g.block))
+            grown = g
+            grownAt = out.count - 1
+        }
+        if let carried { grow(resume(carried, lines, &i), at: 0) }
         while i < lines.count {
             let start = i
             let line = lines[i]
             if isFence(line) {
-                out.append((start, consumeFenced(lines, &i)))
+                grow(consumeFenced(lines, &i), at: start)
             } else if isMathFence(line) {
                 out.append((start, consumeMath(lines, &i)))
             } else if isHeading(line) {
@@ -83,15 +116,17 @@ extension Markdown {
                 if !lastRule { out.append((start, .rule)) }
                 i += 1
             } else if isTableStart(lines, i) {
-                out.append((start, consumeTable(lines, &i)))
+                grow(consumeTable(lines, &i), at: start)
             } else if isQuoteStart(line) {
                 out.append((start, consumeQuote(lines, &i)))
             } else if isListStart(line) {
-                out.append((start, consumeList(lines, &i)))
+                grow(consumeList(lines, &i), at: start)
             } else if isIndentedCode(line) {
                 out.append((start, consumeIndentedCode(lines, &i)))
             } else if line.trimmedOuter().isEmpty {
                 i += 1
+            } else if isCommentStart(line) {
+                skipComment(lines, &i)
             } else if let img = imageBlock(line) {
                 out.append((start, img))
                 i += 1
@@ -99,7 +134,22 @@ extension Markdown {
                 out.append((start, consumeParagraph(lines, &i)))
             }
         }
-        return out
+        let settled = grownAt == out.count - 1 ? grown : nil
+        return (out, settled?.open, settled?.cut ?? 0)
+    }
+
+    static func resume(_ open: OpenBlock, _ lines: [String],
+                       _ i: inout Int) -> Grown {
+        switch open {
+            case .code(let language, let fence, let indent, let body):
+                return growFenced(language: language, fence: fence,
+                                  indent: indent, body: body, lines, &i)
+            case .table(let headers, let alignments, let rows):
+                return growTable(headers: headers, alignments: alignments,
+                                 rows: rows, lines, &i)
+            case .list(let items, let tight):
+                return growList(items: items, tight: tight, lines, &i)
+        }
     }
 
     static func stripLinkDefinitions(_ raw: [String])
@@ -156,37 +206,30 @@ extension Markdown {
         }).joined(separator: " ")
     }
 
+    static let lineBreak = "\u{2028}"
+
     static func inline(_ raw: String) -> AttributedString {
-        let withRefs = substituteRefs(raw)
-        let normalized = normalizeBreaks(withRefs)
-        let segs = mathEnabled ? TeX.split(normalized) : []
-        let hasMath = segs.contains { seg in
-            if case .math = seg { return true } else { return false }
-        }
-        var out = hasMath ? inlineWithMath(segs)
-                          : parseInlineMarkdown(normalized)
-        applyUnderlineTags(&out)
-        applyScriptTags(&out, tag: "sup", level: 1)
-        applyScriptTags(&out, tag: "sub", level: -1)
-        return out
-    }
-
-    // Each math span becomes a private-use sentinel so emphasis wrapping
-    // math still pairs across the span; then the sentinels are swapped back.
-    private static let mathMark = "\u{F8FF}"
-
-    static func inlineWithMath(_ segs: [TeX.Segment]) -> AttributedString {
-        var text = ""
+        var stitched = ""
         var maths: [AttributedString] = []
-        for seg in segs {
-            switch seg {
-                case .text(let s): text += s
-                case .math(let s, let display):
-                    text += mathMark + String(maths.count) + mathMark
-                    maths.append(TeX.render(s, display: display))
+        for segment in codeSpanSegments(raw) {
+            if segment.code {
+                stitched += segment.text
+            } else {
+                let withRefs = substituteRefs(htmlInline(segment.text))
+                let pieces = mathEnabled ? TeX.split(withRefs)
+                                         : [.text(withRefs)]
+                for piece in pieces {
+                    switch piece {
+                        case .text(let s): stitched += s
+                        case .math(let s, let display):
+                            stitched += mathMark + String(maths.count)
+                                + mathMark
+                            maths.append(TeX.render(s, display: display))
+                    }
+                }
             }
         }
-        var out = parseInlineMarkdown(text)
+        var out = parseInlineMarkdown(normalizeBreaks(stitched))
         for (i, math) in maths.enumerated() {
             let token = mathMark + String(i) + mathMark
             if let r = out.range(of: token) {
@@ -197,7 +240,165 @@ extension Markdown {
                 out.replaceSubrange(r, with: m)
             }
         }
+        applyTag(&out, "u") { sub in sub.underlineStyle = .single }
+        applyTag(&out, "sup") { sub in sub[ScriptAttribute.self] = 1 }
+        applyTag(&out, "sub") { sub in sub[ScriptAttribute.self] = -1 }
+        applyTag(&out, "small") { sub in sub[SmallAttribute.self] = true }
         return out
+    }
+
+    private static let mathMark = "\u{F8FF}"
+
+    static func codeSpanSegments(_ line: String)
+        -> [(text: String, code: Bool)] {
+        var out: [(text: String, code: Bool)] = []
+        let chars = Array(line)
+        var text = ""
+        var i = 0
+        while i < chars.count {
+            if chars[i] == "`" {
+                var n = 0
+                while i + n < chars.count, chars[i + n] == "`" { n += 1 }
+                if let close = closingRun(chars, from: i + n, length: n) {
+                    if !text.isEmpty { out.append((text, false)) }
+                    text = ""
+                    out.append((String(chars[i..<(close + n)]), true))
+                    i = close + n
+                } else {
+                    text += String(chars[i..<(i + n)])
+                    i += n
+                }
+            } else {
+                text.append(chars[i])
+                i += 1
+            }
+        }
+        if !text.isEmpty { out.append((text, false)) }
+        return out
+    }
+
+    private static func closingRun(_ chars: [Character], from start: Int,
+                                   length: Int) -> Int? {
+        var result: Int? = nil
+        var i = start
+        while i < chars.count, result == nil {
+            if chars[i] == "`" {
+                var n = 0
+                while i + n < chars.count, chars[i + n] == "`" { n += 1 }
+                if n == length { result = i }
+                i += n
+            } else {
+                i += 1
+            }
+        }
+        return result
+    }
+
+    static func isCommentStart(_ line: String) -> Bool {
+        line.trimmedLeading().hasPrefix("<!--")
+    }
+
+    static func skipComment(_ lines: [String], _ i: inout Int) {
+        var closed = false
+        while i < lines.count, !closed {
+            if lines[i].contains("-->") { closed = true }
+            i += 1
+        }
+    }
+
+    static func htmlLine(_ line: String) -> String {
+        var out = ""
+        for segment in codeSpanSegments(line) {
+            out += segment.code ? segment.text : htmlInline(segment.text)
+        }
+        return out
+    }
+
+    private struct TagRule {
+        let re: NSRegularExpression?
+        let template: String
+    }
+
+    private static func tagRule(_ pattern: String,
+                                _ template: String) -> TagRule {
+        TagRule(re: try? NSRegularExpression(pattern: pattern,
+                                             options: .caseInsensitive),
+                template: template)
+    }
+
+    private static let imgRule =
+        tagRule(#"<img\b[^>]*?\bsrc\s*=\s*"([^"]*)"[^>]*>"#, "![]($1)")
+
+    private static let tagRules: [TagRule] = [
+        tagRule(#"<!--.*?-->"#, ""),
+        tagRule(#"<br\s*/?>"#, lineBreak),
+        imgRule,
+        tagRule(#"<img\b[^>]*?\bsrc\s*=\s*'([^']*)'[^>]*>"#, "![]($1)"),
+        tagRule(#"<a\b[^>]*?\bhref\s*=\s*"([^"]*)"[^>]*>(.*?)</a>"#,
+                "[$2]($1)"),
+        tagRule(#"<a\b[^>]*?\bhref\s*=\s*'([^']*)'[^>]*>(.*?)</a>"#,
+                "[$2]($1)"),
+        tagRule(#"<(b|strong)>(.*?)</\1>"#, "**$2**"),
+        tagRule(#"<(i|em)>(.*?)</\1>"#, "*$2*"),
+        tagRule(#"<(s|del|strike)>(.*?)</\1>"#, "~~$2~~"),
+        tagRule(#"<(code|kbd)>(.*?)</\1>"#, "`$2`"),
+    ]
+
+    private static let imgAltRE = try? NSRegularExpression(
+        pattern: #"<img\b[^>]*?\balt\s*=\s*"([^"]*)""#,
+        options: .caseInsensitive)
+
+    private static let imgSizeRE = try? NSRegularExpression(
+        pattern: #"\b(width|height)\s*=\s*"?(\d+)"?"#,
+        options: .caseInsensitive)
+
+    static func htmlInline(_ text: String) -> String {
+        var result = text
+        if text.contains("<") {
+            result = imagesWithAttributes(result)
+            for rule in tagRules {
+                if let re = rule.re {
+                    let ns = result as NSString
+                    result = re.stringByReplacingMatches(
+                        in: result,
+                        range: NSRange(location: 0, length: ns.length),
+                        withTemplate: rule.template)
+                }
+            }
+        }
+        return result
+    }
+
+    private static func imagesWithAttributes(_ text: String) -> String {
+        var result = text
+        if let altRE = imgAltRE, let sizeRE = imgSizeRE {
+            let ns = text as NSString
+            let full = NSRange(location: 0, length: ns.length)
+            let tags = imgRule.re?.matches(in: text, range: full) ?? []
+            let mutable = NSMutableString(string: text)
+            for m in tags.reversed() {
+                let tag = ns.substring(with: m.range)
+                let src = ns.substring(with: m.range(at: 1))
+                let tagNS = tag as NSString
+                let tagRange = NSRange(location: 0, length: tagNS.length)
+                var alt = ""
+                if let a = altRE.firstMatch(in: tag, range: tagRange) {
+                    alt = tagNS.substring(with: a.range(at: 1))
+                }
+                var dims: [String] = []
+                for d in sizeRE.matches(in: tag, range: tagRange) {
+                    let key = tagNS.substring(with: d.range(at: 1))
+                    let value = tagNS.substring(with: d.range(at: 2))
+                    dims.append(key.lowercased() + "=" + value)
+                }
+                let suffix = dims.isEmpty
+                    ? "" : "{" + dims.joined(separator: " ") + "}"
+                mutable.replaceCharacters(
+                    in: m.range, with: "![\(alt)](\(src))" + suffix)
+            }
+            result = mutable as String
+        }
+        return result
     }
 
     static func parseInlineMarkdown(_ s: String) -> AttributedString {
@@ -220,52 +421,37 @@ extension Markdown {
             let last = idx == lines.count - 1
             let hardBreak = line.hasSuffix("  ")
             let trimmed = hardBreak ? String(line.dropLast(2)) : line
-            if hardBreak { out.append(trimmed + "\n") }
+            if hardBreak { out.append(trimmed + lineBreak) }
             else if last { out.append(trimmed) }
             else { out.append(trimmed + " ") }
         }
-        return out.joined()
+        return out.joined().replacingOccurrences(of: lineBreak + " ",
+                                                 with: lineBreak)
     }
 
-    static func applyUnderlineTags(_ a: inout AttributedString) {
-        var keep = true
-        while keep {
-            if let open = a.range(of: "<u>", options: .caseInsensitive) {
-                let tail = a[open.upperBound...]
-                if let close = tail.range(of: "</u>",
-                                          options: .caseInsensitive) {
-                    var sub = a[open.upperBound..<close.lowerBound]
-                    sub.underlineStyle = .single
-                    a.replaceSubrange(open.lowerBound..<close.upperBound,
-                                      with: sub)
-                } else {
-                    a.removeSubrange(open)   // hide a partial tag streaming
-                }
-            } else {
-                keep = false
-            }
-        }
-    }
-
-    // Same shape as applyUnderlineTags: an unclosed opener is dropped rather
-    // than left on screen as markup the reader never wrote.
-    static func applyScriptTags(_ a: inout AttributedString,
-                                tag: String, level: Int) {
+    static func applyTag(_ a: inout AttributedString, _ tag: String,
+                         style: (inout AttributedSubstring) -> Void) {
         let open = "<\(tag)>"
         let close = "</\(tag)>"
-        var keep = true
-        while keep {
-            if let o = a.range(of: open, options: .caseInsensitive) {
-                let tail = a[o.upperBound...]
-                if let c = tail.range(of: close, options: .caseInsensitive) {
+        var from = a.startIndex
+        var searching = true
+        while searching {
+            if let o = a[from...].range(of: open, options: .caseInsensitive) {
+                let intent = a.runs[o.lowerBound].inlinePresentationIntent
+                if intent?.contains(.code) == true {
+                    from = o.upperBound
+                } else if let c = a[o.upperBound...].range(
+                    of: close, options: .caseInsensitive) {
                     var sub = a[o.upperBound..<c.lowerBound]
-                    sub[ScriptAttribute.self] = level
+                    style(&sub)
                     a.replaceSubrange(o.lowerBound..<c.upperBound, with: sub)
+                    from = a.startIndex
                 } else {
                     a.removeSubrange(o)
+                    from = a.startIndex
                 }
             } else {
-                keep = false
+                searching = false
             }
         }
     }
@@ -320,7 +506,8 @@ extension Markdown {
         let n = t.prefix { c in c == "#" }.count
         if n >= 1 && n <= 6 {
             let rest = t.dropFirst(n)
-            result = rest.hasPrefix(" ") || rest.isEmpty
+            result = rest.hasPrefix(" ") || rest.hasPrefix("\t") ||
+                     rest.isEmpty
         }
         return result
     }
@@ -347,15 +534,21 @@ extension Markdown {
         return t.hasPrefix("```") || t.hasPrefix("~~~")
     }
 
-    static func consumeFenced(_ lines: [String], _ i: inout Int) -> Block {
+    static func consumeFenced(_ lines: [String], _ i: inout Int) -> Grown {
         let raw = lines[i]
         let t = raw.trimmedLeading()
-        let fence = String(t.prefix(3))
         let lang = String(t.dropFirst(3)).trimmedOuter()
-        let indent = raw.count - t.count
-        let pad = String(repeating: " ", count: indent)
         i += 1
-        var body: [String] = []
+        return growFenced(language: lang.isEmpty ? nil : lang,
+                          fence: String(t.prefix(3)),
+                          indent: raw.count - t.count, body: [], lines, &i)
+    }
+
+    static func growFenced(language: String?, fence: String, indent: Int,
+                           body: [String], _ lines: [String],
+                           _ i: inout Int) -> Grown {
+        let pad = String(repeating: " ", count: indent)
+        var body = body
         var done = false
         while i < lines.count, !done {
             let line = lines[i]
@@ -369,8 +562,12 @@ extension Markdown {
             }
             i += 1
         }
-        let language = lang.isEmpty ? nil : lang
-        return .code(language: language, text: body.joined(separator: "\n"))
+        let open: OpenBlock? = done ? nil
+            : .code(language: language, fence: fence, indent: indent,
+                    body: body)
+        return Grown(block: .code(language: language,
+                                  text: body.joined(separator: "\n")),
+                     open: open, cut: i)
     }
 
     // Only a line that OPENS with $$ starts a display.
@@ -448,7 +645,9 @@ extension Markdown {
             if isQuoteStart(line) {
                 var t = line.trimmedLeading()
                 t = String(t.dropFirst())
-                if t.hasPrefix(" ") { t = String(t.dropFirst()) }
+                if t.hasPrefix(" ") || t.hasPrefix("\t") {
+                    t = String(t.dropFirst())
+                }
                 inner.append(t)
                 i += 1
             } else if !line.trimmedOuter().isEmpty,
@@ -497,25 +696,35 @@ extension Markdown {
         -> (label: String, sig: Character, offset: Int, rest: String)? {
         var result: (String, Character, Int, String)? = nil
         let spaces = tail.prefix { c in c == " " }.count
-        let blankRest = tail.allSatisfy { c in c == " " }
+        let blankRest = tail.allSatisfy { c in c == " " || c == "\t" }
+        let column = leading + markerWidth
         if blankRest {
-            result = (label, sig, leading + markerWidth + 1, "")
+            result = (label, sig, column + 1, "")
+        } else if tail.hasPrefix("\t") {
+            result = (label, sig, column + 4 - column % 4,
+                      String(tail.dropFirst()))
         } else if spaces >= 1 {
             let n = spaces >= 5 ? 1 : spaces
-            result = (label, sig, leading + markerWidth + n,
-                      String(tail.dropFirst(n)))
+            result = (label, sig, column + n, String(tail.dropFirst(n)))
         }
         return result
     }
 
-    static func consumeList(_ lines: [String], _ i: inout Int) -> Block {
-        var items: [ListItem] = []
-        var tight = true
+    static func consumeList(_ lines: [String], _ i: inout Int) -> Grown {
+        growList(items: [], tight: true, lines, &i)
+    }
+
+    static func growList(items: [ListItem], tight: Bool, _ lines: [String],
+                         _ i: inout Int) -> Grown {
+        var items = items
+        var tight = tight
         var sig: Character? = nil
         var done = false
+        var lastStart = i
         while i < lines.count, !done {
             if let m = listMarker(lines[i]), sig == nil || m.sig == sig {
                 sig = m.sig
+                lastStart = i
                 var body: [String] = []
                 let (checked, rest) = stripTaskMarker(m.rest)
                 body.append(rest)
@@ -532,16 +741,23 @@ extension Markdown {
                 done = true
             }
         }
-        return .list(items: items, tight: tight)
+        let open: OpenBlock? = items.count >= 2
+            ? .list(items: Array(items.dropLast()), tight: tight) : nil
+        return Grown(block: .list(items: items, tight: tight), open: open,
+                     cut: lastStart)
     }
 
     static func stripTaskMarker(_ s: String)
         -> (checked: Bool?, rest: String) {
         var result: (Bool?, String) = (nil, s)
-        if s.hasPrefix("[ ] ") {
-            result = (false, String(s.dropFirst(4)))
-        } else if s.hasPrefix("[x] ") || s.hasPrefix("[X] ") {
-            result = (true, String(s.dropFirst(4)))
+        let boxes: [(String, Bool)] = [("[ ]", false), ("[x]", true),
+                                       ("[X]", true)]
+        for (box, checked) in boxes where result.0 == nil {
+            if s == box {
+                result = (checked, "")
+            } else if s.hasPrefix(box + " ") || s.hasPrefix(box + "\t") {
+                result = (checked, String(s.dropFirst(box.count + 1)))
+            }
         }
         return result
     }
@@ -682,9 +898,8 @@ extension Markdown {
         return result
     }
 
-    static func consumeTable(_ lines: [String], _ i: inout Int) -> Block {
+    static func consumeTable(_ lines: [String], _ i: inout Int) -> Grown {
         var headers: [String] = []
-        var rows: [[String]] = []
         var alignments: [Alignment] = []
         if i < lines.count, isTableRow(lines[i]) {
             headers = parseRow(lines[i])
@@ -694,19 +909,51 @@ extension Markdown {
             alignments = parseAlignments(lines[i])
             i += 1
         }
+        return growTable(headers: headers, alignments: alignments, rows: [],
+                         lines, &i)
+    }
+
+    static func growTable(headers: [String], alignments: [Alignment],
+                          rows: [[String]], _ lines: [String],
+                          _ i: inout Int) -> Grown {
+        var rows = rows
         while i < lines.count, isTableRow(lines[i]) {
             rows.append(parseRow(lines[i]))
             i += 1
         }
-        return .table(headers: headers, rows: rows,
-                      alignments: alignments)
+        return Grown(block: .table(headers: headers, rows: rows,
+                                   alignments: alignments),
+                     open: .table(headers: headers, alignments: alignments,
+                                  rows: rows),
+                     cut: i)
     }
 
     static func parseRow(_ s: String) -> [String] {
-        let pipes = CharacterSet(charactersIn: "|")
-        let t = s.trimmedOuter().trimmingCharacters(in: pipes)
-        return t.split(separator: "|", omittingEmptySubsequences: false)
-                .map { p in p.trimmingCharacters(in: .whitespaces) }
+        let t = s.trimmedOuter()
+        var cells: [String] = []
+        var cell = ""
+        var escaping = false
+        for ch in t {
+            if escaping {
+                if ch != "|" { cell.append("\\") }
+                cell.append(ch)
+                escaping = false
+            } else if ch == "\\" {
+                escaping = true
+            } else if ch == "|" {
+                cells.append(cell)
+                cell = ""
+            } else {
+                cell.append(ch)
+            }
+        }
+        if escaping { cell.append("\\") }
+        cells.append(cell)
+        if t.hasPrefix("|"), !cells.isEmpty { cells.removeFirst() }
+        if t.hasSuffix("|"), !t.hasSuffix("\\|"), !cells.isEmpty {
+            cells.removeLast()
+        }
+        return cells.map { p in p.trimmingCharacters(in: .whitespaces) }
     }
 
     static func parseAlignments(_ s: String) -> [Alignment] {
@@ -733,7 +980,7 @@ extension Markdown {
     static func imageBlock(_ line: String) -> Block? {
         var result: Block? = nil
         if let re = imageLineRegex {
-            let trimmed = line.trimmedOuter()
+            let trimmed = htmlLine(line).trimmedOuter()
             let ns = trimmed as NSString
             let range = NSRange(location: 0, length: ns.length)
             if let m = re.firstMatch(in: trimmed, options: [],
@@ -789,10 +1036,10 @@ extension Markdown {
             let other = isHeading(line) || isHR(line) || isFence(line) ||
                         isMathFence(line) ||
                         isTableStart(lines, i) || isQuoteStart(line) ||
-                        isListStart(line) || isIndentedCode(line) ||
-                        imageBlock(line) != nil
+                        isListStart(line) || imageBlock(line) != nil ||
+                        isCommentStart(line)
             if blank || other { done = true }
-            else { body.append(line); i += 1 }
+            else { body.append(line.trimmedLeading()); i += 1 }
         }
         let raw = body.joined(separator: "\n")
         return bareMath(raw) ?? .paragraph(inline(raw))

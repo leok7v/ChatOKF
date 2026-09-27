@@ -8,6 +8,7 @@ public protocol Embedder: AnyObject {
     var relevanceFloor: Float { get }
     func embed(_ text: String) -> [Float]
     func states(_ text: String) -> [Float]
+    func pooled(_ states: [Float]) -> [Float]
     func tokens(_ text: String) -> [Int32]
 }
 
@@ -56,17 +57,23 @@ public final class BertEmbedder: Embedder {
 
     public func states(_ text: String) -> [Float] { model.encode(text) }
 
+    public func pooled(_ states: [Float]) -> [Float] {
+        var out = [Float](repeating: 0, count: model.dim)
+        MiniLM.pooled(states, width: model.dim, into: &out)
+        return out
+    }
+
     public func tokens(_ text: String) -> [Int32] { model.tokenize(text) }
 }
 
-public enum Trust: String {
+public enum Trust: String, Sendable {
     case unverified
     case unconfirmed
     case machine
     case human
 }
 
-public struct Concept {
+public struct Concept: Sendable {
     public var id: String
     public var path: URL
     public var type: String
@@ -126,7 +133,7 @@ public struct Concept {
     }
 }
 
-public struct Hit {
+public struct Hit: Sendable {
     public let concept: Concept
     public let score: Float
     public let relevance: Float
@@ -178,7 +185,7 @@ public struct Paragraph {
     public let text: String
 }
 
-public struct Filter {
+public struct Filter: Sendable {
     public var type: String = ""
     public var tags: [String] = []
     public var area: String = ""
@@ -209,7 +216,7 @@ public struct Filter {
     }
 }
 
-public struct SearchResult {
+public struct SearchResult: Sendable {
     public let hits: [Hit]
     public let embedSeconds: Double
     public let scanSeconds: Double
@@ -423,6 +430,7 @@ public final class Store {
     public private(set) var concepts: [Concept] = []
     public private(set) var byId: [String: Int] = [:]
     public private(set) var embeddedCount = 0
+    public private(set) var encodedCount = 0
     public private(set) var loadSeconds = 0.0
     public private(set) var okfVersion = ""
     private var anyPostings: [String: [Int]] = [:]
@@ -545,7 +553,8 @@ public final class Store {
             out.vector = Array(hit.vectors[0..<embedder.dim])
             out.bodyVector = Array(hit.vectors[embedder.dim...])
         } else {
-            out.vector = embedder.embedPassage(concept.passage)
+            out.vector = passageVectors[concept.passage]
+                ?? embedder.embedPassage(concept.passage)
             out.bodyVector = concept.body.isEmpty
                 ? out.vector : embedder.embedPassage(concept.bodyPassage)
             embeddedCount += 1
@@ -553,7 +562,25 @@ public final class Store {
         return out
     }
 
+    static let passagesKept = 8
+
+    private var passageVectors: [String: [Float]] = [:]
+
+    private func passageVector(_ passage: String) -> [Float] {
+        var out = passageVectors[passage]
+        if out == nil {
+            if passageVectors.count >= Store.passagesKept {
+                passageVectors = [:]
+            }
+            let fresh = embedder.embedPassage(passage)
+            passageVectors[passage] = fresh
+            out = fresh
+        }
+        return out ?? []
+    }
+
     private func deriveBacklinks() {
+        for i in concepts.indices { concepts[i].backlinks = [] }
         for i in concepts.indices {
             for target in concepts[i].links {
                 if let j = byId[target], j != i {
@@ -586,14 +613,40 @@ public final class Store {
         }
         deriveBacklinks()
         buildPostings()
-        var fresh: [String: CacheEntry] = [:]
-        for concept in concepts {
-            fresh[concept.id] = CacheEntry(
-                hash: concept.hash,
-                vectors: concept.vector + concept.bodyVector)
-        }
-        writeCache(fresh)
+        writeCache()
         okfVersion = readVersion()
+        loadSeconds = Date().timeIntervalSince(started)
+    }
+
+    public func reload(id: String) {
+        let started = Date()
+        let url = root.appendingPathComponent(id + ".md")
+        let data = try? Data(contentsOf: url)
+        var kept: [String: CacheEntry] = [:]
+        embeddedCount = 0
+        if let index = byId[id] {
+            let old = concepts[index]
+            kept[id] = CacheEntry(hash: old.hash,
+                                  vectors: old.vector + old.bodyVector)
+            unpost(index)
+            concepts.remove(at: index)
+        }
+        if let data, isConcept(id) {
+            let text = String(decoding: data, as: UTF8.self)
+            let fresh = embedded(parse(text, id: id, path: url,
+                                       hash: fnv1a(data)), kept)
+            let at = concepts.firstIndex { concept in
+                concept.id + ".md" > id + ".md"
+            } ?? concepts.count
+            concepts.insert(fresh, at: at)
+            post(at)
+        }
+        byId = [:]
+        for (index, concept) in concepts.enumerated() {
+            byId[concept.id] = index
+        }
+        deriveBacklinks()
+        if embeddedCount > 0 { writeCache() }
         loadSeconds = Date().timeIntervalSince(started)
     }
 
@@ -669,21 +722,67 @@ public final class Store {
         return out
     }
 
+    private static func words(of concept: Concept)
+        -> (head: Set<String>, all: Set<String>) {
+        let head = Set(Store.words(concept.title + " "
+            + concept.description + " "
+            + concept.tags.joined(separator: " ")))
+        return (head, head.union(Store.words(concept.body)))
+    }
+
     private func buildPostings() {
         anyPostings = [:]
         headPostings = [:]
         for (index, concept) in concepts.enumerated() {
-            let head = Store.words(concept.title + " "
-                + concept.description + " "
-                + concept.tags.joined(separator: " "))
-            for word in Set(head) {
+            let words = Store.words(of: concept)
+            for word in words.head {
                 headPostings[word, default: []].insert(index)
             }
-            let all = Set(head).union(Store.words(concept.body))
-            for word in all {
+            for word in words.all {
                 anyPostings[word, default: []].append(index)
             }
         }
+    }
+
+    private func shiftPostings(from index: Int, by delta: Int) {
+        for (word, holders) in anyPostings {
+            anyPostings[word] = holders.map { held in
+                held >= index ? held + delta : held
+            }
+        }
+        for (word, holders) in headPostings {
+            headPostings[word] = Set(holders.map { held in
+                held >= index ? held + delta : held
+            })
+        }
+    }
+
+    private func post(_ index: Int) {
+        shiftPostings(from: index, by: 1)
+        let words = Store.words(of: concepts[index])
+        for word in words.head {
+            headPostings[word, default: []].insert(index)
+        }
+        for word in words.all {
+            var holders = anyPostings[word] ?? []
+            let at = holders.firstIndex { held in held > index }
+                ?? holders.count
+            holders.insert(index, at: at)
+            anyPostings[word] = holders
+        }
+    }
+
+    private func unpost(_ index: Int) {
+        let words = Store.words(of: concepts[index])
+        for word in words.head {
+            headPostings[word]?.remove(index)
+            if headPostings[word]?.isEmpty == true { headPostings[word] = nil }
+        }
+        for word in words.all {
+            anyPostings[word]?.removeAll { held in held == index }
+            if anyPostings[word]?.isEmpty == true { anyPostings[word] = nil }
+        }
+        shiftPostings(from: index + 1, by: -1)
     }
 
     public func literalRanking(_ query: String)
@@ -726,9 +825,8 @@ public final class Store {
         return out
     }
 
-    private func denseRanking(_ query: String, _ retired: Bool)
+    private func denseRanking(_ vector: [Float], _ retired: Bool)
         -> [(index: Int, score: Float)] {
-        let vector = embedder.embedQuery(query)
         var scored: [(index: Int, score: Float)] = []
         scored.reserveCapacity(concepts.count)
         let width = embedder.dim
@@ -753,8 +851,12 @@ public final class Store {
         var rankings: [[Int]] = []
         var best: [Int: Float] = [:]
         var standout: Float = 0
+        var asked: [[Float]] = []
         for query in queries {
-            let dense = denseRanking(query, filter.deprecated)
+            let states = embedder.states(embedder.queryPrefix + query)
+            asked.append(unitTokens(states, after: embedder.queryPrefix,
+                                    of: query))
+            let dense = denseRanking(embedder.pooled(states), filter.deprecated)
             rankings.append(dense.map { entry in entry.index })
             for entry in dense where entry.score > best[entry.index] ?? -1 {
                 best[entry.index] = entry.score
@@ -782,7 +884,7 @@ public final class Store {
         let admitted = order.filter { entry in
             filter.admits(concepts[entry.key])
         }
-        let hits = rerank(queries, admitted.prefix(limit).map { entry in
+        let hits = rerank(asked, admitted.prefix(limit).map { entry in
             Hit(concept: concepts[entry.key],
                 score: best[entry.key] ?? 0, relevance: 0,
                 terms: (terms[entry.key] ?? []).sorted())
@@ -799,9 +901,24 @@ public final class Store {
     static let relevanceChars = 600
 
     private func tokenStates(_ prefix: String, _ text: String) -> [Float] {
+        unitTokens(embedder.states(prefix + text), after: prefix, of: text)
+    }
+
+    private func leadCount(_ prefix: String, _ text: String) -> Int {
+        let lead = embedder.tokens(prefix).dropLast()
+        let whole = embedder.tokens(prefix + text)
+        var skip = 0
+        while skip < lead.count && skip < whole.count
+              && lead[skip] == whole[skip] {
+            skip += 1
+        }
+        return skip
+    }
+
+    private func unitTokens(_ states: [Float], after prefix: String,
+                            of text: String) -> [Float] {
         let width = embedder.dim
-        let skip = embedder.tokens(prefix).count - 1
-        let states = embedder.states(prefix + text)
+        let skip = leadCount(prefix, text)
         let kept = max(0, states.count / width - skip - 1)
         var out = Array(states[(skip * width)..<((skip + kept) * width)])
         for t in 0..<kept {
@@ -837,26 +954,64 @@ public final class Store {
         return asked > 0 && given > 0 ? total / Float(asked) : 0
     }
 
+    private struct Encoded {
+        let hash: UInt64
+        let abstract: [Float]
+        let body: [Float]
+        var used: Int
+    }
+
+    static let encodedKept = 32
+
+    private var encodedHits: [String: Encoded] = [:]
+    private var encodedUses = 0
+
+    private func encoded(_ concept: Concept) -> Encoded {
+        encodedUses += 1
+        var fresh: Encoded
+        if let known = encodedHits[concept.id], known.hash == concept.hash {
+            fresh = known
+        } else {
+            if encodedHits.count >= Store.encodedKept,
+               let oldest = encodedHits.min(by: { a, b in
+                   a.value.used < b.value.used
+               }) {
+                encodedHits[oldest.key] = nil
+            }
+            encodedCount += 1
+            fresh = Encoded(
+                hash: concept.hash,
+                abstract: tokenStates(embedder.passagePrefix, concept.passage),
+                body: concept.body.isEmpty
+                    ? [] : tokenStates(embedder.passagePrefix,
+                                       String(concept.body.prefix(
+                                           Store.relevanceChars))),
+                used: 0)
+        }
+        fresh.used = encodedUses
+        encodedHits[concept.id] = fresh
+        return fresh
+    }
+
+    public var encodedBytes: Int {
+        encodedHits.values.reduce(0) { sum, hit in
+            sum + (hit.abstract.count + hit.body.count) * 4
+        }
+    }
+
     private func relevance(_ concept: Concept,
                            _ queries: [[Float]]) -> Float {
-        let abstract = tokenStates(embedder.passagePrefix, concept.passage)
-        let body = concept.body.isEmpty
-            ? [] : tokenStates(embedder.passagePrefix,
-                               String(concept.body.prefix(
-                                   Store.relevanceChars)))
+        let hit = encoded(concept)
         var out: Float = 0
         for query in queries {
-            let scored = max(maxSim(query, abstract),
-                             maxSim(query, body) * Store.bodyDiscount)
+            let scored = max(maxSim(query, hit.abstract),
+                             maxSim(query, hit.body) * Store.bodyDiscount)
             if scored > out { out = scored }
         }
         return out
     }
 
-    private func rerank(_ queries: [String], _ hits: [Hit]) -> [Hit] {
-        let asked = queries.map { query in
-            tokenStates(embedder.queryPrefix, query)
-        }
+    private func rerank(_ asked: [[Float]], _ hits: [Hit]) -> [Hit] {
         let scored = hits.enumerated().map { rank, hit in
             (rank, Hit(concept: hit.concept, score: hit.score,
                        relevance: relevance(hit.concept, asked),
@@ -912,8 +1067,63 @@ public final class Store {
         return total
     }
 
+    private struct Group {
+        var quantified = false
+        var alternated = false
+    }
+
+    private static let quantifiers: Set<Character> = ["*", "+", "?", "{"]
+
+    private static func closeGroup(_ groups: inout [Group],
+                                   quantified: Bool) -> Bool {
+        let inner = groups.popLast() ?? Group()
+        if let last = groups.indices.last {
+            groups[last].quantified = groups[last].quantified
+                || inner.quantified || quantified
+            groups[last].alternated = groups[last].alternated
+                || inner.alternated
+        }
+        return quantified && (inner.quantified || inner.alternated)
+    }
+
+    static func hostile(_ pattern: String) -> Bool {
+        var groups: [Group] = []
+        var escaped = false
+        var inClass = false
+        var result = false
+        let chars = Array(pattern)
+        var i = 0
+        while !result && i < chars.count {
+            let c = chars[i]
+            let next: Character? = i + 1 < chars.count ? chars[i + 1] : nil
+            if escaped {
+                escaped = false
+            } else if c == "\\" {
+                escaped = true
+            } else if inClass {
+                inClass = c != "]"
+            } else if c == "[" {
+                inClass = true
+            } else if c == "(" {
+                groups.append(Group())
+                if next == "?" { i += 1 }
+            } else if c == ")" {
+                result = Store.closeGroup(&groups, quantified: next.map {
+                    q in Store.quantifiers.contains(q)
+                } ?? false)
+            } else if c == "|", let last = groups.indices.last {
+                groups[last].alternated = true
+            } else if Store.quantifiers.contains(c),
+                      let last = groups.indices.last {
+                groups[last].quantified = true
+            }
+            i += 1
+        }
+        return result
+    }
+
     public func grep(_ pattern: String, limit: Int) -> [GrepHit] {
-        let regex = try? NSRegularExpression(
+        let regex = Store.hostile(pattern) ? nil : try? NSRegularExpression(
             pattern: pattern, options: [.caseInsensitive])
         var out: [GrepHit] = []
         if let regex = regex {
@@ -1128,7 +1338,7 @@ public final class Store {
     public func nearest(title: String, description: String, tags: [String],
                         type: String, limit: Int)
         -> [(id: String, score: Float)] {
-        let vector = embedder.embedPassage(Concept.passage(
+        let vector = passageVector(Concept.passage(
             title: title, description: description, tags: tags, type: type))
         var scored: [(index: Int, score: Float)] = []
         let width = embedder.dim
@@ -1210,6 +1420,39 @@ public final class Store {
         return out
     }
 
+    private struct Windowed {
+        let hash: UInt64
+        let vectors: [[Float]]
+        var used: Int
+    }
+
+    private var windowedHits: [String: Windowed] = [:]
+    public private(set) var windowedCount = 0
+
+    private func paragraphVectors(_ concept: Concept,
+                                  _ parts: [Paragraph]) -> [[Float]] {
+        encodedUses += 1
+        var fresh: Windowed
+        if let known = windowedHits[concept.id], known.hash == concept.hash {
+            fresh = known
+        } else {
+            if windowedHits.count >= Store.encodedKept,
+               let oldest = windowedHits.min(by: { a, b in
+                   a.value.used < b.value.used
+               }) {
+                windowedHits[oldest.key] = nil
+            }
+            windowedCount += 1
+            fresh = Windowed(
+                hash: concept.hash,
+                vectors: parts.map { part in embedder.embedPassage(part.text) },
+                used: 0)
+        }
+        fresh.used = encodedUses
+        windowedHits[concept.id] = fresh
+        return fresh.vectors
+    }
+
     public func window(_ concept: Concept, about: String, limit: Int)
         -> (from: Int, to: Int) {
         let parts = Store.paragraphs(concept.body)
@@ -1217,10 +1460,10 @@ public final class Store {
         var to = min(concept.body.utf8.count, limit)
         if parts.count > 1 && limit > 0 {
             let query = embedder.embedQuery(about)
+            let vectors = paragraphVectors(concept, parts)
             var best = 0
             var bestScore = -Float.greatestFiniteMagnitude
-            for (index, part) in parts.enumerated() {
-                let vector = embedder.embedPassage(part.text)
+            for (index, vector) in vectors.enumerated() {
                 var total: Float = 0
                 for i in 0..<min(query.count, vector.count) {
                     total += query[i] * vector[i]
@@ -1509,7 +1752,13 @@ public final class Store {
         return out
     }
 
-    private func writeCache(_ cache: [String: CacheEntry]) {
+    private func writeCache() {
+        var cache: [String: CacheEntry] = [:]
+        for concept in concepts {
+            cache[concept.id] = CacheEntry(
+                hash: concept.hash,
+                vectors: concept.vector + concept.bodyVector)
+        }
         var data = Data()
         appendLE(&data, Store.magic)
         appendLE(&data, UInt32(embedder.dim * 2))

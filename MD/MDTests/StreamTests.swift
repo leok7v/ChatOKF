@@ -110,6 +110,69 @@ final class StreamTests: XCTestCase {
         }
     }
 
+    func testLongBlocksFinishEqualsParse() {
+        for (name, sample) in Self.longSamples {
+            let expected = Markdown.parse(sample).items.map { i in i.block }
+            for seed in Self.pieceSeeds {
+                let stream = MarkdownStream()
+                var fed = 0
+                for piece in Self.pieces(sample, seed: seed) {
+                    stream.append(piece)
+                    fed += 1
+                    if fed % 50 == 0 { _ = stream.snapshot() }
+                }
+                let got = stream.finish().items.map { i in i.block }
+                XCTAssertEqual(got, expected,
+                    "\(name) with piece seed \(seed) diverged")
+            }
+        }
+    }
+
+    func testLongBlocksSnapshotEqualsParseOfPrefix() {
+        for (name, sample) in Self.longSamples {
+            let stream = MarkdownStream()
+            var fed = ""
+            var pieces = 0
+            for piece in Self.pieces(sample, seed: 7) {
+                stream.append(piece)
+                fed += piece
+                pieces += 1
+                let pending = fed.split(separator: "\n",
+                                        omittingEmptySubsequences: false)
+                    .last ?? ""
+                let halfDefinition =
+                    Markdown.parseLinkDefinition(String(pending)) != nil
+                if pieces % 5 == 0, !halfDefinition {
+                    let got = stream.snapshot().items.map { i in i.block }
+                    let seen = fed.hasSuffix("\n") ? String(fed.dropLast())
+                                                   : fed
+                    let want = Markdown.parse(seen).items.map { i in i.block }
+                    XCTAssertEqual(got, want,
+                        "\(name) snapshot after \(pieces) pieces diverged")
+                }
+            }
+        }
+    }
+
+    func testStreamingCostOfLongBlocks() {
+        for (name, sample) in Self.longSamples {
+            let start = DispatchTime.now().uptimeNanoseconds
+            let stream = MarkdownStream()
+            var fed = 0
+            for ch in sample {
+                stream.append(String(ch))
+                fed += 1
+                if fed % 50 == 0 { _ = stream.snapshot() }
+            }
+            let blocks = stream.finish().items.count
+            let end = DispatchTime.now().uptimeNanoseconds
+            let ms = Double(end - start) / 1_000_000
+            print(String(format: "stream-cost %@: %.1f ms, %d chars, "
+                         + "%d snapshots, %d blocks", name, ms, fed,
+                         fed / 50, blocks))
+        }
+    }
+
     private static func chunked(_ s: String, size: Int) -> [String] {
         var out: [String] = []
         var i = s.startIndex
@@ -145,5 +208,88 @@ final class StreamTests: XCTestCase {
         "$$\\sum_{i=0}^{n} i$$\n",
         "Mixed:\n\n# Title\n\n- a\n- b\n\n```\ncode\n```\n\n"
             + "| x | y |\n|-|-|\n| 1 | 2 |\n\n> quote\n\nend.",
+        "First<br>second line<br/>third<br />fourth.",
+        "Some <small>small print</small>, a <kbd>Cmd</kbd> key and a "
+            + "<!-- dropped --> comment, `<br>` in code.",
+        "<!-- a block comment\nthat spans lines -->\n\nStill here.",
+        "| a | b |\n|---|:-:|\n| x \\| y | z<br>w |",
+        "<img src=\"https://example.com/i.png\" alt=\"Logo\" width=\"32\">",
+        "Bold <b>b</b>, <a href=\"https://example.com/a\">to a</a> and an "
+            + "<unknown attr=\"x\">unknown tag</unknown> stays.",
     ]
+
+    static let pieceSeeds: [UInt64] = [0, 7, 20260926]
+
+    static func pieces(_ s: String, seed: UInt64) -> [String] {
+        var out: [String] = []
+        var state = seed
+        var i = s.startIndex
+        while i < s.endIndex {
+            state = state &+ 0x9E3779B97F4A7C15
+            var z = state
+            z = (z ^ (z >> 30)) &* 0xBF58476D1CE4E5B9
+            z = (z ^ (z >> 27)) &* 0x94D049BB133111EB
+            z ^= z >> 31
+            let size = seed == 0 ? 1 : Int(z % 17) + 1
+            let j = s.index(i, offsetBy: size, limitedBy: s.endIndex)
+                ?? s.endIndex
+            out.append(String(s[i..<j]))
+            i = j
+        }
+        return out
+    }
+
+    static let longSamples: [(String, String)] = [
+        ("flat list 200", (1...200).map { n in
+            "- item \(n) with **bold** and `code`"
+        }.joined(separator: "\n")),
+        ("nested list 200", (1...200).map { n in
+            "\(n). step \(n)\n    - detail a of \(n)\n    - detail b of \(n)"
+        }.joined(separator: "\n") + "\n"),
+        ("loose list 200", (1...200).map { n in
+            "* point \(n)\n\n  continued \(n)"
+        }.joined(separator: "\n\n")),
+        ("table 200", "| n | name | cost |\n|--:|:--|:-:|\n"
+            + (1...200).map { n in
+                "| \(n) | item \(n) | \(n * 3) |"
+            }.joined(separator: "\n")),
+        ("fence 400", "~~~text\n" + (1...400).map { n in
+            let shapes = StreamTests.fenceLines
+            return shapes[n % shapes.count] + " \(n)"
+        }.joined(separator: "\n") + "\n~~~\n"),
+        ("mixed", StreamTests.mixedSample),
+    ]
+
+    static let fenceLines: [String] = [
+        "- looks like an item", "# looks like a heading", "1. numbered",
+        "| a | b |", "|---|---|", "> quoted", "```", "    indented", "",
+        "plain line", "$$ x $$", "---",
+    ]
+
+    static let mixedSample: String = [
+        "# Title",
+        "",
+        "Intro paragraph with *emphasis* and `code`.",
+        "",
+        (1...40).map { n in "- bullet \(n)" }.joined(separator: "\n"),
+        "",
+        "| a | b |\n|---|---|\n"
+            + (1...40).map { n in "| \(n) | \(n * n) |" }
+                .joined(separator: "\n"),
+        "",
+        "```swift\n" + (1...60).map { n in "let v\(n) = \(n)" }
+            .joined(separator: "\n") + "\n```",
+        "",
+        (1...30).map { n in "> line \(n) of the quote" }
+            .joined(separator: "\n"),
+        "",
+        (1...30).map { n in "\(n). loose \(n), see [docs][d]" }
+            .joined(separator: "\n\n"),
+        "",
+        "[d]: https://example.com/docs",
+        "",
+        "$$\\sum_{i=0}^{n} i$$",
+        "",
+        "Closing paragraph after everything.",
+    ].joined(separator: "\n")
 }

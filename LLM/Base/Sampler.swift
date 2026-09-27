@@ -431,8 +431,7 @@ public struct Sampler: Sendable {
         applyBanned(&logits)
         if !verbatim {
             applyDry(&logits)
-            applyRepeatPenalty(&logits)
-            applyPresenceFrequency(&logits)
+            applyRecentPenalties(&logits)
             applyOverthink(&logits)
         }
         var result: Int32 = 0
@@ -523,83 +522,75 @@ public struct Sampler: Sendable {
         return sampleFrom(c)
     }
 
-    private func recentSeenEarlier(_ i: Int) -> Bool {
-        var j = 0
-        while j < i && recent[j] != recent[i] { j += 1 }
-        return j < i
-    }
-
-    private func recentCount(_ tok: Int) -> Int {
-        var count = 0
-        var j = 0
-        while j < recentLen {
-            if Int(recent[j]) == tok { count += 1 }
-            j += 1
+    private func recentCounts() -> [Int32: Int] {
+        var counts = [Int32: Int](minimumCapacity: recentLen)
+        var i = 0
+        while i < recentLen {
+            counts[recent[i], default: 0] += 1
+            i += 1
         }
-        return count
+        return counts
     }
 
-    private func applyRepeatPenalty(_ logits: inout [Float]) {
-        if repeatPenalty != 1 && recentLen > 0 {
-            var i = 0
-            while i < recentLen {
-                let tok = Int(recent[i])
-                let use = tok >= 0 && tok < vocabSize
-                    && !recentSeenEarlier(i)
-                    && !penaltyExempt.contains(recent[i])
-                if use {
-                    if logits[tok] > 0 {
-                        logits[tok] /= repeatPenalty
-                    } else {
-                        logits[tok] *= repeatPenalty
-                    }
-                }
-                i += 1
-            }
+    private func penalizeRecent(_ logit: inout Float, count: Int) {
+        if repeatPenalty != 1 && logit > 0 {
+            logit /= repeatPenalty
+        } else if repeatPenalty != 1 {
+            logit *= repeatPenalty
+        }
+        if presencePenalty != 0 || frequencyPenalty != 0 {
+            logit -= presencePenalty + frequencyPenalty * Float(count)
         }
     }
 
-    private func applyPresenceFrequency(_ logits: inout [Float]) {
-        let active = presencePenalty != 0 || frequencyPenalty != 0
+    private func applyRecentPenalties(_ logits: inout [Float]) {
+        let active = repeatPenalty != 1 || presencePenalty != 0
+            || frequencyPenalty != 0
         if active && recentLen > 0 {
-            var i = 0
-            while i < recentLen {
-                let tok = Int(recent[i])
+            for (token, count) in recentCounts() {
+                let tok = Int(token)
                 let use = tok >= 0 && tok < vocabSize
-                    && !recentSeenEarlier(i)
-                    && !penaltyExempt.contains(recent[i])
-                if use {
-                    let count = recentCount(tok)
-                    logits[tok] -= presencePenalty
-                        + frequencyPenalty * Float(count)
-                }
-                i += 1
+                    && !penaltyExempt.contains(token)
+                if use { penalizeRecent(&logits[tok], count: count) }
             }
         }
     }
 
-    private func drySuffixMatch(_ j: Int, _ n: Int) -> Int {
-        var len = 0
-        while len < j && dry[j - 1 - len] == dry[n - 1 - len]
-              && !dryBreakers.contains(dry[n - 1 - len]) {
-            len += 1
+    private func dryZ(_ n: Int) -> [Int32] {
+        var z = [Int32](repeating: 0, count: n)
+        var left = 0
+        var right = 0
+        var i = 1
+        while i < n {
+            var len = i < right ? min(right - i, Int(z[i - left])) : 0
+            while i + len < n && dry[n - 1 - len] == dry[n - 1 - i - len] {
+                len += 1
+            }
+            z[i] = Int32(len)
+            if i + len > right {
+                left = i
+                right = i + len
+            }
+            i += 1
         }
-        return len + 1
+        return z
     }
 
-    private func drySeenEarlier(_ j: Int) -> Bool {
-        var k = 1
-        while k < j && dry[k] != dry[j] { k += 1 }
-        return k < j
+    private func dryUnbrokenTail(_ n: Int) -> Int {
+        var len = 0
+        while len < n && !dryBreakers.contains(dry[n - 1 - len]) { len += 1 }
+        return len
     }
 
-    private func dryBestMatch(_ tok: Int, _ n: Int) -> Int {
-        var best = 0
+    private func dryBestMatches(_ n: Int, allowed: Int) -> [Int32: Int] {
+        let z = dryZ(n)
+        let limit = dryUnbrokenTail(n)
+        var best = [Int32: Int]()
         var k = 1
         while k < n {
-            if Int(dry[k]) == tok {
-                let mk = drySuffixMatch(k, n)
-                if mk > best { best = mk }
+            let match = min(Int(z[n - k]), limit) + 1
+            if match > allowed && match > best[dry[k], default: 0] {
+                best[dry[k]] = match
             }
             k += 1
         }
@@ -610,20 +601,14 @@ public struct Sampler: Sendable {
         let n = dry.count
         if n >= 2 && dryMultiplier > 0 {
             let allowed = dryAllowedLength > 0 ? dryAllowedLength : 1
-            var j = 1
-            while j < n {
-                let tok = Int(dry[j])
+            for (token, best) in dryBestMatches(n, allowed: allowed) {
+                let tok = Int(token)
                 let use = tok >= 0 && tok < vocabSize
-                    && !drySeenEarlier(j)
-                    && !penaltyExempt.contains(dry[j])
+                    && !penaltyExempt.contains(token)
                 if use {
-                    let best = dryBestMatch(tok, n)
-                    if best > allowed {
-                        logits[tok] -= dryMultiplier
-                            * powf(dryBase, Float(best - allowed))
-                    }
+                    logits[tok] -= dryMultiplier
+                        * powf(dryBase, Float(best - allowed))
                 }
-                j += 1
             }
         }
     }

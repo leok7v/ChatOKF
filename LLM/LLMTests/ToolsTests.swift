@@ -1,8 +1,371 @@
 import XCTest
 @testable import LLM
 
+private enum OldHtml {
+    static func htmlToText(_ html: String) -> String {
+        collapseWhitespace(htmlStripped(mainContent(Array(html))))
+    }
+
+    static func htmlStripped(_ cs: [Character]) -> [Character] {
+        var raw: [Character] = []
+        var p = 0
+        let n = cs.count
+        while p < n {
+            let c = cs[p]
+            if c == "&" {
+                if let dec = decodeEntity(cs, p) {
+                    raw.append(contentsOf: dec.text)
+                    p += dec.consumed
+                } else {
+                    raw.append(c)
+                    p += 1
+                }
+            } else if c != "<" {
+                raw.append(c)
+                p += 1
+            } else {
+                p = consumeTag(cs, p, &raw)
+            }
+        }
+        return raw
+    }
+
+    static func consumeTag(_ cs: [Character], _ p: Int,
+                           _ raw: inout [Character]) -> Int {
+        let n = cs.count
+        var next = n
+        if ciStarts(cs, p, Array("<!--")) {
+            next = find(cs, Array("-->"), p + 4).map { e in e + 3 } ?? n
+        } else {
+            let closing = p + 1 < n && cs[p + 1] == "/"
+            let nameAt = closing ? p + 2 : p + 1
+            let drop = closing ? nil : dropTagAt(cs, nameAt)
+            if let drop {
+                next = skipElement(cs, p, drop, &raw)
+            } else {
+                if isBlockTag(cs, nameAt) { raw.append("\n") }
+                next = find(cs, [">"], p).map { g in g + 1 } ?? n
+            }
+        }
+        return next
+    }
+
+    static let dropTags = ["script", "style", "nav", "header",
+                           "footer", "aside", "form", "math"]
+
+    static func dropTagAt(_ cs: [Character], _ at: Int) -> [Character]? {
+        let delims: Set<Character> = [">", " ", "/", "\t", "\n", "\r"]
+        var result: [Character]? = nil
+        var k = 0
+        while result == nil && k < dropTags.count {
+            let tag = Array(dropTags[k])
+            let after = at + tag.count
+            if ciStarts(cs, at, tag) && after < cs.count
+                && delims.contains(cs[after]) {
+                result = tag
+            }
+            k += 1
+        }
+        return result
+    }
+
+    static func skipElement(_ cs: [Character], _ p: Int,
+                            _ tag: [Character],
+                            _ raw: inout [Character]) -> Int {
+        let close = Array("</") + tag
+        var next = cs.count
+        if let e = find(cs, close, p + 1, ci: true) {
+            next = find(cs, [">"], e).map { g in g + 1 } ?? cs.count
+        }
+        raw.append("\n")
+        return next
+    }
+
+    static func mainContent(_ cs: [Character]) -> [Character] {
+        let inner = elementInner(cs, Array("main"))
+            ?? elementInner(cs, Array("article"))
+        return inner ?? cs
+    }
+
+    static func elementInner(_ cs: [Character],
+                             _ tag: [Character]) -> [Character]? {
+        let delims: Set<Character> = [">", " ", "/", "\t", "\n", "\r"]
+        var result: [Character]? = nil
+        let open = Array("<") + tag
+        if let start = find(cs, open, 0, ci: true) {
+            let after = start + open.count
+            if after < cs.count && delims.contains(cs[after]),
+               let gt = find(cs, [">"], after),
+               let close = lastFind(cs, Array("</") + tag, gt + 1, ci: true) {
+                result = Array(cs[(gt + 1)..<close])
+            }
+        }
+        return result
+    }
+
+    static func lastFind(_ cs: [Character], _ needle: [Character],
+                         _ from: Int, ci: Bool = false) -> Int? {
+        var result: Int? = nil
+        var i = cs.count - needle.count
+        while result == nil && i >= from {
+            var j = 0
+            while j < needle.count && charEq(cs[i + j], needle[j], ci) {
+                j += 1
+            }
+            if j == needle.count { result = i }
+            i -= 1
+        }
+        return result
+    }
+
+    static let blockTags = [
+        "p", "br", "div", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6",
+        "ul", "ol", "table", "section", "article", "header", "footer",
+        "blockquote", "pre", "hr",
+    ]
+
+    static func isBlockTag(_ cs: [Character], _ at: Int) -> Bool {
+        let delims: Set<Character> = [">", " ", "/", "\t", "\n", "\r"]
+        var result = false
+        var k = 0
+        while !result && k < blockTags.count {
+            let tag = Array(blockTags[k])
+            let after = at + tag.count
+            if ciStarts(cs, at, tag) && after < cs.count
+                && delims.contains(cs[after]) {
+                result = true
+            }
+            k += 1
+        }
+        return result
+    }
+
+    static func decodeEntity(_ cs: [Character], _ p: Int)
+        -> (text: [Character], consumed: Int)? {
+        let n = cs.count
+        var result: (text: [Character], consumed: Int)? = nil
+        if p + 1 < n, let semi = find(cs, [";"], p + 1),
+           semi - p <= 12, semi > p + 1 {
+            if cs[p + 1] == "#" {
+                result = decodeNumericEntity(cs, p, semi)
+            } else if let cp = namedEntities[String(cs[(p + 1)..<semi])] {
+                result = (utf8Chars(cp), semi - p + 1)
+            }
+        }
+        return result
+    }
+
+    static func decodeNumericEntity(_ cs: [Character], _ p: Int,
+                                    _ semi: Int)
+        -> (text: [Character], consumed: Int)? {
+        let hex = p + 2 < cs.count
+            && (cs[p + 2] == "x" || cs[p + 2] == "X")
+        let from = hex ? p + 3 : p + 2
+        var result: (text: [Character], consumed: Int)? = nil
+        if let cp = parseCodepoint(cs, from, semi, hex), cp != 0 {
+            result = (utf8Chars(cp), semi - p + 1)
+        }
+        return result
+    }
+
+    static func parseCodepoint(_ cs: [Character], _ from: Int,
+                               _ to: Int, _ hex: Bool) -> UInt32? {
+        var cp: UInt32? = from < to ? 0 : nil
+        let base: UInt32 = hex ? 16 : 10
+        var q = from
+        while q < to {
+            if let acc = cp {
+                let d = digitValue(cs[q], hex)
+                cp = d >= 0 ? acc &* base &+ UInt32(d) : nil
+            }
+            q += 1
+        }
+        return cp
+    }
+
+    static func digitValue(_ c: Character, _ hex: Bool) -> Int {
+        var result = -1
+        if let a = c.asciiValue {
+            if a >= 48 && a <= 57 {
+                result = Int(a - 48)
+            } else if hex && a >= 97 && a <= 102 {
+                result = Int(a - 97 + 10)
+            } else if hex && a >= 65 && a <= 70 {
+                result = Int(a - 65 + 10)
+            }
+        }
+        return result
+    }
+
+    static let namedEntities: [String: UInt32] = [
+        "amp": 0x26, "lt": 0x3c, "gt": 0x3e, "quot": 0x22, "apos": 0x27,
+        "nbsp": 0x20, "copy": 0xa9, "reg": 0xae, "mdash": 0x2014,
+        "ndash": 0x2013, "hellip": 0x2026, "rsquo": 0x2019,
+        "lsquo": 0x2018, "ldquo": 0x201c, "rdquo": 0x201d,
+        "trade": 0x2122, "deg": 0xb0,
+    ]
+
+    static func utf8Chars(_ cp: UInt32) -> [Character] {
+        Unicode.Scalar(cp).map { s in [Character(s)] } ?? []
+    }
+
+    static func collapseWhitespace(_ raw: [Character]) -> String {
+        var clean: [Character] = []
+        var nl = 0
+        var sp = false
+        for c in raw {
+            if c == "\n" {
+                nl += 1
+                sp = false
+            } else if c == " " || c == "\t" || c == "\r" {
+                sp = true
+            } else {
+                if !clean.isEmpty {
+                    if nl >= 2 {
+                        clean.append(contentsOf: "\n\n")
+                    } else if nl == 1 {
+                        clean.append("\n")
+                    } else if sp {
+                        clean.append(" ")
+                    }
+                }
+                nl = 0
+                sp = false
+                clean.append(c)
+            }
+        }
+        return String(clean)
+    }
+
+    static func ciStarts(_ cs: [Character], _ at: Int,
+                         _ kw: [Character]) -> Bool {
+        var j = 0
+        while j < kw.count && at + j < cs.count
+            && lower(cs[at + j]) == kw[j] {
+            j += 1
+        }
+        return j == kw.count
+    }
+
+    static func lower(_ c: Character) -> Character {
+        var result = c
+        if c >= "A" && c <= "Z", let a = c.asciiValue {
+            result = Character(Unicode.Scalar(a + 32))
+        }
+        return result
+    }
+
+    static func find(_ cs: [Character], _ needle: [Character],
+                     _ from: Int, ci: Bool = false) -> Int? {
+        var result: Int? = nil
+        var i = max(from, 0)
+        let last = cs.count - needle.count
+        while result == nil && i <= last {
+            var j = 0
+            while j < needle.count && charEq(cs[i + j], needle[j], ci) {
+                j += 1
+            }
+            if j == needle.count { result = i }
+            i += 1
+        }
+        return result
+    }
+
+    static func charEq(_ a: Character, _ b: Character, _ ci: Bool) -> Bool {
+        ci ? lower(a) == lower(b) : a == b
+    }
+}
+
+private let htmlSamples: [String] = [
+    "<html><head><style>.a{color:red}</style></head><body><h1>Title</h1>"
+        + "<p>Hello&nbsp;&amp; welcome</p><script>ignore()</script>"
+        + "<p>Bye &#65; &#x42; &#0; &#xD800;</p></body></html>",
+    "<div><ul><li>one <b>bold <i>nested</i></b></li><li>two</li></ul>"
+        + "<table><tr><td>a</td><td>b</td></tr></table></div>",
+    "<p>Amp & no entity; &unknown; &amp &copy; &hellip;&mdash;&deg;</p>",
+    "<p>" + String(repeating: "no semicolon here & ", count: 40) + "</p>",
+    "<body><nav>Home About Login</nav><main><h1>Story</h1>"
+        + "<p>The real content.</p><form><input></form></main>"
+        + "<footer>Copyright 2026</footer></body>",
+    "<p>The density is</p><math><mi>a</mi><mo>(</mo></math>"
+        + "<p>as shown above.</p><!-- a comment <p>inside</p> --><br/>tail",
+    "<P>UPPER</P><Div>Case</DIV><formation>not a form</formation>"
+        + "<navbar>not nav</navbar><pre>  spaced\n\n\n\tout  </pre>",
+    "<article>caf\u{e9} na\u{ef}ve \u{1F600} <em>\u{6f22}\u{5b57}</em>"
+        + "</article>",
+    "plain text with\n\nblank lines\n   and   spaces\tand tabs",
+    "<p>unterminated <b>tags <i>everywhere",
+    "",
+]
+
 // Offline, deterministic ports of the network-independent assertions in
 final class ToolsTests: XCTestCase {
+    private func syntheticPage(bytes: Int) -> String {
+        var page = "<html><head><title>t</title><style>p{margin:0}</style>"
+            + "</head><body><nav>menu</nav><main>"
+        let unit = htmlSamples.joined(separator: "\n")
+        while page.utf8.count < bytes * 3 / 4 { page += unit }
+        while page.utf8.count < bytes { page += "<p>tail & more text</p>" }
+        return page + "</main></body></html>"
+    }
+
+    private func seconds(_ body: () -> String) -> (String, Double) {
+        let began = Date()
+        let out = body()
+        return (out, Date().timeIntervalSince(began))
+    }
+
+    func testHtmlStripperMatchesTheCharacterReference() {
+        for html in htmlSamples {
+            XCTAssertEqual(Tools.htmlToText(html), OldHtml.htmlToText(html),
+                           html)
+        }
+        let small = syntheticPage(bytes: 64 << 10)
+        let old = seconds { OldHtml.htmlToText(small) }
+        let new = seconds { Tools.htmlToText(small) }
+        XCTAssertEqual(new.0, old.0)
+        let page = syntheticPage(bytes: 2 << 20)
+        let big = seconds { Tools.htmlToText(page) }
+        print(String(format: "[html] %d KB page: Character %.3fs, bytes "
+                         + "%.3fs; %d KB page: bytes %.3fs, %d chars out",
+                     small.utf8.count >> 10, old.1, new.1,
+                     page.utf8.count >> 10, big.1, big.0.count))
+    }
+
+    func testWikiIndexOpensOnce() throws {
+        guard let url = WikiSlugs.bundledModel else {
+            throw XCTSkip("no bundled minilm.gguf index")
+        }
+        var openSeconds = 0.0
+        var querySeconds = 0.0
+        for _ in 0 ..< 5 {
+            let began = Date()
+            let opened = WikiSlugs(ggufPath: url.path)
+            openSeconds += Date().timeIntervalSince(began)
+            XCTAssertNotNil(opened)
+            let asked = Date()
+            _ = opened?.query("what is dark matter", topK: 5)
+            querySeconds += Date().timeIntervalSince(asked)
+        }
+        let index = WikiIndex(path: url.path)
+        let first = seconds {
+            index.with { w in ObjectIdentifier(w).debugDescription } ?? ""
+        }
+        let second = seconds {
+            index.with { w in ObjectIdentifier(w).debugDescription } ?? ""
+        }
+        XCTAssertFalse(first.0.isEmpty)
+        XCTAssertEqual(first.0, second.0)
+        XCTAssertLessThan(second.1, first.1)
+        XCTAssertNil(WikiIndex(path: "/nonexistent.gguf").with { w in
+            w.articleCount
+        })
+        print(String(format: "[slugs] WikiSlugs init %.4fs and first query "
+                         + "%.4fs (mean of 5 fresh instances); WikiIndex "
+                         + "first %.4fs, second %.6fs", openSeconds / 5,
+                     querySeconds / 5, first.1, second.1))
+    }
+
     private func flagged(_ fn: String, _ args: [ToolArg]) -> Bool {
         Tools.sanitize(fn, args) != nil
     }

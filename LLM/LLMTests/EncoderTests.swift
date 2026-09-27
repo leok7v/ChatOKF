@@ -48,6 +48,29 @@ final class EncoderTests: XCTestCase {
         XCTAssertEqual(hits.map { h in h.distance }, [75, 79])
     }
 
+    private func fnv(_ x: [Float]) -> UInt64 {
+        var h: UInt64 = 0xcbf2_9ce4_8422_2325
+        for v in x {
+            h = (h ^ UInt64(v.bitPattern)) &* 0x0000_0100_0000_01b3
+        }
+        return h
+    }
+
+    func testLongPassageEncodeTime() throws {
+        let model = try e5()
+        let text = "passage: " + String(
+            repeating: "The basement smells musty every July. ", count: 80)
+        let ids = model.tokenize(text)
+        XCTAssertEqual(ids.count, model.nCtx)
+        _ = model.encode(text)
+        let began = Date()
+        let states = model.encode(text)
+        let seconds = Date().timeIntervalSince(began)
+        XCTAssertEqual(states.count, ids.count * model.dim)
+        print(String(format: "[e5] %d tokens encoded in %.3f s, states "
+                         + "%016llx", ids.count, seconds, fnv(states)))
+    }
+
     private struct Resident {
         let footprint: Int
         let dirty: Int

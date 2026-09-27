@@ -55,14 +55,24 @@ public enum AttachmentRefs {
 
     public static func substitute(_ text: String,
                            _ replace: (String) -> String) -> String {
+        substituted(text, replace).prompt
+    }
+
+    public static func substituted(_ text: String,
+                                   _ replace: (String) -> String)
+        -> (prompt: String, spans: [String: Range<String.Index>]) {
         var out = ""
         var pending: String? = nil
+        var offsets: [String: Range<Int>] = [:]
         for ch in text {
             if ch == open {
                 pending = ""
             } else if ch == close {
                 if let inner = pending {
-                    out += replace(String(inner.drop(while: { c in c == "@" })))
+                    let name = String(inner.drop(while: { c in c == "@" }))
+                    let from = out.utf8.count
+                    out += replace(name)
+                    offsets[name] = from..<out.utf8.count
                 }
                 pending = nil
             } else if pending != nil {
@@ -72,7 +82,15 @@ public enum AttachmentRefs {
             }
         }
         if let inner = pending { out += inner }
-        return out
+        var spans: [String: Range<String.Index>] = [:]
+        for (name, range) in offsets {
+            let low = out.utf8.index(out.utf8.startIndex,
+                                     offsetBy: range.lowerBound)
+            let high = out.utf8.index(out.utf8.startIndex,
+                                      offsetBy: range.upperBound)
+            spans[name] = low..<high
+        }
+        return (out, spans)
     }
 
 }

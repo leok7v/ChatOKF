@@ -1,3 +1,4 @@
+import CoreGraphics
 import Observation
 import XCTest
 @testable import Chat
@@ -270,6 +271,10 @@ private final class TestRunner: ToolRunner, @unchecked Sendable {
             return nil
         }.joined()
         XCTAssertEqual(answer, "The answer is 4.")
+        let committed = await session.session!.committedCount
+        let replayed = await session.session!.replayTokens
+        XCTAssertLessThan(replayed, committed)
+        XCTAssertGreaterThan(replayed, 0)
     }
 
     // A Stop raised while paused inside prefill (before any token decoded)
@@ -351,6 +356,135 @@ private final class TestRunner: ToolRunner, @unchecked Sendable {
             }
         }
         XCTAssertFalse(session.metaTaskRunning)
+    }
+
+}
+
+@MainActor final class ReplayTests: XCTestCase {
+
+    private let template = "{%- if messages[0].role == 'system' -%}"
+        + "<|im_start|>system\n{{ messages[0].content }}<|im_end|>\n"
+        + "{%- endif -%}"
+        + "{%- for m in messages -%}"
+        + "{%- if m.role != 'system' -%}"
+        + "<|im_start|>{{ m.role }}\n{{ m.content }}<|im_end|>\n"
+        + "{%- endif -%}{%- endfor -%}"
+        + "{%- if add_generation_prompt -%}<|im_start|>assistant\n"
+        + "{%- endif -%}"
+
+    private let config = Session.SessionConfig(
+        thinking: false, reasoningEffortRaw: "medium",
+        reasoningEffortSlot: 1, thinkTokenCap: 200)
+
+    private func driver() -> Session {
+        let backend = MockBackend(scripts: [], vocab: [:])
+        let session = Session(modelName: "test", systemPrompt: "You are a bot.")
+        session.installBackend(backend, template: template, vocabSize: 256,
+                               presets: .greedy)
+        return session
+    }
+
+    func testAReplayLaysEachTurnAsItsDeltaOverThePrimedPrefix() async throws {
+        let session = driver()
+        await session.newChatEngine(config) { _ in }
+        await session.awaitPrimed()
+        let primed = await session.session!.committedCount
+        XCTAssertGreaterThan(primed, 0)
+        let turns = [
+            PlannedTurn(prompt: "first", answer: "one", soft: nil, images: []),
+            PlannedTurn(prompt: "second", answer: "two", soft: nil,
+                        images: []),
+        ]
+        var rendered: [String] = []
+        let ok = await session.replay(turns, budget: 280, config) { e in
+            if e.kind == .render { rendered.append(e.text) }
+        }
+        XCTAssertTrue(ok)
+        let first = "<|im_start|>user\nfirst<|im_end|>"
+        let second = "<|im_start|>assistant\none<|im_end|>"
+            + "<|im_start|>user\nsecond<|im_end|>"
+        let gen = "<|im_start|>assistant"
+        XCTAssertEqual(rendered, [first + gen, second + gen])
+        let after = await session.session!.committedCount
+        XCTAssertEqual(after, primed + first.utf8.count + second.utf8.count)
+        let replayed = await session.session!.replayTokens
+        XCTAssertEqual(replayed, first.utf8.count + second.utf8.count)
+        let soft = await session.session!.hasSoftTurns
+        XCTAssertFalse(soft)
+    }
+
+    private func user(_ text: String, soft: URL? = nil,
+                      posters: Int = 0) -> Message {
+        var m = Message(fromUser: true, text: text, soft: soft)
+        m.posters = Array(repeating: try! ReplayTests.square(), count: posters)
+        return m
+    }
+
+    private static func square() throws -> CGImage {
+        let ctx = try XCTUnwrap(CGContext(
+            data: nil, width: 4, height: 4, bitsPerComponent: 8,
+            bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue))
+        return try XCTUnwrap(ctx.makeImage())
+    }
+
+    private func answer(_ text: String) -> Message {
+        Message(fromUser: false, text: text)
+    }
+
+    func testTextTurnsReplayAndAnUnansweredOneIsSkipped() {
+        let plan = Session.plan(
+            [user("a"), answer("A"), user("dropped"), answer(""),
+             user("b"), answer("B")],
+            loaded: "gemma-4-E4B", sees: true, stamps: [:])
+        if case .replay(let turns) = plan {
+            XCTAssertEqual(turns.map { t in t.prompt }, ["a", "b"])
+            XCTAssertEqual(turns.map { t in t.answer }, ["A", "B"])
+        } else {
+            XCTFail("text turns must replay")
+        }
+    }
+
+    func testAKinStampReplaysAndAForeignOneNamesItsModel() {
+        let kept = URL(fileURLWithPath: "/tmp/kept.soft")
+        let kin = Session.plan(
+            [user("look", soft: kept), answer("A dog.")],
+            loaded: "gemma-4-E4B-MTP", sees: true,
+            stamps: [kept: "gemma-4-E4B.712cfb35"])
+        if case .replay(let turns) = kin {
+            XCTAssertEqual(turns.first?.soft, kept)
+        } else {
+            XCTFail("the MTP build shares the E4B towers")
+        }
+        let foreign = Session.plan(
+            [user("look", soft: kept), answer("A dog.")],
+            loaded: "gemma-4-E2B", sees: true,
+            stamps: [kept: "gemma-4-E4B.712cfb35"])
+        if case .needsModel(let name) = foreign {
+            XCTAssertEqual(name, "gemma-4-E4B")
+        } else {
+            XCTFail("another family's rows need their model")
+        }
+        XCTAssertEqual(Session.stampModel("Qwen3.5-2B.2e65cddd"), "Qwen3.5-2B")
+        XCTAssertEqual(Session.towerFamily("Qwen3.8-27B-IQ1_S"),
+                       Session.towerFamily("Qwen3.8-27B-Q4_K_S"))
+    }
+
+    func testWhatWasNotKeptReadsOnly() {
+        let missing = URL(fileURLWithPath: "/tmp/gone.soft")
+        let gone = Session.plan([user("look", soft: missing), answer("A.")],
+                                loaded: "gemma-4-E4B", sees: true, stamps: [:])
+        if case .readOnly = gone {} else { XCTFail("a lost file reads only") }
+        let spoken = Session.plan([user("Spoken, 4.2s"), answer("Hi.")],
+                                  loaded: "gemma-4-E4B", sees: true,
+                                  stamps: [:])
+        if case .readOnly = spoken {} else { XCTFail("speech reads only") }
+        let clip = Session.plan([user("watch", posters: 1), answer("Dogs.")],
+                                loaded: "gemma-4-E4B", sees: true, stamps: [:])
+        if case .readOnly = clip {} else { XCTFail("a clip reads only") }
+        let empty = Session.plan([user("a"), answer("")],
+                                 loaded: "gemma-4-E4B", sees: true, stamps: [:])
+        if case .readOnly = empty {} else { XCTFail("nothing to lay") }
     }
 
 }

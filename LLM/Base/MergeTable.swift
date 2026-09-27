@@ -85,6 +85,123 @@ struct MergeTable: Sendable {
         return out
     }
 
+    private struct Chain {
+        var sym: [Int32]
+        var next: [Int32]
+        var prev: [Int32]
+        var live: [Bool]
+
+        init(_ word: [Int32]) {
+            let n = word.count
+            sym = word
+            next = (0 ..< n).map { i in Int32(i + 1 < n ? i + 1 : -1) }
+            prev = (0 ..< n).map { i in Int32(i - 1) }
+            live = [Bool](repeating: true, count: n)
+        }
+
+        mutating func join(_ at: Int, into: Int32) {
+            let right = Int(next[at])
+            let after = next[right]
+            sym[at] = into
+            live[right] = false
+            next[at] = after
+            if after >= 0 { prev[Int(after)] = Int32(at) }
+        }
+
+        func symbols() -> [Int32] {
+            var out: [Int32] = []
+            var at = sym.isEmpty ? -1 : 0
+            while at >= 0 {
+                out.append(sym[at])
+                at = Int(next[at])
+            }
+            return out
+        }
+    }
+
+    private static func entry(_ rank: Int32, _ at: Int) -> UInt64 {
+        UInt64(UInt32(bitPattern: rank)) << 32 | UInt64(UInt32(at))
+    }
+
+    private static func smallerChild(_ heap: [UInt64], _ i: Int) -> Int {
+        var child = 2 * i + 1
+        if child + 1 < heap.count && heap[child + 1] < heap[child] {
+            child += 1
+        }
+        return child
+    }
+
+    private static func push(_ heap: inout [UInt64], _ key: UInt64) {
+        heap.append(key)
+        var i = heap.count - 1
+        while i > 0 && heap[(i - 1) / 2] > heap[i] {
+            heap.swapAt(i, (i - 1) / 2)
+            i = (i - 1) / 2
+        }
+    }
+
+    private static func pop(_ heap: inout [UInt64]) -> UInt64 {
+        let top = heap[0]
+        let last = heap.removeLast()
+        if !heap.isEmpty {
+            heap[0] = last
+            var i = 0
+            var child = smallerChild(heap, i)
+            while child < heap.count && heap[child] < heap[i] {
+                heap.swapAt(i, child)
+                i = child
+                child = smallerChild(heap, i)
+            }
+        }
+        return top
+    }
+
+    private func pairRule(_ chain: Chain, _ at: Int) -> Rule? {
+        var found: Rule? = nil
+        if chain.live[at] && chain.next[at] >= 0 {
+            let right = Int(chain.next[at])
+            found = rule[MergeTable.key(chain.sym[at], chain.sym[right])]
+        }
+        return found
+    }
+
+    private func enqueue(_ heap: inout [UInt64], _ chain: Chain, _ at: Int) {
+        if let found = pairRule(chain, at) {
+            MergeTable.push(&heap, MergeTable.entry(found.rank, at))
+        }
+    }
+
+    private func mergeRound(_ heap: inout [UInt64], _ chain: inout Chain,
+                            _ touched: inout [Int]) {
+        let rank = heap[0] >> 32
+        while !heap.isEmpty && heap[0] >> 32 == rank {
+            let at = Int(MergeTable.pop(&heap) & 0xffff_ffff)
+            if let found = pairRule(chain, at),
+               UInt64(UInt32(bitPattern: found.rank)) == rank {
+                chain.join(at, into: found.merged)
+                touched.append(at)
+                if chain.prev[at] >= 0 { touched.append(Int(chain.prev[at])) }
+            }
+        }
+    }
+
+    private func mergeAll(_ word: [Int32]) -> [Int32] {
+        var chain = Chain(word)
+        var heap: [UInt64] = []
+        var i = 0
+        while i + 1 < word.count {
+            enqueue(&heap, chain, i)
+            i += 1
+        }
+        var touched: [Int] = []
+        while !heap.isEmpty {
+            mergeRound(&heap, &chain, &touched)
+            for at in touched { enqueue(&heap, chain, at) }
+            touched.removeAll(keepingCapacity: true)
+        }
+        return chain.symbols()
+    }
+
     func merged(_ token: ArraySlice<Character>) -> [String] {
         var extra: [String] = []
         var word: [Int32] = []
@@ -97,42 +214,10 @@ struct MergeTable: Sendable {
                 extra.append(String(ch))
             }
         }
-        var merging = word.count >= 2
-        while merging {
-            var minRank = Int32.max
-            var at = -1
-            for i in 0 ..< (word.count - 1) {
-                let found = rule[MergeTable.key(word[i], word[i + 1])]
-                if let found, found.rank < minRank {
-                    minRank = found.rank
-                    at = i
-                }
-            }
-            if at < 0 {
-                merging = false
-            } else {
-                let a = word[at]
-                let b = word[at + 1]
-                let into = rule[MergeTable.key(a, b)]!.merged
-                var next: [Int32] = []
-                next.reserveCapacity(word.count)
-                var i = 0
-                while i < word.count {
-                    if i < word.count - 1 && word[i] == a && word[i + 1] == b {
-                        next.append(into)
-                        i += 2
-                    } else {
-                        next.append(word[i])
-                        i += 1
-                    }
-                }
-                word = next
-                merging = word.count >= 2
-            }
-        }
+        let ids = word.count >= 2 ? mergeAll(word) : word
         var out: [String] = []
-        out.reserveCapacity(word.count)
-        for id in word {
+        out.reserveCapacity(ids.count)
+        for id in ids {
             let i = Int(id)
             out.append(i < symbol.count ? symbol[i] : extra[i - symbol.count])
         }

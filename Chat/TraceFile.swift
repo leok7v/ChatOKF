@@ -2,12 +2,13 @@ import Foundation
 import LLM
 import os
 
-public final class TraceFile {
+public final class TraceFile: @unchecked Sendable {
 
     private let log = Logger(subsystem: "io.github.leok7v.ChatOKF",
                              category: "trace")
     private let url: URL
     private let fmt: DateFormatter
+    private let queue = DispatchQueue(label: "io.github.leok7v.ChatOKF.trace")
     private var handle: FileHandle?
 
     public init() {
@@ -47,6 +48,10 @@ public final class TraceFile {
     }
 
     private func write(_ s: String) {
+        queue.async { self.writeNow(s) }
+    }
+
+    private func writeNow(_ s: String) {
         let fm = FileManager.default
         if handle == nil {
             try? fm.createDirectory(at: url.deletingLastPathComponent(),

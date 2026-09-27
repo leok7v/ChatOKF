@@ -82,8 +82,6 @@ struct SelectableText: View {
     }
 }
 
-// resolved() lowers whichever source was given into a fully-attributed
-// string: run fonts merged onto the base, absent colours defaulted.
 struct NativeText {
 
     let attributed: AttributedString?
@@ -99,15 +97,19 @@ struct NativeText {
     let speaking: String?
 
     func resolved() -> NSAttributedString {
-        let m: NSMutableAttributedString
+        let result: NSAttributedString
         if let ns {
-            m = NSMutableAttributedString(attributedString: ns)
+            result = ns
         } else if let attributed {
-            m = NSMutableAttributedString(
-                attributedString: NSAttributedString(attributed))
+            result = styled(NSAttributedString(attributed))
         } else {
-            m = NSMutableAttributedString(string: "")
+            result = NSAttributedString(string: "")
         }
+        return result
+    }
+
+    private func styled(_ source: NSAttributedString) -> NSAttributedString {
+        let m = NSMutableAttributedString(attributedString: source)
         let full = NSRange(location: 0, length: m.length)
         m.enumerateAttribute(.font, in: full, options: []) { value, r, _ in
             let merged: PlatformFont
@@ -133,16 +135,23 @@ struct NativeText {
 
 // Replaces ONLY the span that changed, so a streaming re-render re-lays
 // out O(delta) and a selection outside the edit survives.
+@discardableResult
 func applyIncremental(_ storage: NSMutableAttributedString,
-                      _ next: NSAttributedString) {
+                      _ next: NSAttributedString) -> Bool {
     let curLen = storage.length
     let nextLen = next.length
     let p = sharedAttributedPrefix(storage, next)
     let s = sharedAttributedSuffix(storage, next, after: p)
-    storage.replaceCharacters(
-        in: NSRange(location: p, length: curLen - p - s),
-        with: next.attributedSubstring(
-            from: NSRange(location: p, length: nextLen - p - s)))
+    let changed = curLen - p - s > 0 || nextLen - p - s > 0
+    if changed {
+        storage.beginEditing()
+        storage.replaceCharacters(
+            in: NSRange(location: p, length: curLen - p - s),
+            with: next.attributedSubstring(
+                from: NSRange(location: p, length: nextLen - p - s)))
+        storage.endEditing()
+    }
+    return changed
 }
 
 // Steps by attribute run so the dictionary compare is per-run; `scanning`

@@ -98,18 +98,25 @@ enum ConversationSearch {
 
 }
 
-enum MemorySearch {
+@MainActor enum MemorySearch {
 
     static func active(_ query: String) -> Bool {
         ConversationSearch.active(query)
     }
 
+    private static var weighed: [String: (updated: Date,
+                                          counts: [String: Int])] = [:]
+
     static func rank(_ rows: [MemoryRow], _ query: String) -> [MemoryRow] {
         let wanted = ConversationSearch.words(query)
         var scored: [(row: MemoryRow, score: Int)] = []
         scored.reserveCapacity(rows.count)
+        var kept: [String: (updated: Date, counts: [String: Int])] = [:]
         for row in rows {
-            let counts = weigh(row)
+            let known = weighed[row.id]
+            let counts = known?.updated == row.updated
+                ? known?.counts ?? weigh(row) : weigh(row)
+            kept[row.id] = (row.updated, counts)
             var total = 0
             var landed = 0
             for want in wanted {
@@ -119,6 +126,7 @@ enum MemorySearch {
             }
             if landed == wanted.count { scored.append((row, total)) }
         }
+        weighed = kept
         return scored
             .sorted { a, b in
                 a.score == b.score

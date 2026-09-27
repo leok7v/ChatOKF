@@ -36,7 +36,84 @@ private let mwmblBody = """
   "extract": [{"value": "An extract in spans.", "is_bold": false}]}]
 """
 
+private func oldClampText(_ text: String, _ limit: Int) -> String {
+    var s = text
+    while s.count > limit,
+          let r = s.range(of: "\n\n", options: .backwards) {
+        s = String(s[..<r.lowerBound])
+    }
+    while s.count > limit, let r = s.range(of: ". ", options: .backwards) {
+        s = String(s[..<r.upperBound])
+            .trimmingCharacters(in: .whitespaces)
+    }
+    while s.count > limit, let r = s.range(of: " ", options: .backwards) {
+        s = String(s[..<r.lowerBound])
+    }
+    if s.count > limit { s = String(s.prefix(limit)) }
+    return s.trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
+private struct Dice {
+    var state: UInt64
+
+    mutating func next(_ n: Int) -> Int {
+        state = state &* 6364136223846793005 &+ 1442695040888963407
+        return Int((state >> 33) % UInt64(max(n, 1)))
+    }
+}
+
+private let clampWords = ["one", "two", "caf\u{e9}", "na\u{ef}ve", "x",
+                          "longerword", "\u{6f22}\u{5b57}", "\u{dc}n\u{ef}",
+                          "a."]
+
+private func clampSample(_ dice: inout Dice) -> String {
+    var paragraphs: [String] = []
+    for _ in 0 ..< (1 + dice.next(4)) {
+        var sentences: [String] = []
+        for _ in 0 ..< (1 + dice.next(4)) {
+            var words: [String] = []
+            for _ in 0 ..< (1 + dice.next(6)) {
+                words.append(clampWords[dice.next(clampWords.count)])
+            }
+            let gap = [" ", "  ", " \t"][dice.next(3)]
+            sentences.append(words.joined(separator: gap))
+        }
+        let end = [". ", ".  ", ".", ". \n"][dice.next(4)]
+        paragraphs.append(sentences.joined(separator: end))
+    }
+    let lead = ["", " ", "\t ", "\n", "  \n"][dice.next(5)]
+    let gap = ["\n\n", "\n\n\n", "\n \n", "\n\n\n\n"][dice.next(4)]
+    let tail = ["", ". ", " ", "\n\n", "."][dice.next(5)]
+    return lead + paragraphs.joined(separator: gap) + tail
+}
+
 @Suite struct WebSearchTests {
+
+    @Test func clampMatchesTheLoopReference() {
+        var dice = Dice(state: 7)
+        for _ in 0 ..< 3000 {
+            let text = clampSample(&dice)
+            let n = text.count
+            let limit = [0, 1, 3, 7, 12, 20, 33, 50, 80, n - 1, n, n + 1][
+                dice.next(12)]
+            let want = oldClampText(text, max(limit, 0))
+            let got = Tools.clampText(text, max(limit, 0))
+            #expect(got == want,
+                    "limit \(limit) on \(text.debugDescription)")
+        }
+    }
+
+    @Test func clampFallsThroughParagraphSentenceWordAndHardCut() {
+        let text = "  First one. Second two.\n\nThird three. Fourth four."
+        #expect(Tools.clampText(text, 100) == text.trimmingCharacters(
+            in: .whitespaces))
+        #expect(Tools.clampText(text, 26) == "First one. Second two.")
+        #expect(Tools.clampText(text, 20) == "First one.")
+        #expect(Tools.clampText(text, 8) == "First")
+        #expect(Tools.clampText(text, 3) == "Fir")
+        #expect(Tools.clampText("abc.\n\n\nxyz", 5) == "abc.")
+        #expect(Tools.clampText("caf\u{e9} caf\u{e9}", 4) == "caf\u{e9}")
+    }
 
     @Test func excerptKeepsProseAndDropsNavigationChrome() {
         let out = WebSearch.excerpt([wikipediaExcerpt])

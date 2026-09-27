@@ -34,7 +34,7 @@ public struct ParkBudget: Sendable {
 
 extension Session {
 
-    public static let parked: URL = {
+    nonisolated public static let parked: URL = {
         let fm = FileManager.default
         let support = (try? fm.url(for: .applicationSupportDirectory,
                                    in: .userDomainMask, appropriateFor: nil,
@@ -83,20 +83,15 @@ extension Session {
         }
     }
 
-    private static func parkedFiles() -> [(url: URL, bytes: Int, at: Date)] {
-        let keys: [URLResourceKey] = [.contentModificationDateKey,
-                                      .isDirectoryKey]
+    nonisolated static func parkedURLs() -> [URL] {
         let found = (try? FileManager.default.contentsOfDirectory(
-            at: Session.parked, includingPropertiesForKeys: keys)) ?? []
+            at: Session.parked,
+            includingPropertiesForKeys: [.isDirectoryKey])) ?? []
         return found.filter { url in
             (try? url.resourceValues(forKeys: [.isDirectoryKey]))?
                 .isDirectory == true
             && UUID(uuidString: String(
                 url.lastPathComponent.split(separator: ".").first ?? "")) != nil
-        }.map { url in
-            let v = try? url.resourceValues(forKeys: Set(keys))
-            return (url, ChatSession.allocated(url),
-                    v?.contentModificationDate ?? .distantPast)
         }
     }
 
@@ -106,10 +101,11 @@ extension Session {
     }
 
     public func dropParked(_ id: UUID) {
-        for file in Session.parkedFiles()
-        where file.url.lastPathComponent.hasPrefix(id.uuidString + ".") {
-            try? FileManager.default.removeItem(at: file.url)
+        for url in Session.parkedURLs()
+        where url.lastPathComponent.hasPrefix(id.uuidString + ".") {
+            try? FileManager.default.removeItem(at: url)
         }
+        refreshStorage()
     }
 
     public static func eraseParked() {
@@ -136,18 +132,37 @@ extension Session {
         }
     }
 
+    nonisolated static let replayCeiling = 10.0
+
+    nonisolated static func parkRefusal(committed: Int, attached: Bool,
+                                        resumable: Bool, soft: Bool,
+                                        replaySeconds: Double,
+                                        budget: String?) -> String? {
+        let why: String?
+        if committed == 0 || !attached {
+            why = "nothing committed"
+        } else if resumable && !soft
+                    && replaySeconds < Session.replayCeiling {
+            why = String(format: "replays in %.0fs", replaySeconds)
+        } else {
+            why = budget
+        }
+        return why
+    }
+
     func park(_ chat: ChatSession, as id: UUID, model name: String) async {
         let tokens = await chat.committedCount
         let live = await chat.liveDir
-        let bytes = live.map { dir in ChatSession.allocated(dir) } ?? 0
+        let bytes = await chat.allocatedLive()
+        let replay = await chat.replayTokens
+        let soft = await chat.hasSoftTurns
+        let resumable = Session.resumable
         let url = Session.parkURL(id, name)
         let budget = ParkBudget.current(at: Session.parked)
-        var why: String? = nil
-        if tokens == 0 || live == nil {
-            why = "nothing committed"
-        } else {
-            why = budget.refusal(for: bytes)
-        }
+        let why = Session.parkRefusal(
+            committed: tokens, attached: live != nil, resumable: resumable,
+            soft: soft, replaySeconds: Double(replay) / measuredPP,
+            budget: budget.refusal(for: bytes))
         let label = String(id.uuidString.prefix(8))
         if let why {
             Diag.shared.report(.load, String(
@@ -156,11 +171,11 @@ extension Session {
             await chat.detach()
             if let live { try? FileManager.default.removeItem(at: live) }
         } else {
-            for other in Session.parkedFiles()
-            where other.url != url && other.url != live {
-                try? FileManager.default.removeItem(at: other.url)
+            for other in Session.parkedURLs()
+            where !resumable && other != url && other != live {
+                try? FileManager.default.removeItem(at: other)
                 Diag.shared.report(.load, "[park] dropped "
-                                   + other.url.lastPathComponent
+                                   + other.lastPathComponent
                                    + ": one conversation parks")
             }
             let t0 = Date()
@@ -181,8 +196,9 @@ extension Session {
 
     public func parkCurrent(_ id: UUID) async {
         if let session {
-            await session.quiesce()
+            await drainMeta()
             await park(session, as: id, model: modelName)
+            refreshStorage()
         }
     }
 

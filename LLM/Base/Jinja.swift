@@ -463,7 +463,7 @@ private final class JinjaEngine {
     private func seqLen(_ v: JinjaValue) -> Int {
         switch v {
         case .list(let a): return a.count
-        case .str(let s): return s.utf8.count
+        case .str(let s): return s.unicodeScalars.count
         case .node(let h, let t):
             return t == dictTag ? dicts[h].entries.count
                  : t == builtinTag ? 0 : host.len(v)
@@ -471,9 +471,10 @@ private final class JinjaEngine {
         }
     }
 
-    private func byteStr(_ s: String, _ i: Int) -> String {
-        let bytes = Array(s.utf8)
-        return String(decoding: [bytes[i]], as: UTF8.self)
+    private func scalarStr(_ s: String, _ i: Int) -> String {
+        let view = s.unicodeScalars
+        let at = view.index(view.startIndex, offsetBy: i)
+        return String(view[at])
     }
 
     private func seqIndex(_ v: JinjaValue, _ i: Int) -> JinjaValue {
@@ -486,7 +487,7 @@ private final class JinjaEngine {
         if idx >= 0 && idx < n {
             switch v {
             case .list(let a): result = a[idx]
-            case .str(let s): result = .str(byteStr(s, idx))
+            case .str(let s): result = .str(scalarStr(s, idx))
             case .node(let h, let t):
                 result = t == dictTag
                     ? .str(dicts[h].entries[idx].0) : host.index(v, idx)
@@ -1354,12 +1355,9 @@ private final class JinjaEngine {
         return try applyFilter(v, nm, ca)
     }
 
-    private func sliceSeq(_ v: JinjaValue, _ hStart: Bool, _ start: Int,
-                          _ hStop: Bool, _ stop: Int, _ hStep: Bool,
-                          _ step: Int) throws -> JinjaValue {
-        let len = seqLen(v)
-        let stepv = hStep ? step : 1
-        if stepv == 0 { try fail("slice step cannot be zero") }
+    private func sliceIndices(_ len: Int, _ hStart: Bool, _ start: Int,
+                              _ hStop: Bool, _ stop: Int,
+                              _ stepv: Int) -> [Int] {
         let lo = stepv < 0 ? -1 : 0
         let hi = stepv < 0 ? len - 1 : len
         var s = hStart ? (start < 0 ? start + len : start)
@@ -1368,13 +1366,36 @@ private final class JinjaEngine {
                       : (stepv < 0 ? -1 : len)
         s = min(max(s, lo), hi)
         e = min(max(e, lo), hi)
-        var items: [JinjaValue] = []
+        var picks: [Int] = []
         var i = s
         while stepv < 0 ? i > e : i < e {
-            if i >= 0 && i < len { items.append(seqIndex(v, i)) }
+            if i >= 0 && i < len { picks.append(i) }
             i += stepv
         }
-        return .list(items)
+        return picks
+    }
+
+    private func sliceSeq(_ v: JinjaValue, _ hStart: Bool, _ start: Int,
+                          _ hStop: Bool, _ stop: Int, _ hStep: Bool,
+                          _ step: Int) throws -> JinjaValue {
+        let stepv = hStep ? step : 1
+        if stepv == 0 { try fail("slice step cannot be zero") }
+        var result = JinjaValue.undefined
+        if case .str(let str) = v {
+            let scalars = Array(str.unicodeScalars)
+            let picks = sliceIndices(scalars.count, hStart, start, hStop,
+                                     stop, stepv)
+            var view = String.UnicodeScalarView()
+            for i in picks { view.append(scalars[i]) }
+            result = .str(String(view))
+        } else {
+            let picks = sliceIndices(seqLen(v), hStart, start, hStop, stop,
+                                     stepv)
+            var items: [JinjaValue] = []
+            for i in picks { items.append(seqIndex(v, i)) }
+            result = .list(items)
+        }
+        return result
     }
 
     private func postfixIndex(_ v: JinjaValue) throws -> JinjaValue {

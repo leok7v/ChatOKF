@@ -102,6 +102,9 @@ public actor ChatSession {
     // Append-only mirror of the tokens in the KV up to the turn mark, so park,
     // resume and serialize can round-trip the sequence. Empty is fresh.
     private var committed: [Int32]
+    private var primedCount = 0
+    private var softTurns = 0
+    private var toolTokens = 0
     private var visionContext: Bool {
         history.contains { m in m.contentParts != nil }
     }
@@ -134,9 +137,13 @@ public actor ChatSession {
                 maxReasoning: Int = 0, softReasoningCap: Int = 0,
                 overthink: Float = 0, seed: UInt64 = 0,
                 runner: (any ToolRunner)? = nil,
-                readGuard: (@Sendable () -> String?)? = nil) {
+                readGuard: (@Sendable () -> String?)? = nil,
+                breakers: Set<Int32>? = nil,
+                grammarVocab: GrammarVocab? = nil) {
         self.backend = backend
         self.readGuard = readGuard
+        self.breakers = breakers
+        self.grammarVocab = grammarVocab
         self.template = template
         let wire = ChatWire.derive(template)
         self.wire = wire
@@ -251,6 +258,9 @@ public actor ChatSession {
     public func reset() async {
         history = Array(history.prefix(1))
         committed = []
+        primedCount = 0
+        softTurns = 0
+        toolTokens = 0
         attachmentCounts = [:]
         await backend.reset()
         Diag.memory?("session reset")
@@ -286,11 +296,20 @@ public actor ChatSession {
         let contents: [String]
         let attachments: [String: Int]
         let bytes: Int?
+        let primed: Int?
+        let soft: Int?
+        let tools: Int?
     }
 
     public private(set) var lastSaved: (tokens: Int, bytes: Int)?
 
     public var committedCount: Int { committed.count }
+
+    public var replayTokens: Int {
+        max(0, committed.count - primedCount - toolTokens)
+    }
+
+    public var hasSoftTurns: Bool { softTurns > 0 }
 
     public private(set) var liveDir: URL?
 
@@ -309,7 +328,8 @@ public actor ChatSession {
             roles: history.map { m in m.role },
             contents: history.map { m in m.content },
             attachments: attachmentCounts,
-            bytes: await backend.stateBytes))
+            bytes: await backend.stateBytes, primed: primedCount,
+            soft: softTurns, tools: toolTokens))
     }
 
     private func adoptMeta(_ data: Data, stamp: String) async -> Bool {
@@ -324,6 +344,9 @@ public actor ChatSession {
             history = restored
             committed = meta.committed
             attachmentCounts = meta.attachments
+            primedCount = meta.primed ?? 0
+            softTurns = meta.soft ?? 0
+            toolTokens = meta.tools ?? 0
             lastMetrics = TurnMetrics(ctx: await backend.position,
                                       thinkTokens: 0, contentTokens: 0)
             loaded = true
@@ -345,6 +368,10 @@ public actor ChatSession {
                 .totalFileAllocatedSize ?? 0)
         }
         return max(onDisk, meta?.bytes ?? 0)
+    }
+
+    public func allocatedLive() -> Int {
+        liveDir.map { dir in ChatSession.allocated(dir) } ?? 0
     }
 
     public func park(to dir: URL, stamp: String) async throws {
@@ -444,6 +471,7 @@ public actor ChatSession {
                 _ = try await backend.extend(fullIds)
             }
             committed = fullIds
+            primedCount = fullIds.count
             try await backend.mark()
             trace(.prefill, from: t0, ctx: await backend.position,
                   tokens: fullIds.count,
@@ -519,6 +547,7 @@ public actor ChatSession {
             }
             if ok {
                 committed = fullIds
+                primedCount = fullIds.count
                 ok = (try? await backend.mark()) != nil
             }
             history = [AgentMessage(role: "system",
@@ -903,6 +932,7 @@ public actor ChatSession {
         enterEngine()
         defer { leaveEngine() }
         let saved = await enterTurn()
+        softTurns += 1
         let rows = spans.reduce(0) { sum, span in sum + span.rows }
         trace(.user, ctx: await backend.position,
               summary: String(user.prefix(80))
@@ -1051,18 +1081,18 @@ public actor ChatSession {
         return (seed, pp, stopped)
     }
 
-    private func seedDelta(
-        fresh: Bool, soft: [SoftSpan]
-    ) async throws -> (seed: Int32, added: Int) {
-        // [system, user] over a primed prefix is the first turn: the system
-        // block is already in the KV, so the delta is the user turn alone.
+    private struct Delta {
+        let fresh: Bool
+        let closedText: String
+        let fullText: String
+    }
+
+    private func renderDelta(fresh: Bool) -> Delta {
         let deltaMsgs = fresh
             ? history
             : (history.count == 2
                 ? [history[history.count - 1]]
                 : [history[history.count - 2], history[history.count - 1]])
-        // Tool specs render into the system message, so only the fresh turn
-        // carries them; a continuation delta has no system message.
         let tools = fresh ? toolSpecs : []
         var closedText = (try? renderPrompt(
             template: template, messages: deltaMsgs, tools: tools,
@@ -1074,8 +1104,6 @@ public actor ChatSession {
             addGenerationPrompt: true, enableThinking: enableThinking,
             reasoningEffort: reasoningEffort,
             bosToken: backend.bosToken)) ?? ""
-        // Gemma-4 opens a system turn on `enable_thinking` alone, so every
-        // delta would re-lay an empty system turn the fresh turn already laid.
         let lead = fresh ? "" : leadingBlock(thinking: enableThinking)
         if !lead.isEmpty, closedText.hasPrefix(lead), fullText.hasPrefix(lead) {
             closedText = String(closedText.dropFirst(lead.count))
@@ -1087,26 +1115,14 @@ public actor ChatSession {
         if !fullText.hasPrefix(closedText) {
             Diag.shared.report("generation prompt is not a render suffix")
         }
-        var genText = fullText.hasPrefix(closedText)
-            ? String(fullText.dropFirst(closedText.count)) : ""
-        if metaTurn { genText += ChatSession.titleSeed(genText, wire) }
-        genText = reasoningSeed(genText)
-        genStartsThink = wire.startsInReasoning(genPrompt: genText,
-                                                enabled: true)
-        var encoded = backend.encode(closedText)
-        var tail: [Int32] = []
-        var spanStart = 0
-        if soft.isEmpty, let span = stoppable,
-           let at = closedText.range(of: span) {
-            encoded = backend.encode(String(closedText[..<at.upperBound]))
-            tail = backend.encode(String(closedText[at.upperBound...]))
-            spanStart = backend.encode(String(closedText[..<at.lowerBound]))
-                .count
-        }
-        let closed = soft.isEmpty ? encoded
-            : Continuation.expandSpans(encoded, soft)
-        let gen = backend.encode(genText)
-        if fresh {
+        return Delta(fresh: fresh, closedText: closedText, fullText: fullText)
+    }
+
+    private func layClosed(_ closed: [Int32], tail: [Int32], spanStart: Int,
+                           soft: [SoftSpan], delta: Delta,
+                           genCount: Int) async throws
+        -> (next: Int32, laid: [Int32]) {
+        if delta.fresh {
             let stale = await backend.position
             if stale > 0 {
                 let msgs = history.count
@@ -1116,33 +1132,114 @@ public actor ChatSession {
             }
             await backend.reset()
             committed = []
+            primedCount = 0
         } else {
             try await backend.rewind()
             trace(.rewind, ctx: await backend.position,
                   summary: "rewind to turn mark")
         }
-        trace(.render, tokens: closed.count + gen.count,
-              summary: fresh ? "fresh (system + tools + user)"
-                             : "delta (prev answer + user)",
-              text: fullText)
-        var afterHead: Int32
+        trace(.render, tokens: closed.count + genCount,
+              summary: delta.fresh ? "fresh (system + tools + user)"
+                                   : "delta (prev answer + user)",
+              text: delta.fullText)
+        var next: Int32
         var laid = closed
         if !soft.isEmpty {
-            afterHead = try await backend.extendSoft(closed, spans: soft)
+            next = try await backend.extendSoft(closed, spans: soft)
         } else {
             let read = try await extendChunked(closed, tail: tail,
                                                spanStart: spanStart)
-            afterHead = read.next
+            next = read.next
             laid = read.laid
         }
         committed += laid
         try await backend.mark()
-        var seed = afterHead
+        return (next, laid)
+    }
+
+    private func seedDelta(
+        fresh: Bool, soft: [SoftSpan]
+    ) async throws -> (seed: Int32, added: Int) {
+        let delta = renderDelta(fresh: fresh)
+        var genText = delta.fullText.hasPrefix(delta.closedText)
+            ? String(delta.fullText.dropFirst(delta.closedText.count)) : ""
+        if metaTurn { genText += ChatSession.titleSeed(genText, wire) }
+        genText = reasoningSeed(genText)
+        genStartsThink = wire.startsInReasoning(genPrompt: genText,
+                                                enabled: true)
+        var encoded = backend.encode(delta.closedText)
+        var tail: [Int32] = []
+        var spanStart = 0
+        if soft.isEmpty, let span = stoppable,
+           let at = delta.closedText.range(of: span) {
+            encoded = backend.encode(String(delta.closedText[..<at.upperBound]))
+            tail = backend.encode(String(delta.closedText[at.upperBound...]))
+            spanStart = backend.encode(
+                String(delta.closedText[..<at.lowerBound])).count
+        }
+        let closed = soft.isEmpty ? encoded
+            : Continuation.expandSpans(encoded, soft)
+        let gen = backend.encode(genText)
+        let laid = try await layClosed(closed, tail: tail, spanStart: spanStart,
+                                       soft: soft, delta: delta,
+                                       genCount: gen.count)
+        var seed = laid.next
         if !gen.isEmpty {
             seed = readFraction < 1 ? try await lay(gen)
                                     : try await backend.extend(gen)
         }
-        return (seed, laid.count + gen.count)
+        return (seed, laid.laid.count + gen.count)
+    }
+
+    public struct ReplayTurn: Sendable {
+        public let prompt: String
+        public let answer: String
+        public let parts: [ContentPart]
+        public let spans: [SoftSpan]
+        public let labelled: Bool
+
+        public init(prompt: String, answer: String, parts: [ContentPart],
+                    spans: [SoftSpan], labelled: Bool) {
+            self.prompt = prompt
+            self.answer = answer
+            self.parts = parts
+            self.spans = spans
+            self.labelled = labelled
+        }
+    }
+
+    public func replay(_ turns: [ReplayTurn]) async throws -> Int {
+        await priming?.value
+        enterEngine()
+        defer { leaveEngine() }
+        let t0 = Date()
+        var laid = 0
+        var i = 0
+        while i < turns.count && !Task.isCancelled {
+            let turn = turns[i]
+            let soft = !turn.spans.isEmpty
+            if soft { softTurns += 1 }
+            history.append(AgentMessage(
+                role: "user", content: turn.prompt,
+                contentParts: soft ? numbered(turn.parts, turn.labelled) : nil))
+            let delta = renderDelta(fresh: committed.isEmpty)
+            let encoded = backend.encode(delta.closedText)
+            let closed = soft ? Continuation.expandSpans(encoded, turn.spans)
+                              : encoded
+            laid += try await layClosed(closed, tail: [], spanStart: 0,
+                                        soft: turn.spans, delta: delta,
+                                        genCount: 0).laid.count
+            history.append(AgentMessage(role: "assistant",
+                                        content: turn.answer))
+            i += 1
+        }
+        if i < turns.count { throw CancellationError() }
+        let ctx = await backend.position
+        lastMetrics = TurnMetrics(ctx: ctx, thinkTokens: 0, contentTokens: 0)
+        trace(.prefill, from: t0, ctx: ctx, tokens: laid,
+              summary: String(format: "replayed %d turn(s) (%.1fs)",
+                              turns.count, Date().timeIntervalSince(t0)))
+        return laid
     }
 
     static let prefillChunk = 1024
@@ -1259,6 +1356,7 @@ public actor ChatSession {
         let checkpoint: (any BackendState)?
         let history: [AgentMessage]
         let committed: [Int32]
+        let toolTokens: Int
     }
 
     static func userStopped(_ endReason: String) -> Bool {
@@ -1272,7 +1370,7 @@ public actor ChatSession {
         runner?.beginTurn()
         let checkpoint = try? await backend.checkpoint()
         return SavedTurn(checkpoint: checkpoint, history: history,
-                         committed: committed)
+                         committed: committed, toolTokens: toolTokens)
     }
 
     private func rollbackTurn(_ saved: SavedTurn,
@@ -1282,6 +1380,7 @@ public actor ChatSession {
         }
         history = saved.history
         committed = saved.committed
+        toolTokens = saved.toolTokens
         turnOutcome = why
         trace(.rewind, ctx: await backend.position,
               summary: "turn rollback (\(why.rawValue))")
@@ -1321,23 +1420,45 @@ public actor ChatSession {
 
     private var breakers: Set<Int32>?
 
+    public static func sequenceBreakers(_ backend: any AgentBackend,
+                                        vocabSize: Int) -> Set<Int32> {
+        var out: Set<Int32> = []
+        for id in 0 ..< Int32(vocabSize)
+        where backend.tokenBytes(id).contains(where: { byte in
+            ChatSession.breakerBytes.contains(byte)
+        }) {
+            out.insert(id)
+        }
+        return out
+    }
+
+    public static func grammarVocab(_ backend: any AgentBackend,
+                                    vocabSize: Int,
+                                    template: String) -> GrammarVocab? {
+        var out: GrammarVocab? = nil
+        if ChatSession.grammarMode != .off, template.contains("<function=") {
+            var toks: [[UInt8]] = []
+            toks.reserveCapacity(vocabSize)
+            for id in 0 ..< vocabSize {
+                toks.append(backend.tokenBytes(Int32(id)))
+            }
+            out = GrammarVocab(toks)
+        }
+        return out
+    }
+
     private func sequenceBreakers() -> Set<Int32> {
-        var out = breakers ?? []
         if breakers == nil {
             let began = Date()
-            for id in 0 ..< Int32(vocabSize)
-            where backend.tokenBytes(id).contains(where: { byte in
-                ChatSession.breakerBytes.contains(byte)
-            }) {
-                out.insert(id)
-            }
+            let out = ChatSession.sequenceBreakers(backend,
+                                                   vocabSize: vocabSize)
             breakers = out
             Diag.shared.report(.perf, String(
                 format: "[dry] %d sequence breakers of %d tokens in %.0f ms",
                 out.count, vocabSize,
                 Date().timeIntervalSince(began) * 1000))
         }
-        return out
+        return breakers ?? []
     }
 
     private func installSampler(masked: Bool, verbatim: Bool) async {
@@ -1354,12 +1475,8 @@ public actor ChatSession {
         var result: GrammarGate? = nil
         if ChatSession.grammarMode != .off && toolDialectXML {
             if grammarVocab == nil {
-                var toks: [[UInt8]] = []
-                toks.reserveCapacity(vocabSize)
-                for id in 0 ..< vocabSize {
-                    toks.append(backend.tokenBytes(Int32(id)))
-                }
-                grammarVocab = GrammarVocab(toks)
+                grammarVocab = ChatSession.grammarVocab(
+                    backend, vocabSize: vocabSize, template: template)
             }
             if let vocab = grammarVocab {
                 let g = gate ?? GrammarGate(
@@ -2031,6 +2148,7 @@ public actor ChatSession {
                   text: head + genText)
             let afterHead = try await backend.extend(laid)
             committed += laid
+            toolTokens += laid.count
             try await backend.mark()
             seed = gen.isEmpty ? afterHead : try await backend.extend(gen)
             let sec = Date().timeIntervalSince(t0)

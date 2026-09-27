@@ -74,7 +74,15 @@ import UniformTypeIdentifiers
     var attachedClips: [ClipAttachment] = []
     var status = "loading model..."
     var ready: Bool { session.hasSession && !compiling }
-    var busy: Bool { genTask != nil || session.metaTaskRunning }
+    var busy: Bool { engineBusy || sendTask != nil }
+    var replaying = false
+    var locked: Bool { busy && !replaying }
+    @ObservationIgnored var resumeAfterLoad: UUID?
+    var resumeAsk: String?
+
+    private var engineBusy: Bool {
+        genTask != nil || session.metaTaskRunning
+    }
 
     var lookingAt: VideoPeek?
     var watching = false
@@ -250,11 +258,13 @@ import UniformTypeIdentifiers
             && !attachedClips.contains { c in c.isVideo }
     }
 
-    var attachableTypes: [UTType] {
-        var out: [UTType] = [.plainText, .pdf]
-        out += Docs2md.readable.compactMap { ext in
+    private static let documentTypes: [UTType] = [.plainText, .pdf]
+        + Docs2md.readable.compactMap { ext in
             UTType(filenameExtension: ext)
         }
+
+    var attachableTypes: [UTType] {
+        var out = ChatModel.documentTypes
         if canAttachImages { out.append(.image) }
         if canAttachAudio { out.append(.audio) }
         if canAttachVideo { out.append(.movie) }
@@ -403,6 +413,8 @@ import UniformTypeIdentifiers
 
     var memoryTrash: [MemoryRow] { session.memories.trashed }
 
+    var memoryRevision: Int { session.memories.revision }
+
     func memoryNote(_ id: String) -> MemoryNote? {
         session.memories.note(detail: id)
     }
@@ -412,19 +424,19 @@ import UniformTypeIdentifiers
     }
 
     func forgetMemory(_ id: String) {
-        session.memories.trash(id)
+        Task { await session.memories.trash(id) }
     }
 
     func restoreMemory(_ id: String) {
-        session.memories.restore(id)
+        Task { await session.memories.restore(id) }
     }
 
     func deleteMemoryForever(_ id: String) {
-        session.memories.deleteForever(id)
+        Task { await session.memories.deleteForever(id) }
     }
 
     func emptyMemoriesTrash() {
-        session.memories.emptyTrash()
+        Task { await session.memories.emptyTrash() }
     }
 
     enum Access { case offline, wikipedia, full }
@@ -453,13 +465,29 @@ import UniformTypeIdentifiers
     private(set) var hud: Flash?
     @ObservationIgnored private var hudTask: Task<Void, Never>?
 
-    private func flashHUD(_ text: String, prominent: Bool = false,
-                          seconds: Double = 3) {
+    func flashHUD(_ text: String, prominent: Bool = false,
+                  seconds: Double = 3) {
         hudTask?.cancel()
         hud = Flash(text: text, prominent: prominent)
         hudTask = Task { @MainActor in
             try? await Task.sleep(for: .seconds(seconds))
             if !Task.isCancelled { hud = nil }
+        }
+    }
+
+    func clearHUD(_ text: String) {
+        if hud?.text == text {
+            hudTask?.cancel()
+            hud = nil
+        }
+    }
+
+    func downloadForResume() {
+        if let name = resumeAsk {
+            resumeAsk = nil
+            if !downloading, ModelCatalog.source(name) != nil {
+                downloadName = name
+            }
         }
     }
 
@@ -518,6 +546,35 @@ import UniformTypeIdentifiers
     var statusLine: Bool = UserDefaults.standard.bool(forKey: "statusLine") {
         didSet { UserDefaults.standard.set(statusLine, forKey: "statusLine") }
     }
+    var resumable: Bool = Flags.on("resumable") {
+        didSet { Flags.store("resumable", resumable) }
+    }
+    static let resumableNoticeKey = "resumableNoticed"
+    var resumableNoticed: Bool = UserDefaults.standard
+        .bool(forKey: ChatModel.resumableNoticeKey) {
+        didSet {
+            UserDefaults.standard.set(resumableNoticed,
+                                      forKey: ChatModel.resumableNoticeKey)
+        }
+    }
+    var storage: StorageReport { session.storage }
+    var showsStorage: Bool { session.storage.anything || downloadedModels > 1 }
+
+    @ObservationIgnored private var downloadedCache:
+        (revision: Int, count: Int)?
+
+    var downloadedModels: Int {
+        var count: Int
+        if let cached = downloadedCache, cached.revision == diskRevision {
+            count = cached.count
+        } else {
+            count = Models.downloaded.count
+            downloadedCache = (diskRevision, count)
+        }
+        return count
+    }
+
+    func refreshStorage() { session.refreshStorage() }
     var showSettings = false
     var showDebug = false
     var settingsCategory: SettingsView.Category = .systemPrompt
@@ -649,6 +706,10 @@ import UniformTypeIdentifiers
     func load(name: String) {
         if !compiling {
             loadError = nil
+            Task.detached {
+                _ = ChatModel.samplePictureThumb
+                _ = ChatModel.sampleClipThumb
+            }
             Session.pruneUnavailable()
             let setDir = ModelCatalog.localSet(name, in: Bundle.modelStore())
             if let setDir, ModelCatalog.isComplete(setDir) {
@@ -698,8 +759,14 @@ import UniformTypeIdentifiers
                 status = ""
             }
             session.primeSession()
+            await ConversationStore.shared.settled()
             session.pruneParked(
                 keeping: Set(ConversationStore.shared.list.map { c in c.id }))
+            session.refreshStorage()
+            if let id = resumeAfterLoad {
+                resumeAfterLoad = nil
+                openConversation(id)
+            }
             if !Self.benchPrompt.isEmpty, benchTask == nil {
                 benchTask = Task { @MainActor in await self.runBench() }
             }
@@ -715,10 +782,9 @@ import UniformTypeIdentifiers
     private func settled() async {
         await sendTask?.value
         await genTask?.value
-        while session.metaTaskRunning {
-            try? await Task.sleep(for: .milliseconds(200))
-        }
+        await session.awaitMeta()
         await session.awaitPrimed()
+        await ConversationStore.shared.settled()
     }
 
     private func runScript() async {
@@ -736,6 +802,7 @@ import UniformTypeIdentifiers
             } else if line == "reopen" {
                 if let id = ConversationStore.shared.list.first?.id {
                     openConversation(id)
+                    try? await Task.sleep(for: .seconds(2))
                 }
             } else {
                 input = line
@@ -848,12 +915,18 @@ import UniformTypeIdentifiers
             status = "downloading \(name)…"
             let dest = Bundle.modelStore().appendingPathComponent(name)
             let setDir = dest.appendingPathComponent(src.revision)
+            let pace = Paced(milliseconds: 100)
             fetchTask = Task { @MainActor in
                 let failure = await session.fetch(name: name) { s in
-                    Task { @MainActor in self.observeDownload(s, set: setDir) }
+                    if pace.due(final: s.done >= s.total) {
+                        Task { @MainActor in
+                            self.observeDownload(s, set: setDir)
+                        }
+                    }
                 }
                 downloading = false
                 if failure == nil {
+                    diskRevision += 1
                     Self.saveSeconds("download", name,
                         Date().timeIntervalSince(self.phaseStart))
                     if let path = ModelCatalog.ggufPath(
@@ -934,6 +1007,7 @@ import UniformTypeIdentifiers
         loadError = nil
         // The identity goes with the messages, or the next conversation
         // commits into this one's id and overwrites it.
+        transcriptSerial += 1
         messages = []
         traceEvents = []
         currentConversationId = nil
@@ -955,6 +1029,21 @@ import UniformTypeIdentifiers
     }
 
     private(set) var diskRevision = 0
+
+    @ObservationIgnored private var offeredCache:
+        (revision: Int, unlocked: Bool, names: [String])?
+
+    func offered(unlocked: Bool) -> [String] {
+        var names: [String]
+        if let cached = offeredCache, cached.revision == diskRevision,
+           cached.unlocked == unlocked {
+            names = cached.names
+        } else {
+            names = Models.offered(unlocked: unlocked)
+            offeredCache = (diskRevision, unlocked, names)
+        }
+        return names
+    }
 
     func isDownloaded(_ name: String) -> Bool { Session.isOnDisk(name) }
 
@@ -998,10 +1087,13 @@ import UniformTypeIdentifiers
         traceEvents = []
         statsLabel = ""
         attachmentSerials = [:]
+        transcriptSerial += 1
         let running = genTask
         let onEvent: @MainActor (TraceEvent) -> Void = { [weak self] e in
             self?.recordTrace(e)
         }
+        genSerial += 1
+        let serial = genSerial
         genTask = Task { @MainActor in
             if running != nil {
                 session.requestStop()
@@ -1010,7 +1102,7 @@ import UniformTypeIdentifiers
             }
             if let leaving { await session.parkCurrent(leaving) }
             await session.newChatEngine(sessionConfig(), onEvent: onEvent)
-            genTask = nil
+            if genSerial == serial { genTask = nil }
             Footprint.report(.load, "newChat end")
         }
     }
@@ -1029,14 +1121,20 @@ import UniformTypeIdentifiers
                 extraction: extraction,
                 onTitle: { [weak self] t in
                     self?.generatedTitle = t
+                    self?.transcriptDirty = true
                     self?.commitCurrent()
                 },
                 onFollowup: { [weak self] hint in
                     self?.followupHint = hint
+                    if !hint.isEmpty {
+                        self?.transcriptDirty = true
+                        self?.commitCurrent()
+                    }
                 },
                 onRemembered: { [weak self] notes in
                     self?.remembered += notes
                     self?.extractedAt = Date()
+                    self?.transcriptDirty = true
                     self?.commitCurrent()
                 })
         }
@@ -1132,12 +1230,30 @@ import UniformTypeIdentifiers
         let dup = attachedImages.contains { img in img.data == data }
         if canAttachImages, attachedImages.count < Self.maxImages, !dup {
             let unique = uniqueName(serialName("Image"))
-            let thumb = VisionPreprocess.thumbnail(data, maxPx: 96)
-            attachedImages.append(
-                ImageAttachment(name: unique, file: name, data: data,
-                                thumbnail: thumb))
+            let attachment = ImageAttachment(name: unique, file: name,
+                                             data: data)
+            attachedImages.append(attachment)
             insertRef(unique, at: offset)
+            Task { @MainActor in
+                let decoded = await ChatModel.decoded(data)
+                if let at = attachedImages.firstIndex(where: { img in
+                    img.id == attachment.id
+                }) {
+                    attachedImages[at].preview = decoded.preview
+                    attachedImages[at].thumbnail = decoded.thumbnail
+                }
+            }
         }
+    }
+
+    nonisolated private static func decoded(_ data: Data) async
+        -> (preview: CGImage?, thumbnail: CGImage?) {
+        await Task.detached {
+            let preview = VisionPreprocess.thumbnail(data, maxPx: 640)
+            return (preview, preview.flatMap { cg in
+                VisionPreprocess.scaled(cg, maxPx: 96)
+            })
+        }.value
     }
 
     func attachClip(_ url: URL, isVideo: Bool, at offset: Int,
@@ -1173,6 +1289,7 @@ import UniformTypeIdentifiers
         for i in messages.indices
         where messages[i].posters.isEmpty && messages[i].clips.contains(url) {
             messages[i].posters = [cg]
+            transcriptDirty = true
         }
     }
 
@@ -1222,23 +1339,21 @@ import UniformTypeIdentifiers
 
     private(set) var convertingNames: [String] = []
 
-    private func convertDoc(_ from: URL, _ name: String) {
-        if let kept = ChatModel.keep(from, name) {
-            converting += 1
-            convertingNames.append(name)
-            let t0 = Date()
-            Task { @MainActor in
-                let text = await ChatModel.markdown(of: kept)
-                converting -= 1
-                convertingNames.removeAll { seen in seen == name }
-                ChatModel.read(name, text, t0,
-                               docBudgetBytes)
-                if let text {
-                    attachDoc(name, text, at: caret, from: kept)
-                } else {
-                    try? FileManager.default.removeItem(at: kept)
-                    flashHUD("Cannot read \(name)")
-                }
+    private func convertDoc(_ kept: URL, _ name: String) {
+        converting += 1
+        convertingNames.append(name)
+        let t0 = Date()
+        Task { @MainActor in
+            let text = await ChatModel.markdown(of: kept)
+            converting -= 1
+            convertingNames.removeAll { seen in seen == name }
+            ChatModel.read(name, text, t0,
+                           docBudgetBytes)
+            if let text {
+                attachDoc(name, text, at: caret, from: kept)
+            } else {
+                try? FileManager.default.removeItem(at: kept)
+                flashHUD("Cannot read \(name)")
             }
         }
     }
@@ -1252,7 +1367,8 @@ import UniformTypeIdentifiers
             cut, Date().timeIntervalSince(since)))
     }
 
-    private static func keep(_ from: URL, _ name: String) -> URL? {
+    nonisolated private static func keep(_ from: URL,
+                                         _ name: String) -> URL? {
         let fm = FileManager.default
         let dir = Session.attachments.appendingPathComponent(
             UUID().uuidString, isDirectory: true)
@@ -1348,7 +1464,7 @@ import UniformTypeIdentifiers
         return candidate
     }
 
-    static let imageExts: Set<String> =
+    nonisolated static let imageExts: Set<String> =
         ["png", "jpg", "jpeg", "heic", "heif", "gif", "webp", "bmp", "tiff"]
     static let docExts: Set<String> = ["txt", "md", "markdown", "text"]
     static let convertExts: Set<String> = Set(["pdf"] + Docs2md.readable)
@@ -1417,32 +1533,72 @@ import UniformTypeIdentifiers
     func handleDrop(_ urls: [URL], at offset: Int) {
         caret = max(0, min(offset, input.utf16.count))
         var refused: [String] = []
+        var reading: [URL] = []
+        var images = attachedImages.count
+        var docs = attachedDocs.count + converting
         for url in urls where ready {
             let ext = url.pathExtension.lowercased()
-            let scoped = url.startAccessingSecurityScopedResource()
-            let before = attachedImages.count + attachedDocs.count
-                + attachedClips.count + converting
-            if Self.imageExts.contains(ext),
-               attachedImages.count < Self.maxImages,
-               let data = try? Data(contentsOf: url) {
-                attachImage(data, name: url.lastPathComponent, at: caret)
-            } else if Self.docExts.contains(ext),
-                      attachedDocs.count < Self.maxDocs,
-                      let text = try? String(contentsOf: url, encoding: .utf8) {
-                attachDoc(url.lastPathComponent, text, at: caret,
-                          from: Self.keep(url, url.lastPathComponent))
-            } else if Self.convertExts.contains(ext),
-                      attachedDocs.count < Self.maxDocs {
-                convertDoc(url, url.lastPathComponent)
+            let clips = attachedClips.count
+            let queued = reading.count
+            if Self.imageExts.contains(ext), images < Self.maxImages {
+                images += 1
+                reading.append(url)
+            } else if Self.docExts.contains(ext) || Self.convertExts
+                        .contains(ext), docs < Self.maxDocs {
+                docs += 1
+                reading.append(url)
             } else if let isVideo = Self.clipKind(url) {
                 attachClip(url, isVideo: isVideo, at: caret)
             }
-            let after = attachedImages.count + attachedDocs.count
-                + attachedClips.count + converting
-            if after == before { refused.append(ext.isEmpty ? "file" : ext) }
-            if scoped { url.stopAccessingSecurityScopedResource() }
+            if reading.count == queued, attachedClips.count == clips {
+                refused.append(ext.isEmpty ? "file" : ext)
+            }
+        }
+        converting += reading.count
+        if !reading.isEmpty {
+            Task { @MainActor in await attachDropped(reading) }
         }
         if !refused.isEmpty { flashHUD(refusedText(refused)) }
+    }
+
+    private func attachDropped(_ urls: [URL]) async {
+        for url in urls {
+            let scoped = url.startAccessingSecurityScopedResource()
+            let ext = url.pathExtension.lowercased()
+            let name = url.lastPathComponent
+            let read = await ChatModel.dropped(url, converting:
+                Self.convertExts.contains(ext))
+            converting -= 1
+            if Self.imageExts.contains(ext), let data = read.data {
+                attachImage(data, name: name, at: caret)
+            } else if let kept = read.kept, Self.convertExts.contains(ext) {
+                convertDoc(kept, name)
+            } else if let text = read.text {
+                attachDoc(name, text, at: caret, from: read.kept)
+            } else {
+                flashHUD("Cannot read \(name)")
+            }
+            if scoped { url.stopAccessingSecurityScopedResource() }
+        }
+    }
+
+    nonisolated private static func dropped(_ url: URL, converting: Bool)
+        async -> (data: Data?, text: String?, kept: URL?) {
+        await Task.detached {
+            let name = url.lastPathComponent
+            var out: (data: Data?, text: String?, kept: URL?) =
+                (nil, nil, nil)
+            let ext = url.pathExtension.lowercased()
+            if ChatModel.imageExts.contains(ext) {
+                out.data = try? Data(contentsOf: url)
+            } else if converting {
+                out.kept = ChatModel.keep(url, name)
+            } else if let text = try? String(contentsOf: url,
+                                             encoding: .utf8) {
+                out = (nil, text, ChatModel.keep(url, name))
+            }
+            return out
+        }.value
     }
 
     private func refusedText(_ kinds: [String]) -> String {
@@ -1462,8 +1618,14 @@ import UniformTypeIdentifiers
         return out
     }
 
+    typealias Built = (prompt: String, spans: [String: Range<String.Index>])
+
     private func promptFor(_ raw: String) -> String {
-        AttachmentRefs.substitute(raw) { name in
+        built(raw).prompt
+    }
+
+    private func built(_ raw: String) -> Built {
+        AttachmentRefs.substituted(raw) { name in
             var out = "@\(name)"
             if let doc = self.attachedDocs.first(
                 where: { d in d.name == name }) {
@@ -1642,6 +1804,7 @@ import UniformTypeIdentifiers
         ConversationStore.shared.eraseAll()
         let fm = FileManager.default
         try? fm.removeItem(at: Session.attachments)
+        try? fm.removeItem(at: SoftFile.dir)
         try? fm.removeItem(at: Bundle.modelStore())
         Session.eraseParked()
         Memories.erase()
@@ -1649,7 +1812,13 @@ import UniformTypeIdentifiers
         quitApp()
     }
 
-    private var canRunTurn: Bool { session.hasSession && ready && !busy }
+    private var canRunTurn: Bool {
+        session.hasSession && ready && !engineBusy
+    }
+
+    @ObservationIgnored var transcriptSerial = 0
+    @ObservationIgnored var genSerial = 0
+    @ObservationIgnored var transcriptDirty = false
 
     func send() {
         let attached = !attachedImages.isEmpty || !attachedClips.isEmpty
@@ -1742,13 +1911,15 @@ import UniformTypeIdentifiers
         speech.beginTurn(cue: cue)
         KeepAwake.hold(true)
         let phrases = phraseCycler()
+        genSerial += 1
+        let serial = genSerial
         genTask = Task { @MainActor in
             for await event in events {
                 self.apply(event, at: idx)
             }
             phrases.cancel()
             self.releaseWhenSettled()
-            self.genTask = nil
+            if self.genSerial == serial { self.genTask = nil }
             self.prefilling = false
             self.prefillProgress = nil
             self.consulting = false
@@ -1760,9 +1931,7 @@ import UniformTypeIdentifiers
 
     private func releaseWhenSettled() {
         Task { @MainActor in
-            while session.metaTaskRunning {
-                try? await Task.sleep(for: .milliseconds(200))
-            }
+            await session.awaitMeta()
             if genTask == nil { KeepAwake.hold(false) }
         }
     }
@@ -1776,7 +1945,7 @@ import UniformTypeIdentifiers
             speech.reasoningArrived(piece)
             if messages.indices.contains(idx) {
                 liveReason += piece
-                messages[idx].reasoningStream.append(piece)
+                reasoningStream.append(piece)
                 flushLive(idx)
             }
         case .answer(let piece):
@@ -1786,7 +1955,7 @@ import UniformTypeIdentifiers
             speech.answerArrived(piece)
             if messages.indices.contains(idx) {
                 liveAnswer += piece
-                messages[idx].answerStream.append(piece)
+                answerStream.append(piece)
                 flushLive(idx)
             }
         case .toolStarting:
@@ -1799,6 +1968,11 @@ import UniformTypeIdentifiers
             watching = true
         case .doneLooking:
             watching = false
+        case .soft(let url):
+            if messages.indices.contains(idx - 1), messages[idx - 1].fromUser {
+                messages[idx - 1].soft = url
+                transcriptDirty = true
+            }
         case .stats(let metrics):
             if !prefilling { refreshDocs() }
             applyStats(metrics)
@@ -1810,7 +1984,10 @@ import UniformTypeIdentifiers
         case .cancelled:
             if messages.count >= 2 { messages.removeLast(2) }
         case .failed(let message):
-            if messages.indices.contains(idx) { messages[idx].text = message }
+            if messages.indices.contains(idx) {
+                messages[idx].text = message
+                transcriptDirty = true
+            }
         }
     }
 
@@ -1826,6 +2003,8 @@ import UniformTypeIdentifiers
 
     private func finishTurn(_ outcome: ChatSession.TurnOutcome,
                             _ metrics: TurnMetrics, _ idx: Int) {
+        settledTurns += 1
+        transcriptDirty = true
         if benchTask != nil { benchMetrics = metrics }
         adoptNoted()
         if outcome == .stopped {
@@ -1863,13 +2042,13 @@ import UniformTypeIdentifiers
         }
     }
 
-    static func stoppableSpan(_ prompt: String, _ docs: [Doc]) -> String? {
+    static func stoppableSpan(_ built: Built, _ docs: [Doc]) -> String? {
         var out: String? = nil
         if let first = docs.first, let last = docs.last,
-           let head = prompt.range(of: first.content),
-           let tail = prompt.range(of: last.content, options: .backwards),
+           let head = built.spans[first.name],
+           let tail = built.spans[last.name],
            head.lowerBound < tail.upperBound {
-            out = String(prompt[head.lowerBound..<tail.upperBound])
+            out = String(built.prompt[head.lowerBound..<tail.upperBound])
         }
         return out
     }
@@ -1900,22 +2079,24 @@ import UniformTypeIdentifiers
 
     private func sendText() {
         let raw = input
-        let prompt = promptFor(raw)
+        let made = built(raw)
+        let prompt = made.prompt
         let display = AttachmentRefs.stripped(raw)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         if !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-           canRunTurn {
+           canRunTurn, sendTask == nil {
             let stage: Whimsical.Stage = attachedDocs.isEmpty
                 ? .prefill : .documents
             input = ""
             caret = 0
             let docs = Session.refs(attachedDocs)
-            let stoppable = ChatModel.stoppableSpan(prompt, attachedDocs)
+            let stoppable = ChatModel.stoppableSpan(made, attachedDocs)
             attachedDocs = []
+            let serial = transcriptSerial
             sendTask = Task { [weak self] in
                 await self?.sendRecalled(prompt: prompt, display: display,
                                          docs: docs, stoppable: stoppable,
-                                         stage: stage)
+                                         stage: stage, serial: serial)
                 self?.sendTask = nil
             }
         }
@@ -1923,10 +2104,10 @@ import UniformTypeIdentifiers
 
     private func sendRecalled(prompt: String, display: String,
                               docs: [DocRef], stoppable: String?,
-                              stage: Whimsical.Stage) async {
+                              stage: Whimsical.Stage, serial: Int) async {
         let recall = await session.recall(display,
                                           also: [generatedTitle ?? ""])
-        if canRunTurn {
+        if canRunTurn, serial == transcriptSerial {
             if let recall, !recall.silent {
                 let notes = zip(recall.ids, zip(recall.titles,
                                                 recall.readSeconds))
@@ -1969,33 +2150,120 @@ import UniformTypeIdentifiers
             prefillProgress = nil
         }
         if t.ctx > 0 {
-            let tokens = thinkingActive
-                ? "🤔 \(t.thinkTokens) 💬 \(t.contentTokens)"
-                : "💬 \(t.thinkTokens + t.contentTokens)"
-            statsLabel = "⇄ \(t.ctx.formatted(.number))  \(tokens) "
-                + String(format: "🐏 %.1fGB", Self.footprintGiB())
-                + " t/s: \(Session.rate(lastPP))/\(Session.rate(lastTG))"
+            statsLabel = ChatModel.statsText(
+                ctx: t.ctx, think: t.thinkTokens, content: t.contentTokens,
+                split: thinkingActive, pp: lastPP, tg: lastTG,
+                ram: Self.footprintGiB())
         }
     }
+
+    nonisolated static func statsText(ctx: Int, think: Int, content: Int,
+                                      split: Bool, pp: Double, tg: Double,
+                                      ram: Double?) -> String {
+        let tokens = split ? "🤔 \(think) 💬 \(content)"
+                           : "💬 \(think + content)"
+        let memory = ram.map { gb in String(format: "🐏 %.1fGB ", gb) } ?? ""
+        return "⇄ \(ctx.formatted(.number))  \(tokens) " + memory
+            + "t/s: \(Session.rate(pp))/\(Session.rate(tg))"
+    }
+
+    struct SavedStats: Equatable {
+        let ctx: Int
+        let think: Int
+        let content: Int
+        let pp: Double
+        let tg: Double
+        let turns: Int
+    }
+
+    nonisolated private static let splitPattern = try! NSRegularExpression(
+        pattern: "think (\\d+), content (\\d+)")
+
+    nonisolated static func savedStats(_ events: [TraceEvent]) -> SavedStats? {
+        var prefilled = (tokens: 0, seconds: 0.0)
+        var decoded = (tokens: 0, seconds: 0.0)
+        var think = 0
+        var content = 0
+        var turns = 0
+        var ctx = 0
+        for e in events {
+            let seconds = e.t1.timeIntervalSince(e.t0)
+            if e.ctx > ctx { ctx = e.ctx }
+            switch e.kind {
+            case .user:
+                turns += 1
+            case .prefill:
+                prefilled.tokens += e.tokens
+                prefilled.seconds += seconds
+            case .decode:
+                decoded.tokens += e.tokens
+                decoded.seconds += seconds
+                let split = ChatModel.split(e.summary)
+                think += split?.think ?? 0
+                content += split?.content ?? e.tokens
+            default:
+                break
+            }
+        }
+        var out: SavedStats? = nil
+        if prefilled.tokens + decoded.tokens > 0 {
+            out = SavedStats(
+                ctx: ctx, think: think, content: content,
+                pp: prefilled.seconds > 0
+                    ? Double(prefilled.tokens) / prefilled.seconds : 0,
+                tg: decoded.seconds > 0
+                    ? Double(decoded.tokens) / decoded.seconds : 0,
+                turns: turns)
+        }
+        return out
+    }
+
+    nonisolated private static func split(_ summary: String)
+        -> (think: Int, content: Int)? {
+        var out: (think: Int, content: Int)? = nil
+        let ns = summary as NSString
+        let all = NSRange(location: 0, length: ns.length)
+        if let m = splitPattern.firstMatch(in: summary, range: all),
+           let think = Int(ns.substring(with: m.range(at: 1))),
+           let content = Int(ns.substring(with: m.range(at: 2))) {
+            out = (think, content)
+        }
+        return out
+    }
+
+    nonisolated static func savedLabel(_ events: [TraceEvent]) -> String {
+        savedStats(events).map { s in
+            statsText(ctx: s.ctx, think: s.think, content: s.content,
+                      split: s.think > 0, pp: s.pp, tg: s.tg, ram: nil)
+                + (s.turns > 1 ? "  \(s.turns) turns" : "")
+        } ?? ""
+    }
+
+    var savedLabel = ""
 
     private func refreshDocs() {
         if let idx = messages.indices.last, !messages[idx].fromUser {
             Instrument.timed("refreshDocs") {
-                messages[idx].answerDoc = messages[idx].answerStream.snapshot()
-                messages[idx].reasoningDoc =
-                    messages[idx].reasoningStream.snapshot()
+                messages[idx].answerDoc = answerStream.snapshot()
+                messages[idx].reasoningDoc = reasoningStream.snapshot()
             }
         }
     }
 
+    @ObservationIgnored var titleCache: (key: TitleKey, title: String)?
+    @ObservationIgnored var settledTurns = 0
     @ObservationIgnored private var liveAnswer = ""
     @ObservationIgnored private var liveReason = ""
+    @ObservationIgnored private let answerStream = MarkdownStream()
+    @ObservationIgnored private let reasoningStream = MarkdownStream()
     @ObservationIgnored private var lastFlushNs: UInt64 = 0
     private static let flushIntervalNs: UInt64 = 100_000_000
 
     private func resetLiveBuffers() {
         liveAnswer = ""
         liveReason = ""
+        answerStream.reset()
+        reasoningStream.reset()
         lastFlushNs = 0
     }
 
@@ -2015,9 +2283,8 @@ import UniformTypeIdentifiers
 
     private func finishDocs(_ idx: Int) {
         if messages.indices.contains(idx), !messages[idx].fromUser {
-            messages[idx].answerDoc = messages[idx].answerStream.finish()
-            messages[idx].reasoningDoc =
-                messages[idx].reasoningStream.finish()
+            messages[idx].answerDoc = answerStream.finish()
+            messages[idx].reasoningDoc = reasoningStream.finish()
         }
     }
 
@@ -2137,13 +2404,14 @@ import UniformTypeIdentifiers
     var calcSampleIsInterest: Bool { modelName != Models.fallback }
 
     static let benchText = Texts.text("bench-512")
-    static let samplePicture: Data? = Bundle.main
+    nonisolated static let samplePicture: Data? = Bundle.main
         .url(forResource: "dogs-beach", withExtension: "jpg")
         .flatMap { url in try? Data(contentsOf: url) }
 
     static let sampleVideo: URL? = Bundle.main
         .url(forResource: "dogs-beach", withExtension: "mp4")
-    static let samplePictureThumb: CGImage? = samplePicture.flatMap { data in
+    nonisolated static let samplePictureThumb: CGImage? =
+        samplePicture.flatMap { data in
         VisionPreprocess.thumbnail(data, maxPx: 128)
     }
 
@@ -2151,7 +2419,7 @@ import UniformTypeIdentifiers
     static let samplePdf: URL? = Bundle.main
         .url(forResource: "harvest-report", withExtension: "pdf")
 
-    static let sampleClipThumb: CGImage? = Bundle.main
+    nonisolated static let sampleClipThumb: CGImage? = Bundle.main
         .url(forResource: "dogs-beach-poster", withExtension: "jpg")
         .flatMap { url in try? Data(contentsOf: url) }
         .flatMap { data in VisionPreprocess.thumbnail(data, maxPx: 128) }
@@ -2276,6 +2544,25 @@ import UniformTypeIdentifiers
         }
     }
 
+}
+
+final class Paced: @unchecked Sendable {
+    private let lock = NSLock()
+    private let gap: UInt64
+    private var last: UInt64 = 0
+
+    init(milliseconds: UInt64) {
+        gap = milliseconds * 1_000_000
+    }
+
+    func due(final: Bool) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        let now = DispatchTime.now().uptimeNanoseconds
+        let ready = final || now - last >= gap
+        if ready { last = now }
+        return ready
+    }
 }
 
 final class HeardSpeech: @unchecked Sendable {

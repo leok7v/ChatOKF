@@ -169,6 +169,7 @@ final class PDFRenderer {
             }
         }
         applyScriptRuns(m, from: attr)
+        applySmallRuns(m, from: attr)
         flow(m)
     }
 
@@ -191,8 +192,11 @@ final class PDFRenderer {
         let wanted = TeX.displaySize(body: bodySize)
         var result = TeX.layout(tex, size: wanted)
         if let first = result, first.width > contentWidth, first.width > 0 {
-            let fitted = wanted * contentWidth / first.width
-            result = TeX.layout(tex, size: max(fitted, wanted * 0.5))
+            let fitted = max(wanted * contentWidth / first.width,
+                             wanted * 0.5)
+            let step: CGFloat = 0.25
+            result = TeX.layout(tex, size: (fitted / step).rounded(.down)
+                                           * step)
         }
         return result
     }

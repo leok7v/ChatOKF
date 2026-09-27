@@ -48,6 +48,23 @@ func scriptRunFont(_ level: Int, base: PlatformFont)
     return (font, offset)
 }
 
+func smallRunFont(base: PlatformFont) -> PlatformFont {
+    platformResizedFont(base, to: (base.pointSize * 0.85).rounded())
+}
+
+func applySmallRuns(_ m: NSMutableAttributedString,
+                    from attr: AttributedString) {
+    for run in attr.runs {
+        let r = NSRange(run.range, in: attr)
+        if run[SmallAttribute.self] == true, r.length > 0,
+           NSMaxRange(r) <= m.length,
+           let base = m.attribute(.font, at: r.location,
+                                  effectiveRange: nil) as? PlatformFont {
+            m.addAttribute(.font, value: smallRunFont(base: base), range: r)
+        }
+    }
+}
+
 // For renderers that hand the whole string to NSAttributedString(_:),
 // which drops the custom script key on the way.
 func applyScriptRuns(_ m: NSMutableAttributedString,

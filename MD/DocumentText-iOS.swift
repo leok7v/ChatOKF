@@ -21,17 +21,26 @@ final class MathAttachment: NSTextAttachment {
 
 extension DocumentText {
 
+    private struct RasterKey: Hashable {
+        let box: ObjectIdentifier
+        let scale: CGFloat
+    }
+
+    private struct Raster {
+        let layout: MathLayout
+        let ink: CGColor
+        let image: UIImage
+    }
+
+    private static var rasters: [RasterKey: Raster] = [:]
+    private static let rasterCapacity = 32
+
     // UIKit has no attachment cell to draw through, so the formula is
     // rasterized with the ink current when the document was built.
     static func mathAttachment(_ layout: MathLayout) -> NSTextAttachment {
         let attachment = MathAttachment()
-        let scale = UIScreen.main.scale
-        if let cg = layout.cgImage(scale: scale, padding: 4,
-                                   background: nil,
-                                   color: platformDefaultTextColor.cgColor) {
-            attachment.image = UIImage(cgImage: cg, scale: scale,
-                                       orientation: .up)
-        }
+        attachment.image = raster(layout, scale: UIScreen.main.scale,
+                                  ink: platformDefaultTextColor.cgColor)
         attachment.natural = CGRect(x: 0, y: -layout.descent,
                                     width: layout.width + 8,
                                     height: layout.height)
@@ -39,55 +48,64 @@ extension DocumentText {
         return attachment
     }
 
-    private static var columnGap: CGFloat { 10 }
-
-    static func tableMinimumWidth(headers: [String], rows: [[String]],
-                                  style: MarkdownStyle) -> CGFloat {
-        var result: CGFloat = 0
-        let cols = max(headers.count, rows.map { r in r.count }.max() ?? 0)
-        if cols > 0 {
-            let mins = columnMinimums(headers: headers, rows: rows,
-                                      cols: cols, style: style)
-            result = ceil(mins.reduce(0, +)) + CGFloat(cols) * columnGap
+    private static func raster(_ layout: MathLayout, scale: CGFloat,
+                               ink: CGColor) -> UIImage? {
+        let key = RasterKey(box: ObjectIdentifier(layout.box), scale: scale)
+        var result: UIImage? = nil
+        if let hit = rasters[key], hit.layout.box === layout.box,
+           CFEqual(hit.ink, ink) {
+            result = hit.image
+        } else if let cg = layout.cgImage(scale: scale, padding: 4,
+                                          background: nil, color: ink) {
+            let image = UIImage(cgImage: cg, scale: scale, orientation: .up)
+            if rasters.count >= rasterCapacity { rasters.removeAll() }
+            rasters[key] = Raster(layout: layout, ink: ink, image: image)
+            result = image
         }
         return result
     }
 
-    static func table(headers: [String], rows: [[String]],
-                      alignments: [Markdown.Alignment], style: MarkdownStyle,
-                      images: [URL: PlatformImage],
+    private static var columnGap: CGFloat { 10 }
+
+    static var tableUsesNaturals: Bool { true }
+
+    static func tableMinimumWidth(_ cells: TableCells) -> CGFloat {
+        var result: CGFloat = 0
+        if cells.cols > 0 {
+            result = ceil(cells.minimums.reduce(0, +))
+                + CGFloat(cells.cols) * columnGap
+        }
+        return result
+    }
+
+    static func table(_ cells: TableCells,
+                      alignments: [Markdown.Alignment], id: String,
+                      style: MarkdownStyle,
                       width: CGFloat) -> NSAttributedString {
         let m = NSMutableAttributedString()
-        let cols = max(headers.count, rows.map { r in r.count }.max() ?? 0)
-        if cols > 0 {
-            let atomicId = UUID().uuidString
-            let natural = columnNaturals(headers: headers, rows: rows,
-                                         cols: cols, style: style)
-                .map { w in w + columnGap }
-            let minimums = columnMinimums(headers: headers, rows: rows,
-                                          cols: cols, style: style)
-                .map { w in w + columnGap }
+        if cells.cols > 0 {
+            let atomicId = id
+            let natural = cells.naturals.map { w in w + columnGap }
+            let minimums = cells.minimums.map { w in w + columnGap }
             let room = width > 0 ? width : natural.reduce(0, +)
             let widths = TableMetrics.scrollingLayout(
-                headers: headers, rows: rows, natural: natural,
+                headers: cells.headers, rows: cells.rows, natural: natural,
                 minimums: minimums, available: room).widths
             let texts = widths.map { w in max(w - columnGap, 1) }
             let stops = tabStops(widths: widths, texts: texts,
                                  alignments: alignments)
-            if !headers.isEmpty {
-                m.append(tableRow(headers, stops: stops, texts: texts,
+            if !cells.header.isEmpty {
+                m.append(tableRow(cells.header, stops: stops, texts: texts,
                                   bold: true,
                                   tint: platformWhite(0.5, alpha: 0.14),
-                                  atomicId: atomicId, style: style,
-                                  images: images))
+                                  atomicId: atomicId, style: style))
             }
-            for (idx, row) in rows.enumerated() {
+            for (idx, row) in cells.body.enumerated() {
                 let tint: PlatformColor = idx % 2 == 1
                     ? platformWhite(0.5, alpha: 0.07) : platformClearColor
                 m.append(tableRow(row, stops: stops, texts: texts,
                                   bold: false, tint: tint,
-                                  atomicId: atomicId, style: style,
-                                  images: images))
+                                  atomicId: atomicId, style: style))
             }
             // One CONTIGUOUS atomic id over the whole table content so the copy
             // grouping is ONE block.
@@ -95,7 +113,8 @@ extension DocumentText {
             m.addAttribute(atomicIdKey, value: atomicId, range: content)
             m.addAttribute(atomicCopyKey,
                            value: TableMetrics.serializeMonospaced(
-                               headers: headers, rows: rows),
+                               headers: cells.headers, rows: cells.rows,
+                               alignments: alignments),
                            range: content)
             m.append(NSAttributedString(string: "\n"))
         }
@@ -120,19 +139,17 @@ extension DocumentText {
         return out
     }
 
-    private static func tableRow(_ cells: [String], stops: [NSTextTab],
+    private static func tableRow(_ cells: [TableCell], stops: [NSTextTab],
                                  texts: [CGFloat], bold: Bool,
                                  tint: PlatformColor,
-                                 atomicId: String, style: MarkdownStyle,
-                                 images: [URL: PlatformImage])
+                                 atomicId: String, style: MarkdownStyle)
         -> NSAttributedString {
         let para = NSMutableParagraphStyle()
         para.tabStops = stops
         para.lineBreakMode = .byWordWrapping
         let base = bold ? boldFont(of: bodyFont(style)) : bodyFont(style)
         let columns = cells.enumerated().map { pair in
-            wrapCell(tableCell(pair.element, base: base, style: style,
-                               images: images),
+            wrapCell(pair.element.text,
                      width: pair.offset < texts.count ? texts[pair.offset] : 1)
         }
         let m = NSMutableAttributedString()

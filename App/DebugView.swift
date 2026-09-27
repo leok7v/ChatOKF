@@ -114,9 +114,14 @@ struct DebugView: View {
         }
         .appFont(.caption2)
         .padding(8)
+        .task(id: model.traceEvents.count) {
+            sizes = await DebugView.measured([model.tracePath,
+                                              model.diagPath])
+        }
     }
 
     @State private var copied: String?
+    @State private var sizes: [String: String] = [:]
 
     private func logButton(_ label: String, _ path: String) -> some View {
         Button { copyLog(path) } label: {
@@ -124,7 +129,7 @@ struct DebugView: View {
                 Image(systemName: copied == path
                       ? "checkmark" : "doc.on.doc")
                 Text("\(label): \(DebugView.folder(path)) "
-                     + "(\(DebugView.size(path)))")
+                     + "(\(sizes[path] ?? ""))")
             }
             .contentShape(Rectangle())
         }
@@ -134,10 +139,9 @@ struct DebugView: View {
     }
 
     private func copyLog(_ path: String) {
-        let text = (try? String(contentsOfFile: path, encoding: .utf8)) ?? ""
-        setClipboard(text)
-        copied = path
         Task { @MainActor in
+            setClipboard(await DebugView.contents(path))
+            copied = path
             try? await Task.sleep(for: .milliseconds(1200))
             if copied == path { copied = nil }
         }
@@ -148,7 +152,24 @@ struct DebugView: View {
             .lastPathComponent
     }
 
-    private static func size(_ path: String) -> String {
+    nonisolated private static func contents(_ path: String) async -> String {
+        await Task.detached {
+            (try? String(contentsOfFile: path, encoding: .utf8)) ?? ""
+        }.value
+    }
+
+    nonisolated private static func measured(_ paths: [String]) async
+        -> [String: String] {
+        await Task.detached {
+            var out: [String: String] = [:]
+            for path in paths where !path.isEmpty {
+                out[path] = DebugView.size(path)
+            }
+            return out
+        }.value
+    }
+
+    nonisolated private static func size(_ path: String) -> String {
         let attrs = try? FileManager.default.attributesOfItem(atPath: path)
         let bytes = (attrs?[.size] as? Int64) ?? 0
         return ByteCountFormatter.string(fromByteCount: bytes,
@@ -199,25 +220,31 @@ private struct TraceGraph: View {
         }
     }
 
-    private var span: (start: Date, seconds: Double) {
+    private struct Axes {
+        let start: Date
+        let seconds: Double
+        let maxCtx: Int
+        let maxRate: Double
+    }
+
+    private var axes: Axes {
         let start = events.first?.t1 ?? Date()
         let end = events.last?.t1 ?? start
-        return (start, max(end.timeIntervalSince(start), 1))
+        return Axes(
+            start: start, seconds: max(end.timeIntervalSince(start), 1),
+            maxCtx: max(events.map { e in e.ctx }.max() ?? 1, 1),
+            maxRate: max(events.map { e in TraceGraph.rate(e) }.max() ?? 1,
+                         1))
     }
 
-    private var maxCtx: Int {
-        max(events.map { e in e.ctx }.max() ?? 1, 1)
-    }
-
-    private func x(_ t: Date, _ w: CGFloat) -> CGFloat {
-        let s = span
-        let f = t.timeIntervalSince(s.start) / s.seconds
+    private func x(_ t: Date, _ w: CGFloat, _ a: Axes) -> CGFloat {
+        let f = t.timeIntervalSince(a.start) / a.seconds
         return TraceGraph.pad + CGFloat(f) * (w - 2 * TraceGraph.pad)
     }
 
-    private func y(_ ctx: Int, _ h: CGFloat) -> CGFloat {
+    private func y(_ ctx: Int, _ h: CGFloat, _ a: Axes) -> CGFloat {
         let markerLane = 24.0
-        let f = CGFloat(ctx) / CGFloat(maxCtx)
+        let f = CGFloat(ctx) / CGFloat(a.maxCtx)
         return h - TraceGraph.pad
             - f * (h - markerLane - 2 * TraceGraph.pad)
     }
@@ -239,18 +266,14 @@ private struct TraceGraph: View {
             ? Double(e.tokens) / dur : 0
     }
 
-    private var maxRate: Double {
-        max(events.map { e in TraceGraph.rate(e) }.max() ?? 1, 1)
-    }
-
     private func draw(_ ctx: inout GraphicsContext, _ size: CGSize) {
         var line = Path()
         var lastY: CGFloat? = nil
-        let rateTop = maxRate
+        let a = axes
         for e in events {
-            let ex = x(e.t1, size.width)
+            let ex = x(e.t1, size.width, a)
             if e.ctx >= 0 {
-                let ey = y(e.ctx, size.height)
+                let ey = y(e.ctx, size.height, a)
                 if let ly = lastY {
                     line.addLine(to: CGPoint(x: ex, y: ly))
                     line.addLine(to: CGPoint(x: ex, y: ey))
@@ -268,7 +291,8 @@ private struct TraceGraph: View {
             }
             let r = TraceGraph.rate(e)
             if r > 0 {
-                let ry = y(Int(r / rateTop * Double(maxCtx)), size.height)
+                let ry = y(Int(r / a.maxRate * Double(a.maxCtx)),
+                           size.height, a)
                 let box = CGRect(x: ex - 2.5, y: ry - 2.5,
                                  width: 5, height: 5)
                 if e.kind == .decode {
@@ -288,18 +312,19 @@ private struct TraceGraph: View {
         }
         ctx.stroke(line, with: .color(.blue), lineWidth: 1.5)
         let label = appTextFont(.caption2, textScale)
-        ctx.draw(Text("ctx \(maxCtx)")
+        ctx.draw(Text("ctx \(a.maxCtx)")
                      .font(label).foregroundStyle(.secondary),
                  at: CGPoint(x: size.width - 34, y: 8))
-        ctx.draw(Text(String(format: "%.0f t/s", maxRate))
+        ctx.draw(Text(String(format: "%.0f t/s", a.maxRate))
                      .font(label).foregroundStyle(.green.opacity(0.7)),
                  at: CGPoint(x: size.width - 34, y: 22))
     }
 
     private func nearest(_ tapX: CGFloat, _ size: CGSize) -> TraceEvent? {
         var best: (e: TraceEvent, d: CGFloat)? = nil
+        let a = axes
         for e in events {
-            var d = abs(x(e.t1, size.width) - tapX)
+            var d = abs(x(e.t1, size.width, a) - tapX)
             if TraceGraph.markerColor(e.kind) != nil || e.kind == .user {
                 d -= 6
             }

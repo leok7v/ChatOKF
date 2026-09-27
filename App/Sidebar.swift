@@ -55,6 +55,7 @@ struct Sidebar: View {
     @State private var armedDelete: String?
     @State private var disarmTask: Task<Void, Never>?
     @State private var query = ""
+    @State private var asked = ""
     @State private var showingTrash = false
     @State private var armedEmpty = false
     @State private var chosen: SidebarTab = .chats
@@ -62,10 +63,27 @@ struct Sidebar: View {
     @State private var exportFile: ExportFile?
     @State private var showExporter = false
     @State private var exportName = "Conversation"
+    @State private var built: (key: SectionKey, items: [SidebarSection])?
+
+    private struct SectionKey: Equatable {
+        let asked: String
+        let trash: Bool
+        let tab: SidebarTab
+        let chats: Int
+        let memories: Int
+        let current: UUID?
+    }
+
+    private var sectionKey: SectionKey {
+        SectionKey(asked: asked, trash: showingTrash, tab: tab,
+                   chats: ConversationStore.shared.revision,
+                   memories: model.memoryRevision,
+                   current: model.currentConversationId)
+    }
 
     private var tab: SidebarTab { model.memoriesOn ? chosen : .chats }
 
-    private var searching: Bool { ConversationSearch.active(query) }
+    private var searching: Bool { ConversationSearch.active(asked) }
 
     private var flat: Bool { searching || showingTrash }
 
@@ -80,7 +98,9 @@ struct Sidebar: View {
     }
 
     var body: some View {
-        let items = sections
+        let key = sectionKey
+        let settled = built?.key == key
+        let items = settled ? built?.items ?? [] : []
         return VStack(spacing: 0) {
             closeRow
             newChatRow
@@ -88,11 +108,15 @@ struct Sidebar: View {
             if showingTrash {
                 trashHeader
                 Divider()
-                if items.isEmpty { emptyTrash } else { history(items) }
+                if items.isEmpty && settled {
+                    emptyTrash
+                } else {
+                    history(items)
+                }
             } else if hasItems {
                 searchField
                 Divider()
-                if items.isEmpty {
+                if items.isEmpty && settled {
                     noMatches
                 } else {
                     history(items)
@@ -104,6 +128,7 @@ struct Sidebar: View {
             trashRow
             footer
         }
+        .task(id: key) { built = (key, sections) }
         .fileExporter(isPresented: $showExporter, document: exportFile,
                       contentType: .pdf,
                       defaultFilename: exportName) { _ in }
@@ -127,6 +152,7 @@ struct Sidebar: View {
             .padding(.bottom, 4)
             .onChange(of: chosen) { _, _ in
                 query = ""
+                asked = ""
                 showingTrash = false
                 armedDelete = nil
                 armedEmpty = false
@@ -143,7 +169,7 @@ struct Sidebar: View {
         let items = showingTrash
             ? store.trashed
             : (searching ? ConversationSearch.rank(store.list, store.words,
-                                                   query)
+                                                   asked)
                          : store.list)
         var out: [SidebarSection] = []
         if flat {
@@ -161,7 +187,7 @@ struct Sidebar: View {
     private var memorySections: [SidebarSection] {
         let items = showingTrash
             ? model.memoryTrash
-            : (searching ? MemorySearch.rank(model.memoryList, query)
+            : (searching ? MemorySearch.rank(model.memoryList, asked)
                          : model.memoryList)
         var out: [SidebarSection] = []
         if flat {
@@ -178,7 +204,7 @@ struct Sidebar: View {
 
     private func chatRow(_ convo: ConversationStore.Convo) -> SidebarRow {
         let reason = searching
-            ? ConversationSearch.reason(convo, query) : nil
+            ? ConversationSearch.reason(convo, asked) : nil
         return SidebarRow(id: convo.id.uuidString, title: convo.title,
                           subtitle: reason ?? Sidebar.when(convo.updated),
                           detail: "", marked: false,
@@ -340,7 +366,7 @@ struct Sidebar: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .disabled(model.busy)
+        .disabled(model.locked)
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
     }
@@ -361,12 +387,18 @@ struct Sidebar: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
+        .task(id: query) { await settle() }
+    }
+
+    private func settle() async {
+        try? await Task.sleep(for: .milliseconds(150))
+        if !Task.isCancelled { asked = query }
     }
 
     private var noMatches: some View {
         VStack(spacing: 6) {
             Text("No matches").foregroundStyle(.secondary)
-            Text("for \u{201C}\(query)\u{201D}")
+            Text("for \u{201C}\(asked)\u{201D}")
                 .appFont(.caption)
                 .foregroundStyle(.tertiary)
                 .lineLimit(1)
@@ -408,6 +440,24 @@ struct Sidebar: View {
             .listRowBackground(Color.clear)
             .listRowInsets(rowInsets)
             .deleteDisabled(blocked(row))
+            .swipeActions(edge: .leading, allowsFullSwipe: true) {
+                if showingTrash {
+                    Button { putBack(row) } label: {
+                        Label("Put Back", systemImage: "arrow.uturn.backward")
+                    }
+                    .tint(.blue)
+                }
+            }
+    }
+
+    private func putBack(_ row: SidebarRow) {
+        if tab == .chats {
+            if let uuid = UUID(uuidString: row.id) {
+                model.restoreConversation(uuid)
+            }
+        } else {
+            model.restoreMemory(row.id)
+        }
     }
 
     private func blocked(_ row: SidebarRow) -> Bool {
@@ -418,7 +468,7 @@ struct Sidebar: View {
         HStack(spacing: 6) {
             Button { armedDelete = nil; open(row) } label: { label(row) }
                 .buttonStyle(.plain)
-                .disabled(model.busy)
+                .disabled(model.locked)
                 .help(rowHelp)
             // The armed capsule confirms BOTH the trash button and the
             // context menu, so it is not macOS-only like the trash button.
@@ -487,12 +537,10 @@ struct Sidebar: View {
     @ViewBuilder
     private func chatMenu(_ row: SidebarRow) -> some View {
         if showingTrash {
-            if let convo = Sidebar.convo(row.id) {
-                Button { model.restoreConversation(convo.id) } label: {
-                    Label("Restore", systemImage: "arrow.uturn.backward")
-                }
-                Divider()
+            Button { putBack(row) } label: {
+                Label("Put Back", systemImage: "arrow.uturn.backward")
             }
+            Divider()
             Button(role: .destructive) { requestDelete(row) } label: {
                 Label("Delete Forever", systemImage: "trash")
             }
@@ -501,7 +549,8 @@ struct Sidebar: View {
                 Button { onRename(convo) } label: {
                     Label("Rename\u{2026}", systemImage: "pencil")
                 }
-                ShareLink(item: ConversationPDF(convo: convo),
+                ShareLink(item: ConversationPDF(id: convo.id,
+                                                title: convo.title),
                           preview: SharePreview(convo.title)) {
                     Label("Share PDF", systemImage: "square.and.arrow.up")
                 }
@@ -523,8 +572,8 @@ struct Sidebar: View {
     @ViewBuilder
     private func memoryMenu(_ row: SidebarRow) -> some View {
         if showingTrash {
-            Button { model.restoreMemory(row.id) } label: {
-                Label("Restore", systemImage: "arrow.uturn.backward")
+            Button { putBack(row) } label: {
+                Label("Put Back", systemImage: "arrow.uturn.backward")
             }
             Divider()
             Button(role: .destructive) { requestDelete(row) } label: {
@@ -548,7 +597,8 @@ struct Sidebar: View {
     static func convo(_ id: String) -> ConversationStore.Convo? {
         let store = ConversationStore.shared
         let uuid = UUID(uuidString: id)
-        return (store.list + store.trashed).first { c in c.id == uuid }
+        return store.list.first { c in c.id == uuid }
+            ?? store.trashed.first { c in c.id == uuid }
     }
 
     static func sourceChat(_ model: ChatModel, _ id: String) -> UUID? {
@@ -564,13 +614,11 @@ struct Sidebar: View {
     }
 
     private func save(_ convo: ConversationStore.Convo) {
-        var ready = convo
-        if convo.id == model.currentConversationId {
-            model.commitCurrent()
-            ready = ConversationStore.shared.load(convo.id) ?? convo
-        }
-        exportName = ConversationExport.filename(ready.title)
+        if convo.id == model.currentConversationId { model.commitCurrent() }
         Task { @MainActor in
+            await ConversationStore.shared.settled()
+            let ready = await ConversationStore.shared.load(convo.id) ?? convo
+            exportName = ConversationExport.filename(ready.title)
             if let data = await ConversationExport.pdf(ready) {
                 exportFile = ExportFile(data: data)
                 showExporter = true
@@ -596,7 +644,7 @@ struct Sidebar: View {
 
     private var rowHelp: String {
         let what = tab == .chats ? "Open this conversation" : "Read this note"
-        return model.busy ? "Available once this turn has finished" : what
+        return model.locked ? "Available once this turn has finished" : what
     }
 
     private func requestDelete(_ row: SidebarRow) {
@@ -721,9 +769,10 @@ struct Sidebar: View {
         .padding(.bottom, 16)
     }
 
+    private static let relative = RelativeDateTimeFormatter()
+
     static func when(_ date: Date) -> String {
-        let f = RelativeDateTimeFormatter()
-        return f.localizedString(for: date, relativeTo: Date())
+        Sidebar.relative.localizedString(for: date, relativeTo: Date())
     }
 
 }
