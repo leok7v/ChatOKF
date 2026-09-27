@@ -7,29 +7,31 @@ import CoreGraphics
 public enum MarkdownPDF {
 
     public static func data(_ document: Markdown.Document, title: String,
-                            images: [URL: CGImage] = [:]) -> Data? {
+                            images: [URL: CGImage] = [:],
+                            credit: Markdown.Credit? = nil) -> Data? {
         var result: Data? = nil
         let body = {
             result = PdfWriter.data(
                 blocks: document.items.map { i in i.block },
-                title: title, images: images)
+                title: title, images: images, credit: credit)
         }
         platformPerformLightAppearance(body)
         return result
     }
 
-    public static func export(_ document: Markdown.Document,
-                              title: String) async -> Data? {
+    public static func export(_ document: Markdown.Document, title: String,
+                              credit: Markdown.Credit? = nil) async -> Data? {
         let images = await ImagePrefetch.fetchAndDecode(
             in: document, decode: { d in platformDecodeCGImage(d) })
-        return data(document, title: title, images: images)
+        return data(document, title: title, images: images, credit: credit)
     }
 }
 
 enum PdfWriter {
 
     static func data(blocks: [Markdown.Block], title: String,
-                     images: [URL: CGImage]) -> Data? {
+                     images: [URL: CGImage],
+                     credit: Markdown.Credit? = nil) -> Data? {
         var result: Data? = nil
         let buffer = NSMutableData()
         let pageSize = paperSize()
@@ -37,7 +39,7 @@ enum PdfWriter {
         if let consumer = CGDataConsumer(data: buffer),
            let ctx = CGContext(consumer: consumer, mediaBox: &media, nil) {
             let r = PDFRenderer(ctx: ctx, pageSize: pageSize, title: title,
-                                images: images)
+                                images: images, credit: credit)
             r.startPage()
             for block in blocks { r.draw(block) }
             r.endPage()
@@ -64,6 +66,7 @@ final class PDFRenderer {
     let pageSize: CGSize
     let title: String
     let images: [URL: CGImage]
+    let credit: Markdown.Credit?
     let margin: CGFloat = 54
     let headerH: CGFloat = 28
     let footerH: CGFloat = 28
@@ -75,11 +78,12 @@ final class PDFRenderer {
     var listIndent: CGFloat = 0
 
     init(ctx: CGContext, pageSize: CGSize, title: String,
-         images: [URL: CGImage]) {
+         images: [URL: CGImage], credit: Markdown.Credit? = nil) {
         self.ctx = ctx
         self.pageSize = pageSize
         self.title = title
         self.images = images
+        self.credit = credit
     }
 
     var contentLeft: CGFloat { margin + listIndent }
@@ -421,13 +425,34 @@ final class PDFRenderer {
     }
 
     private func drawFooter() {
-        let attr = NSAttributedString(string: "\(pageNumber)", attributes: [
-            .font: smallFont(), .foregroundColor: secondaryColor])
-        let line = CTLineCreateWithAttributedString(attr)
-        let bounds = CTLineGetBoundsWithOptions(line, [])
-        ctx.textPosition = CGPoint(x: (pageSize.width - bounds.width) / 2,
-                                   y: margin + 6)
-        CTLineDraw(line, ctx)
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: smallFont(), .foregroundColor: secondaryColor]
+        let number = CTLineCreateWithAttributedString(NSAttributedString(
+            string: "\(pageNumber)", attributes: attrs))
+        let numberWidth = CTLineGetBoundsWithOptions(number, []).width
+        let baseline = margin + 6
+        var x = (pageSize.width - numberWidth) / 2
+        if let credit {
+            let link = CTLineCreateWithAttributedString(NSAttributedString(
+                string: credit.text + "   \u{00B7}   ", attributes: attrs))
+            let label = CTLineCreateWithAttributedString(NSAttributedString(
+                string: credit.text, attributes: attrs))
+            let linkWidth = CTLineGetBoundsWithOptions(link, []).width
+            var ascent: CGFloat = 0
+            var descent: CGFloat = 0
+            let labelWidth = CGFloat(CTLineGetTypographicBounds(
+                label, &ascent, &descent, nil))
+            x = (pageSize.width - linkWidth - numberWidth) / 2
+            ctx.textPosition = CGPoint(x: x, y: baseline)
+            CTLineDraw(link, ctx)
+            ctx.setURL(credit.url as CFURL,
+                       for: CGRect(x: x, y: baseline - descent,
+                                   width: labelWidth,
+                                   height: ascent + descent))
+            x += linkWidth
+        }
+        ctx.textPosition = CGPoint(x: x, y: baseline)
+        CTLineDraw(number, ctx)
     }
 
     func bodyFont() -> CTFont {

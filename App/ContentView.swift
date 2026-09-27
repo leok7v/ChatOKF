@@ -1156,7 +1156,9 @@ struct ContentView: View {
                 // round raises `prefilling` again and would blink it away.
                 if let answer = answerText(m) {
                     answerBubble(m, answer, cold: cold)
-                    if !m.fromUser, !isLive(m) {
+                    if m.fromUser {
+                        PromptCopy(text: answer)
+                    } else if !isLive(m) {
                         AnswerActions(text: answer, title: title)
                     }
                 } else if !m.fromUser, isPrefilling(m) {

@@ -64,12 +64,45 @@ struct AnswerActions: View {
         rendering = true
         Task { @MainActor in
             let data = await MarkdownPDF.export(
-                ConversationExport.document(text: text), title: title)
+                ConversationExport.document(text: text), title: title,
+                credit: ConversationExport.credit)
             rendering = false
             if let data, !data.isEmpty {
                 exportFile = ExportFile(data: data)
                 exporting = true
             }
+        }
+    }
+
+}
+
+struct PromptCopy: View {
+
+    let text: String
+
+    @State private var copied = false
+    @State private var copiedReset: Task<Void, Never>?
+    @ScaledMetric(relativeTo: .body) private var slot: CGFloat = 26
+
+    var body: some View {
+        Button(action: copy) {
+            Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                .frame(width: slot, height: slot)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .appFont(.caption)
+        .foregroundStyle(.secondary)
+        .help("Copy this message")
+    }
+
+    private func copy() {
+        copiedReset?.cancel()
+        setClipboard(text)
+        copied = true
+        copiedReset = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(1.2))
+            if !Task.isCancelled { copied = false }
         }
     }
 

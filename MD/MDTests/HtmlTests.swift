@@ -127,4 +127,22 @@ final class HtmlTests: XCTestCase {
                        "one  \ntwo with small and under.\n")
     }
 
+    func testACreditIsALinkInTheHtmlAndOnEveryPdfPage() throws {
+        let credit = Markdown.Credit(
+            text: "Built with Chat\u{1D52}\u{1D4F}F",
+            url: try XCTUnwrap(URL(string: "https://leok7v.github.io/ChatOKF/")))
+        let doc = Markdown.parse("A line.")
+        let html = Markdown.html(doc, title: "t", credit: credit)
+        XCTAssertTrue(html.contains("<a href=\"https://leok7v.github.io/"
+                                    + "ChatOKF/\">Built with Chat"))
+        XCTAssertFalse(Markdown.html(doc, title: "t").contains("Built with"))
+        let pdf = try XCTUnwrap(MarkdownPDF.data(doc, title: "t",
+                                                 credit: credit))
+        let raw = String(decoding: pdf, as: UTF8.self)
+        XCTAssertTrue(raw.contains("leok7v.github.io/ChatOKF"))
+        let plain = try XCTUnwrap(MarkdownPDF.data(doc, title: "t"))
+        XCTAssertFalse(String(decoding: plain, as: UTF8.self)
+            .contains("leok7v.github.io"))
+    }
+
 }

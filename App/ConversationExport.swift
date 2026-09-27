@@ -31,13 +31,17 @@ enum ConversationExport {
 
     static let reasoningKey = "exportReasoning"
 
+    static let credit = Markdown.Credit(
+        text: "Built with Chat\u{1D52}\u{1D4F}F",
+        url: URL(string: "https://leok7v.github.io/ChatOKF/")!)
+
     static var includesReasoning: Bool {
         UserDefaults.standard.bool(forKey: reasoningKey)
     }
 
     static func block(fromUser: Bool, text: String,
                       reasoning: String) -> String {
-        var out = fromUser ? "**You**\n\n" : "**ChatOKF**\n\n"
+        var out = fromUser ? "**You**\n\n" : "**Chat\u{1D52}\u{1D4F}F**\n\n"
         if !fromUser, includesReasoning, !reasoning.isEmpty {
             out += "_Thoughts_\n\n"
             for line in reasoning.split(separator: "\n",
@@ -130,7 +134,7 @@ enum ConversationExport {
             if let cg = VisionPreprocess.image(data) { decoded[url] = cg }
         }
         return MarkdownPDF.data(document(convo), title: convo.title,
-                                images: decoded)
+                                images: decoded, credit: credit)
     }
 
     static func document(text: String) -> Markdown.Document {
@@ -144,9 +148,11 @@ enum ConversationExport {
         let document = document(messages: messages)
         var out: Data? = nil
         if type == .pdf {
-            out = await MarkdownPDF.export(document, title: title)
+            out = await MarkdownPDF.export(document, title: title,
+                                           credit: credit)
         } else {
-            let html = await Markdown.htmlPrefetching(document, title: title)
+            let html = await Markdown.htmlPrefetching(document, title: title,
+                                                      credit: credit)
             out = Data(html.utf8)
         }
         return out
@@ -169,7 +175,7 @@ enum ConversationExport {
 
     static func pdfFile(text: String, title: String) async throws -> URL {
         try written(await MarkdownPDF.export(document(text: text),
-                                             title: title),
+                                             title: title, credit: credit),
                     folder: "Answers", name: filename(title) + ".pdf")
     }
 

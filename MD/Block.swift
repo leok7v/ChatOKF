@@ -53,4 +53,14 @@ public enum Markdown {
 
         public static let empty = Document(items: [])
     }
+
+    public struct Credit: Equatable, Sendable {
+        public let text: String
+        public let url: URL
+
+        public init(text: String, url: URL) {
+            self.text = text
+            self.url = url
+        }
+    }
 }

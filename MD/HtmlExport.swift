@@ -5,27 +5,35 @@ import Foundation
 extension Markdown {
 
     public static func html(_ document: Document, title: String,
-                            images: [URL: Data] = [:]) -> String {
+                            images: [URL: Data] = [:],
+                            credit: Credit? = nil) -> String {
         HtmlExport.render(document.items.map { i in i.block },
-                          title: title, images: images)
+                          title: title, images: images, credit: credit)
     }
 
-    public static func htmlPrefetching(_ document: Document,
-                                       title: String) async -> String {
+    public static func htmlPrefetching(_ document: Document, title: String,
+                                       credit: Credit? = nil) async
+        -> String {
         let images = await MarkdownImages.fetch(document)
-        return html(document, title: title, images: images)
+        return html(document, title: title, images: images, credit: credit)
     }
 }
 
 enum HtmlExport {
 
     static func render(_ blocks: [Markdown.Block], title: String,
-                       images: [URL: Data]) -> String {
+                       images: [URL: Data],
+                       credit: Markdown.Credit? = nil) -> String {
         var head = "<!DOCTYPE html>\n<html>\n<head>\n"
         head += "<meta charset=\"utf-8\">\n"
         head += "<title>\(esc(title))</title>\n</head>\n<body>\n"
         var body = ""
         for block in blocks { body += renderBlock(block, images: images) }
+        if let credit {
+            body += "<p style=\"\(creditStyle)\"><a href=\""
+                + "\(escAttr(credit.url.absoluteString))\">"
+                + "\(esc(credit.text))</a></p>\n"
+        }
         return head + body + "</body>\n</html>\n"
     }
 
@@ -298,6 +306,8 @@ enum HtmlExport {
     private static let rowShadeStyle = "background:rgba(128,128,128,0.07);"
     private static let listStyleTight = "margin:0.2em 0;padding-left:1.5em;"
     private static let listStyleLoose = "margin:0.5em 0;padding-left:1.5em;"
+    private static let creditStyle =
+        "margin:2.5em 0 0;font-size:0.8em;text-align:center;opacity:0.7;"
     private static let imagePlaceholderStyle =
         "color:rgba(128,128,128,0.7);font-style:italic;"
 }
