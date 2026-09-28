@@ -154,27 +154,81 @@ final class PDFRenderer {
     // key that NSAttributedString(_:) drops.
     private func drawText(_ attr: AttributedString, font: CTFont,
                           color: CGColor) {
-        let m = NSMutableAttributedString(
-            attributedString: NSAttributedString(attr))
-        let full = NSRange(location: 0, length: m.length)
-        m.enumerateAttribute(.font, in: full, options: []) { v, range, _ in
-            if v == nil {
-                m.addAttribute(.font, value: font, range: range)
-            } else if let existing = v as? PlatformFont {
-                let sized = platformResizedFont(existing,
-                                                to: CTFontGetSize(font))
-                m.addAttribute(.font, value: sized, range: range)
+        flow(styled(attr, base: font, color: color))
+    }
+
+    func styled(_ attr: AttributedString, base: CTFont,
+                color: CGColor) -> NSMutableAttributedString {
+        let m = NSMutableAttributedString()
+        for run in attr.runs {
+            let intent = run.inlinePresentationIntent ?? []
+            var attrs: [NSAttributedString.Key: Any] = [
+                .font: inlineFont(intent, base: base),
+                .foregroundColor: color,
+            ]
+            if intent.contains(.strikethrough) {
+                attrs[.strikethroughStyle] = NSUnderlineStyle.single.rawValue
+                attrs[.strikethroughColor] = color
             }
-        }
-        m.enumerateAttribute(.foregroundColor, in: full,
-                             options: []) { v, range, _ in
-            if v == nil {
-                m.addAttribute(.foregroundColor, value: color, range: range)
+            if run.underlineStyle != nil {
+                attrs[.underlineStyle] = NSUnderlineStyle.single.rawValue
+                attrs[.underlineColor] = color
             }
+            if let url = run.link, HtmlExport.safeLink(url) {
+                attrs[.link] = url
+                attrs[.foregroundColor] = linkColor
+            }
+            m.append(NSAttributedString(
+                string: String(attr[run.range].characters),
+                attributes: attrs))
         }
         applyScriptRuns(m, from: attr)
         applySmallRuns(m, from: attr)
-        flow(m)
+        return m
+    }
+
+    private func inlineFont(_ intent: InlinePresentationIntent,
+                            base: CTFont) -> CTFont {
+        let size = CTFontGetSize(base)
+        var traits: CTFontSymbolicTraits = []
+        if intent.contains(.stronglyEmphasized) { traits.insert(.traitBold) }
+        if intent.contains(.emphasized) { traits.insert(.traitItalic) }
+        var result = base
+        if intent.contains(.code) {
+            result = CTFontCreateWithName("Menlo" as CFString, size * 0.92,
+                                          nil)
+        } else if !traits.isEmpty {
+            result = CTFontCreateCopyWithSymbolicTraits(
+                base, size, nil, traits, traits) ?? base
+        }
+        return result
+    }
+
+    private func annotateLinks(_ frame: CTFrame, in rect: CGRect) {
+        let lines = CTFrameGetLines(frame) as? [CTLine] ?? []
+        var origins = [CGPoint](repeating: .zero, count: lines.count)
+        CTFrameGetLineOrigins(frame, CFRange(location: 0, length: 0),
+                              &origins)
+        for (i, line) in lines.enumerated() {
+            for run in CTLineGetGlyphRuns(line) as? [CTRun] ?? [] {
+                let found = (CTRunGetAttributes(run) as NSDictionary)
+                    .object(forKey: NSAttributedString.Key.link)
+                if let url = found as? URL {
+                    let range = CTRunGetStringRange(run)
+                    let x = CTLineGetOffsetForStringIndex(line,
+                                                          range.location, nil)
+                    var ascent: CGFloat = 0
+                    var descent: CGFloat = 0
+                    let width = CGFloat(CTRunGetTypographicBounds(
+                        run, CFRange(location: 0, length: 0),
+                        &ascent, &descent, nil))
+                    ctx.setURL(url as CFURL, for: CGRect(
+                        x: rect.minX + origins[i].x + x,
+                        y: rect.minY + origins[i].y - descent,
+                        width: width, height: ascent + descent))
+                }
+            }
+        }
     }
 
     // Centred while it fits, shrunk to the column rather than clipped when
@@ -223,6 +277,7 @@ final class PDFRenderer {
                 } else {
                     let used = lineHeightUsed(frame: frame, in: rect)
                     CTFrameDraw(frame, ctx)
+                    annotateLinks(frame, in: rect)
                     y -= used
                     consumed = visible.location + visible.length
                     if consumed < attr.length { newPage() }
@@ -481,6 +536,9 @@ final class PDFRenderer {
 
     var textColor: CGColor {
         CGColor(srgbRed: 0.10, green: 0.10, blue: 0.12, alpha: 1.0)
+    }
+    var linkColor: CGColor {
+        CGColor(srgbRed: 0.0, green: 0.36, blue: 0.80, alpha: 1.0)
     }
     var secondaryColor: CGColor {
         CGColor(srgbRed: 0.40, green: 0.40, blue: 0.43, alpha: 1.0)

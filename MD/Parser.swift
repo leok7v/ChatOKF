@@ -20,16 +20,21 @@ extension Markdown {
     // Parse-time math switch. `$inline$` / `$$display$$` are rendered to
     // Unicode only when true.
     @TaskLocal static var mathEnabled: Bool = true
+    @TaskLocal private static var nesting = 0
+    static let maxNesting = 32
 
     public static func parse(_ source: String,
                              math: Bool = true) -> Document {
         let raw = source
             .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
             .split(separator: "\n", omittingEmptySubsequences: false)
             .map(String.init)
         let (lines, refs) = stripLinkDefinitions(raw)
         let bs = Markdown.$mathEnabled.withValue(math) {
-            Markdown.$currentRefs.withValue(refs) { blocks(lines) }
+            Markdown.$currentRefs.withValue(refs) {
+                blockSpans(lines).map { pair in pair.block }
+            }
         }
         var items: [Document.Item] = []
         for (i, b) in bs.enumerated() {
@@ -61,7 +66,16 @@ extension Markdown {
 
     // The shared block engine. Reads `currentRefs` for reference links.
     static func blocks(_ lines: [String]) -> [Block] {
-        blockSpans(lines).map { pair in pair.block }
+        var result: [Block] = []
+        if nesting >= maxNesting {
+            let raw = lines.joined(separator: "\n").trimmedOuter()
+            if !raw.isEmpty { result = [.paragraph(AttributedString(raw))] }
+        } else {
+            result = Markdown.$nesting.withValue(nesting + 1) {
+                blockSpans(lines).map { pair in pair.block }
+            }
+        }
+        return result
     }
 
     enum OpenBlock {
@@ -84,9 +98,23 @@ extension Markdown {
         openSpans(lines, resuming: nil).spans
     }
 
-    static func openSpans(_ lines: [String], resuming carried: OpenBlock?)
+    struct Rewrite {
+        let line: Int
+        let by: Int
+        let text: String
+    }
+
+    static func openSpans(_ source: [String], resuming carried: OpenBlock?)
         -> (spans: [(start: Int, block: Block)], open: OpenBlock?,
-            cut: Int) {
+            cut: Int, rewrites: [Rewrite]) {
+        var lines = source
+        var rewrites: [Rewrite] = []
+        func kept(tailOf start: Int, at line: Int) {
+            if line < lines.count, lines[line] != source[line] {
+                rewrites.append(Rewrite(line: line, by: start,
+                                        text: lines[line]))
+            }
+        }
         var out: [(start: Int, block: Block)] = []
         var i = 0
         var grown: Grown? = nil
@@ -100,10 +128,15 @@ extension Markdown {
         while i < lines.count {
             let start = i
             let line = lines[i]
-            if isFence(line) {
+            if isIndentedCode(line) {
+                out.append((start, consumeIndentedCode(lines, &i)))
+            } else if isFence(line) {
                 grow(consumeFenced(lines, &i), at: start)
             } else if isMathFence(line) {
-                out.append((start, consumeMath(lines, &i)))
+                for math in consumeMath(&lines, &i) {
+                    out.append((start, math))
+                }
+                kept(tailOf: start, at: i)
             } else if isHeading(line) {
                 out.append((start, consumeHeading(lines, &i)))
             } else if isHR(line) {
@@ -121,12 +154,11 @@ extension Markdown {
                 out.append((start, consumeQuote(lines, &i)))
             } else if isListStart(line) {
                 grow(consumeList(lines, &i), at: start)
-            } else if isIndentedCode(line) {
-                out.append((start, consumeIndentedCode(lines, &i)))
             } else if line.trimmedOuter().isEmpty {
                 i += 1
             } else if isCommentStart(line) {
-                skipComment(lines, &i)
+                skipComment(&lines, &i)
+                kept(tailOf: start, at: i)
             } else if let img = imageBlock(line) {
                 out.append((start, img))
                 i += 1
@@ -135,7 +167,7 @@ extension Markdown {
             }
         }
         let settled = grownAt == out.count - 1 ? grown : nil
-        return (out, settled?.open, settled?.cut ?? 0)
+        return (out, settled?.open, settled?.cut ?? 0, rewrites)
     }
 
     static func resume(_ open: OpenBlock, _ lines: [String],
@@ -156,16 +188,13 @@ extension Markdown {
         -> (lines: [String], refs: [String: URL]) {
         var refs: [String: URL] = [:]
         var out: [String] = []
-        var inFence = false
-        var fenceMarker = ""
+        var fence: String? = nil
         for line in raw {
-            let trimmed = line.trimmedLeading()
-            if inFence {
-                if trimmed.hasPrefix(fenceMarker) { inFence = false }
+            if let open = fence {
+                if closesFence(line, open) { fence = nil }
                 out.append(line)
-            } else if trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~") {
-                inFence = true
-                fenceMarker = String(trimmed.prefix(3))
+            } else if let run = openingFence(line) {
+                fence = run
                 out.append(line)
             } else if let parsed = parseLinkDefinition(line) {
                 refs[parsed.label] = parsed.url
@@ -180,22 +209,36 @@ extension Markdown {
         -> (label: String, url: URL)? {
         var result: (String, URL)? = nil
         let t = line.trimmedLeading()
-        if t.hasPrefix("["), let close = t.dropFirst().firstIndex(of: "]") {
+        if t.hasPrefix("["), leadingSpaces(line) < 4,
+           let close = t.dropFirst().firstIndex(of: "]") {
             let rest = t.dropFirst()
             let label = String(rest[..<close]).trimmedOuter()
             let after = rest[rest.index(after: close)...]
-            if !label.isEmpty, after.hasPrefix(":") {
+            if !label.isEmpty, !label.hasPrefix("^"), after.hasPrefix(":") {
                 var rhs = String(after.dropFirst()).trimmedOuter()
+                var title = ""
                 if let space = rhs.firstIndex(of: " ") {
+                    title = String(rhs[space...]).trimmedOuter()
                     rhs = String(rhs[..<space])
                 }
                 if rhs.hasPrefix("<"), rhs.hasSuffix(">") {
                     rhs = String(rhs.dropFirst().dropLast())
                 }
-                if let url = URL(string: rhs) {
+                if !rhs.isEmpty, isLinkTitle(title),
+                   let url = URL(string: rhs) {
                     result = (refKey(label), url)
                 }
             }
+        }
+        return result
+    }
+
+    static func isLinkTitle(_ s: String) -> Bool {
+        var result = s.isEmpty
+        if let open = s.first, let close = s.last, s.count >= 2 {
+            result = (open == "\"" && close == "\"") ||
+                     (open == "'" && close == "'") ||
+                     (open == "(" && close == ")")
         }
         return result
     }
@@ -215,8 +258,9 @@ extension Markdown {
             if segment.code {
                 stitched += segment.text
             } else {
-                let withRefs = substituteRefs(htmlInline(segment.text))
-                let pieces = mathEnabled ? TeX.split(withRefs)
+                let literal = escapedAngles(segment.text)
+                let withRefs = substituteRefs(htmlInline(literal))
+                let pieces = mathEnabled ? mathsOutsideLinks(withRefs)
                                          : [.text(withRefs)]
                 for piece in pieces {
                     switch piece {
@@ -240,10 +284,67 @@ extension Markdown {
                 out.replaceSubrange(r, with: m)
             }
         }
-        applyTag(&out, "u") { sub in sub.underlineStyle = .single }
-        applyTag(&out, "sup") { sub in sub[ScriptAttribute.self] = 1 }
-        applyTag(&out, "sub") { sub in sub[ScriptAttribute.self] = -1 }
-        applyTag(&out, "small") { sub in sub[SmallAttribute.self] = true }
+        let angled = raw.unicodeScalars.contains { s in
+            s == "<" || s == "&" || s == angle
+        }
+        if angled {
+            applyTag(&out, "u") { sub in sub.underlineStyle = .single }
+            applyTag(&out, "sup") { sub in sub[ScriptAttribute.self] = 1 }
+            applyTag(&out, "sub") { sub in sub[ScriptAttribute.self] = -1 }
+            applyTag(&out, "small") { sub in
+                sub[SmallAttribute.self] = true
+            }
+            restoreAngles(&out)
+        }
+        return out
+    }
+
+    private static let angle = Unicode.Scalar(0x10FFFD) ?? "<"
+
+    private static func escapedAngles(_ s: String) -> String {
+        var result = s
+        if s.contains("<") || s.contains("&") {
+            let mark = String(angle)
+            result = s.replacingOccurrences(
+                    of: #"(?<!\\)((?:\\\\)*)\\<"#, with: "$1" + mark,
+                    options: .regularExpression)
+                .replacingOccurrences(of: "&lt;", with: mark,
+                                      options: .caseInsensitive)
+        }
+        return result
+    }
+
+    private static func restoreAngles(_ a: inout AttributedString) {
+        let mark = String(angle)
+        if a.characters.contains(Character(angle)) {
+            var rebuilt = AttributedString()
+            for run in a.runs {
+                let text = String(a[run.range].characters)
+                    .replacingOccurrences(of: mark, with: "<")
+                rebuilt.append(AttributedString(text,
+                                                attributes: run.attributes))
+            }
+            a = rebuilt
+        }
+    }
+
+    private static let linkTarget = try? NSRegularExpression(
+        pattern: #"\]\([^)\s]*"#)
+
+    private static func mathsOutsideLinks(_ s: String) -> [TeX.Segment] {
+        var out: [TeX.Segment] = []
+        let ns = s as NSString
+        var last = 0
+        let full = NSRange(location: 0, length: ns.length)
+        let targets = s.contains("](")
+            ? linkTarget?.matches(in: s, range: full) ?? [] : []
+        for m in targets {
+            out += TeX.split(ns.substring(with: NSRange(
+                location: last, length: m.range.location - last)))
+            out.append(.text(ns.substring(with: m.range)))
+            last = NSMaxRange(m.range)
+        }
+        out += TeX.split(ns.substring(from: last))
         return out
     }
 
@@ -298,11 +399,33 @@ extension Markdown {
         line.trimmedLeading().hasPrefix("<!--")
     }
 
-    static func skipComment(_ lines: [String], _ i: inout Int) {
+    static func skipComment(_ lines: inout [String], _ i: inout Int) {
         var closed = false
         while i < lines.count, !closed {
-            if lines[i].contains("-->") { closed = true }
-            i += 1
+            if let end = lines[i].range(of: "-->") {
+                var from = end.upperBound
+                var chaining = true
+                while chaining {
+                    let rest = lines[i][from...].drop { c in
+                        c == " " || c == "\t"
+                    }
+                    if rest.hasPrefix("<!--"),
+                       let next = rest.range(of: "-->") {
+                        from = next.upperBound
+                    } else {
+                        chaining = false
+                    }
+                }
+                let tail = String(lines[i][from...]).trimmedLeading()
+                closed = true
+                if tail.trimmedOuter().isEmpty {
+                    i += 1
+                } else {
+                    lines[i] = tail
+                }
+            } else {
+                i += 1
+            }
         }
     }
 
@@ -317,31 +440,38 @@ extension Markdown {
     private struct TagRule {
         let re: NSRegularExpression?
         let template: String
+        let closers: [String]
     }
 
-    private static func tagRule(_ pattern: String,
-                                _ template: String) -> TagRule {
+    private static func tagRule(_ pattern: String, _ template: String,
+                                closers: [String] = []) -> TagRule {
         TagRule(re: try? NSRegularExpression(pattern: pattern,
                                              options: .caseInsensitive),
-                template: template)
+                template: template, closers: closers)
     }
 
     private static let imgRule =
         tagRule(#"<img\b[^>]*?\bsrc\s*=\s*"([^"]*)"[^>]*>"#, "![]($1)")
 
     private static let tagRules: [TagRule] = [
-        tagRule(#"<!--.*?-->"#, ""),
+        tagRule(#"<!--(?:(?!<!--).)*?-->"#, "", closers: ["-->"]),
         tagRule(#"<br\s*/?>"#, lineBreak),
         imgRule,
         tagRule(#"<img\b[^>]*?\bsrc\s*=\s*'([^']*)'[^>]*>"#, "![]($1)"),
-        tagRule(#"<a\b[^>]*?\bhref\s*=\s*"([^"]*)"[^>]*>(.*?)</a>"#,
-                "[$2]($1)"),
-        tagRule(#"<a\b[^>]*?\bhref\s*=\s*'([^']*)'[^>]*>(.*?)</a>"#,
-                "[$2]($1)"),
-        tagRule(#"<(b|strong)>(.*?)</\1>"#, "**$2**"),
-        tagRule(#"<(i|em)>(.*?)</\1>"#, "*$2*"),
-        tagRule(#"<(s|del|strike)>(.*?)</\1>"#, "~~$2~~"),
-        tagRule(#"<(code|kbd)>(.*?)</\1>"#, "`$2`"),
+        tagRule(#"<a\b[^>]*?\bhref\s*=\s*"([^"]*)"[^>]*>"# +
+                #"((?:(?!<a\b).)*?)</a>"#,
+                "[$2]($1)", closers: ["</a>"]),
+        tagRule(#"<a\b[^>]*?\bhref\s*=\s*'([^']*)'[^>]*>"# +
+                #"((?:(?!<a\b).)*?)</a>"#,
+                "[$2]($1)", closers: ["</a>"]),
+        tagRule(#"<(b|strong)>((?:(?!<\1>).)*?)</\1>"#, "**$2**",
+                closers: ["</b>", "</strong>"]),
+        tagRule(#"<(i|em)>((?:(?!<\1>).)*?)</\1>"#, "*$2*",
+                closers: ["</i>", "</em>"]),
+        tagRule(#"<(s|del|strike)>((?:(?!<\1>).)*?)</\1>"#, "~~$2~~",
+                closers: ["</s>", "</del>", "</strike>"]),
+        tagRule(#"<(code|kbd)>((?:(?!<\1>).)*?)</\1>"#, "`$2`",
+                closers: ["</code>", "</kbd>"]),
     ]
 
     private static let imgAltRE = try? NSRegularExpression(
@@ -357,7 +487,10 @@ extension Markdown {
         if text.contains("<") {
             result = imagesWithAttributes(result)
             for rule in tagRules {
-                if let re = rule.re {
+                let lower = rule.closers.isEmpty ? "" : result.lowercased()
+                let closed = rule.closers.isEmpty ||
+                             rule.closers.contains { c in lower.contains(c) }
+                if closed, let re = rule.re {
                     let ns = result as NSString
                     result = re.stringByReplacingMatches(
                         in: result,
@@ -419,11 +552,20 @@ extension Markdown {
         var out: [String] = []
         for (idx, line) in lines.enumerated() {
             let last = idx == lines.count - 1
-            let hardBreak = line.hasSuffix("  ")
-            let trimmed = hardBreak ? String(line.dropLast(2)) : line
-            if hardBreak { out.append(trimmed + lineBreak) }
-            else if last { out.append(trimmed) }
-            else { out.append(trimmed + " ") }
+            let slashes = line.reversed().prefix { ch in ch == "\\" }.count
+            let spaced = line.hasSuffix("  ")
+            let hardBreak = (spaced || slashes % 2 == 1) && !last
+            let trimmed = hardBreak ? String(line.dropLast(spaced ? 2 : 1))
+                                    : line
+            if hardBreak {
+                out.append(trimmed + lineBreak)
+            } else if last {
+                var tail = trimmed
+                while tail.hasSuffix(" ") { tail.removeLast() }
+                out.append(tail)
+            } else {
+                out.append(trimmed + " ")
+            }
         }
         return out.joined().replacingOccurrences(of: lineBreak + " ",
                                                  with: lineBreak)
@@ -431,50 +573,71 @@ extension Markdown {
 
     static func applyTag(_ a: inout AttributedString, _ tag: String,
                          style: (inout AttributedSubstring) -> Void) {
-        let open = "<\(tag)>"
-        let close = "</\(tag)>"
-        var from = a.startIndex
-        var searching = true
-        while searching {
-            if let o = a[from...].range(of: open, options: .caseInsensitive) {
-                let intent = a.runs[o.lowerBound].inlinePresentationIntent
-                if intent?.contains(.code) == true {
-                    from = o.upperBound
-                } else if let c = a[o.upperBound...].range(
-                    of: close, options: .caseInsensitive) {
-                    var sub = a[o.upperBound..<c.lowerBound]
-                    style(&sub)
-                    a.replaceSubrange(o.lowerBound..<c.upperBound, with: sub)
-                    from = a.startIndex
-                } else {
-                    a.removeSubrange(o)
-                    from = a.startIndex
-                }
-            } else {
-                searching = false
-            }
+        var pairing = true
+        while pairing {
+            pairing = tagPass(&a, tag, style: style)
         }
     }
+
+    private static func tagPass(_ a: inout AttributedString, _ tag: String,
+                                style: (inout AttributedSubstring) -> Void)
+        -> Bool {
+        let open = "<\(tag)>"
+        let close = "</\(tag)>"
+        var out = AttributedString()
+        var from = a.startIndex
+        var paired = false
+        var closerAhead = true
+        while let o = a[from...].range(of: open, options: .caseInsensitive) {
+            let intent = a.runs[o.lowerBound].inlinePresentationIntent
+            let c = closerAhead && intent?.contains(.code) != true
+                ? a[o.upperBound...].range(of: close,
+                                           options: .caseInsensitive)
+                : nil
+            if intent?.contains(.code) == true {
+                out.append(a[from..<o.upperBound])
+                from = o.upperBound
+            } else if let c {
+                out.append(a[from..<o.lowerBound])
+                var sub = a[o.upperBound..<c.lowerBound]
+                style(&sub)
+                out.append(sub)
+                from = c.upperBound
+                paired = true
+            } else {
+                out.append(a[from..<o.lowerBound])
+                from = o.upperBound
+                closerAhead = false
+            }
+        }
+        out.append(a[from...])
+        a = out
+        return paired
+    }
+
+    private static let fullRefRE = try? NSRegularExpression(
+        pattern: "(!?)\\[([^\\]\\n]+)\\]\\[([^\\]\\n]*)\\]")
+
+    private static let shortRefRE = try? NSRegularExpression(
+        pattern: "(!?)\\[([^\\]\\n]+)\\](?![\\[\\(:])")
 
     static func substituteRefs(_ s: String) -> String {
         let refs = Markdown.currentRefs
         var result = s
         if !refs.isEmpty {
-            result = applyRefPattern(
-                result, pattern: "(!?)\\[([^\\]\\n]+)\\]\\[([^\\]\\n]*)\\]",
-                hasLabelGroup: true, refs: refs)
-            result = applyRefPattern(
-                result, pattern: "(!?)\\[([^\\]\\n]+)\\](?![\\[\\(:])",
-                hasLabelGroup: false, refs: refs)
+            result = applyRefPattern(result, fullRefRE,
+                                     hasLabelGroup: true, refs: refs)
+            result = applyRefPattern(result, shortRefRE,
+                                     hasLabelGroup: false, refs: refs)
         }
         return result
     }
 
-    static func applyRefPattern(_ s: String, pattern: String,
+    static func applyRefPattern(_ s: String, _ re: NSRegularExpression?,
                                 hasLabelGroup: Bool,
                                 refs: [String: URL]) -> String {
         var result = s
-        if let re = try? NSRegularExpression(pattern: pattern) {
+        if let re {
             let ns = s as NSString
             let matches = re.matches(
                 in: s, range: NSRange(location: 0, length: ns.length))
@@ -515,7 +678,14 @@ extension Markdown {
     static func consumeHeading(_ lines: [String], _ i: inout Int) -> Block {
         let t = lines[i].trimmedOuter()
         let n = t.prefix { c in c == "#" }.count
-        let body = String(t.dropFirst(n)).trimmedOuter()
+        var body = String(t.dropFirst(n)).trimmedOuter()
+        let closing = body.reversed().prefix { c in c == "#" }.count
+        if closing == body.count {
+            body = ""
+        } else if closing > 0,
+                  body.dropLast(closing).last?.isWhitespace == true {
+            body = String(body.dropLast(closing)).trimmedOuter()
+        }
         i += 1
         return .heading(level: n, text: inline(body))
     }
@@ -530,17 +700,40 @@ extension Markdown {
     }
 
     static func isFence(_ s: String) -> Bool {
+        fenceRun(s) != nil
+    }
+
+    static func fenceRun(_ s: String) -> String? {
+        var result: String? = nil
         let t = s.trimmedLeading()
-        return t.hasPrefix("```") || t.hasPrefix("~~~")
+        if let c = t.first, c == "`" || c == "~" {
+            let run = t.prefix { ch in ch == c }
+            if run.count >= 3 { result = String(run) }
+        }
+        return result
+    }
+
+    static func openingFence(_ s: String) -> String? {
+        leadingSpaces(s) < 4 ? fenceRun(s) : nil
+    }
+
+    static func closesFence(_ s: String, _ fence: String) -> Bool {
+        var result = false
+        if let run = fenceRun(s), let mark = fence.first,
+           run.first == mark, run.count >= fence.count {
+            result = s.trimmedOuter().allSatisfy { ch in ch == mark }
+        }
+        return result
     }
 
     static func consumeFenced(_ lines: [String], _ i: inout Int) -> Grown {
         let raw = lines[i]
         let t = raw.trimmedLeading()
-        let lang = String(t.dropFirst(3)).trimmedOuter()
+        let fence = fenceRun(raw) ?? "```"
+        let lang = String(t.dropFirst(fence.count)).trimmedOuter()
         i += 1
         return growFenced(language: lang.isEmpty ? nil : lang,
-                          fence: String(t.prefix(3)),
+                          fence: fence,
                           indent: raw.count - t.count, body: [], lines, &i)
     }
 
@@ -552,8 +745,7 @@ extension Markdown {
         var done = false
         while i < lines.count, !done {
             let line = lines[i]
-            let trimmed = line.trimmedLeading()
-            if trimmed.hasPrefix(fence) {
+            if closesFence(line, fence) {
                 done = true
             } else if indent > 0, line.hasPrefix(pad) {
                 body.append(String(line.dropFirst(indent)))
@@ -577,27 +769,62 @@ extension Markdown {
 
     // Accepts both spellings authors use: the whole thing on one line, and an
     // opening $$ with the formula on the lines below.
-    private static func consumeMath(_ lines: [String],
-                                    _ i: inout Int) -> Block {
-        var body: [String] = []
-        var rest = String(lines[i].trimmedOuter().dropFirst(2))
-        var closed = false
-        if let end = rest.range(of: "$$", options: .backwards) {
-            rest = String(rest[..<end.lowerBound])
-            closed = true
+    private static func consumeMath(_ lines: inout [String],
+                                    _ i: inout Int) -> [Block] {
+        let line = lines[i].trimmedOuter()
+        var blocks: [Block] = []
+        var from = line.startIndex
+        var chaining = true
+        while chaining {
+            let rest = line[from...].drop { c in c == " " || c == "\t" }
+            let inner = rest.dropFirst(2)
+            if rest.hasPrefix("$$"), let end = inner.range(of: "$$") {
+                blocks.append(.math(String(inner[..<end.lowerBound])
+                    .trimmedOuter()))
+                from = end.upperBound
+            } else {
+                chaining = false
+            }
         }
-        if !rest.trimmedOuter().isEmpty { body.append(rest) }
-        i += 1
-        while i < lines.count, !closed {
-            let t = lines[i].trimmedOuter()
-            if let end = t.range(of: "$$") {
-                let head = String(t[..<end.lowerBound])
+        var result = blocks
+        if blocks.isEmpty {
+            result = [consumeOpenMath(&lines, &i)]
+        } else {
+            let tail = String(line[from...]).trimmedOuter()
+            if tail.allSatisfy({ ch in ch == "$" }) {
+                i += 1
+            } else {
+                lines[i] = tail
+            }
+        }
+        return result
+    }
+
+    private static func consumeOpenMath(_ lines: inout [String],
+                                        _ i: inout Int) -> Block {
+        var body: [String] = []
+        var line = String(lines[i].trimmedOuter().dropFirst(2))
+        var closed = false
+        var reading = true
+        while reading {
+            if let end = line.range(of: "$$") {
+                let head = String(line[..<end.lowerBound])
+                let tail = String(line[end.upperBound...]).trimmedLeading()
                 if !head.trimmedOuter().isEmpty { body.append(head) }
                 closed = true
+                if tail.trimmedOuter().allSatisfy({ ch in ch == "$" }) {
+                    i += 1
+                } else {
+                    lines[i] = tail
+                }
             } else {
-                body.append(lines[i])
+                if !line.trimmedOuter().isEmpty || !body.isEmpty {
+                    body.append(line)
+                }
+                i += 1
             }
-            i += 1
+            reading = !closed && i < lines.count
+            if reading { line = lines[i] }
         }
         return .math(body.joined(separator: "\n").trimmedOuter())
     }
@@ -662,6 +889,14 @@ extension Markdown {
     }
 
     static func isListStart(_ s: String) -> Bool { listMarker(s) != nil }
+
+    static func listInterrupts(_ s: String) -> Bool {
+        var result = false
+        if let m = listMarker(s), !m.rest.trimmedOuter().isEmpty {
+            result = m.label == "\u{2022}" || m.label == "1."
+        }
+        return result
+    }
 
     static func listMarker(_ line: String)
         -> (label: String, sig: Character, offset: Int, rest: String)? {
@@ -817,7 +1052,8 @@ extension Markdown {
 
     static func isLazyContinuation(_ line: String) -> Bool {
         !(isHeading(line) || isHR(line) || isFence(line) ||
-          isMathFence(line) || isQuoteStart(line) || isListStart(line))
+          isMathFence(line) || isQuoteStart(line) || isListStart(line) ||
+          setextLevel(line) > 0)
     }
 
     static func leadingSpaces(_ s: String) -> Int {
@@ -921,11 +1157,29 @@ extension Markdown {
             rows.append(parseRow(lines[i]))
             i += 1
         }
-        return Grown(block: .table(headers: headers, rows: rows,
+        return Grown(block: .table(headers: headers.map { c in
+                                       cellWithRefs(c)
+                                   },
+                                   rows: rows.map { r in
+                                       r.map { c in cellWithRefs(c) }
+                                   },
                                    alignments: alignments),
                      open: .table(headers: headers, alignments: alignments,
                                   rows: rows),
                      cut: i)
+    }
+
+    static func cellWithRefs(_ cell: String) -> String {
+        var out = ""
+        if Markdown.currentRefs.isEmpty || !cell.contains("[") {
+            out = cell
+        } else {
+            for segment in codeSpanSegments(cell) {
+                out += segment.code ? segment.text
+                                    : substituteRefs(segment.text)
+            }
+        }
+        return out
     }
 
     static func parseRow(_ s: String) -> [String] {
@@ -1029,20 +1283,43 @@ extension Markdown {
     static func consumeParagraph(_ lines: [String],
                                  _ i: inout Int) -> Block {
         var body: [String] = []
+        var level = 0
         var done = false
         while i < lines.count, !done {
             let line = lines[i]
+            level = body.isEmpty ? 0 : setextLevel(line)
             let blank = line.trimmedOuter().isEmpty
-            let other = isHeading(line) || isHR(line) || isFence(line) ||
-                        isMathFence(line) ||
-                        isTableStart(lines, i) || isQuoteStart(line) ||
-                        isListStart(line) || imageBlock(line) != nil ||
-                        isCommentStart(line)
-            if blank || other { done = true }
-            else { body.append(line.trimmedLeading()); i += 1 }
+            let other = leadingSpaces(line) < 4 &&
+                        (isHeading(line) || isHR(line) || isFence(line) ||
+                         isMathFence(line) ||
+                         isTableStart(lines, i) || isQuoteStart(line) ||
+                         listInterrupts(line) || imageBlock(line) != nil ||
+                         isCommentStart(line))
+            if level > 0 {
+                i += 1
+                done = true
+            } else if blank || other {
+                done = true
+            } else {
+                body.append(line.trimmedLeading())
+                i += 1
+            }
         }
         let raw = body.joined(separator: "\n")
-        return bareMath(raw) ?? .paragraph(inline(raw))
+        return level > 0
+            ? .heading(level: level, text: inline(raw.trimmedOuter()))
+            : bareMath(raw) ?? .paragraph(inline(raw))
+    }
+
+    static func setextLevel(_ line: String) -> Int {
+        var result = 0
+        let t = line.trimmedOuter()
+        if leadingSpaces(line) < 4, let c = t.first,
+           c == "=" || (c == "-" && t.count >= 2),
+           t.allSatisfy({ ch in ch == c }) {
+            result = c == "=" ? 1 : 2
+        }
+        return result
     }
 
     // A converter lifting an equation out of a PDF writes the TeX with nothing

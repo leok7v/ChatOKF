@@ -12,6 +12,10 @@ extension NativeText: NSViewRepresentable {
         var findId: UUID?
         weak var findController: MarkdownFindController?
 
+        func forgetAnchor() {
+            anchorScope = nil
+        }
+
         func textView(_ tv: NSTextView, clickedOnLink link: Any,
                       at: Int) -> Bool {
             var url: URL? = nil
@@ -32,7 +36,8 @@ extension NativeText: NSViewRepresentable {
             if let storage = textView.textStorage {
                 if new.length == 0 {
                     anchorScope = atomicScope(at: new.location, in: storage)
-                } else if let scope = anchorScope {
+                } else if let scope = anchorScope,
+                          NSMaxRange(scope) <= storage.length {
                     result = extend(new, scope: scope, in: storage)
                 } else {
                     result = expand(new, in: storage)
@@ -72,9 +77,11 @@ extension NativeText: NSViewRepresentable {
 
         private func expand(_ range: NSRange,
                             in storage: NSTextStorage) -> NSRange {
-            var lo = range.location
-            var hi = range.location + range.length
-            storage.enumerateAttribute(atomicKindKey, in: range,
+            var lo = min(range.location, storage.length)
+            var hi = min(range.location + range.length, storage.length)
+            storage.enumerateAttribute(atomicKindKey,
+                                       in: NSRange(location: lo,
+                                                   length: hi - lo),
                                        options: []) { value, r, _ in
                 if value != nil {
                     if r.location < lo { lo = r.location }
@@ -151,6 +158,7 @@ extension NativeText: NSViewRepresentable {
 
         func applyResolved(_ next: NSAttributedString) {
             if let ts = textStorage, applyIncremental(ts, next) {
+                (delegate as? Coordinator)?.forgetAnchor()
                 contentGeneration += 1
                 invalidateIntrinsicContentSize()
                 needsLayout = true

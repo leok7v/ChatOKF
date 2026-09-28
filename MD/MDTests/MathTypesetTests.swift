@@ -147,7 +147,8 @@ final class MathTypesetTests: XCTestCase {
     func testAMiscasedRealCommandIsNotFolded() {
         let out = String(TeX.render(#"\ALPHA + \beta"#, display: true)
                             .characters)
-        XCTAssertTrue(out.contains("ALPHA"), out)
+        XCTAssertFalse(out.contains("\u{03B1}"), out)
+        XCTAssertFalse(out.contains("\\"), out)
         XCTAssertTrue(out.contains("\u{03B2}"), out)
     }
 

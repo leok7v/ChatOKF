@@ -193,6 +193,31 @@ final class BridgeUpdateTests: XCTestCase {
         window.orderOut(nil)
     }
 
+    func testSnapshotWhenAsked() throws {
+        let asked = ProcessInfo.processInfo.environment["MD_SNAPSHOT"] ?? ""
+        if !asked.isEmpty {
+            let source = try String(contentsOfFile: asked, encoding: .utf8)
+            let v = textView(width: 640)
+            v.appearance = NSAppearance(named: .aqua)
+            v.drawsBackground = true
+            v.backgroundColor = .white
+            v.applyResolved(DocumentText.attributed(
+                from: Markdown.parse(source), style: .default, width: 640))
+            v.layout()
+            v.setFrameSize(NSSize(width: 640,
+                                  height: v.intrinsicContentSize.height))
+            let rep = try XCTUnwrap(
+                v.bitmapImageRepForCachingDisplay(in: v.bounds))
+            v.cacheDisplay(in: v.bounds, to: rep)
+            let png = try XCTUnwrap(rep.representation(using: .png,
+                                                       properties: [:]))
+            try png.write(to: URL(fileURLWithPath: asked + ".png"))
+            let pdf = try XCTUnwrap(MarkdownPDF.data(Markdown.parse(source),
+                                                     title: asked))
+            try pdf.write(to: URL(fileURLWithPath: asked + ".pdf"))
+        }
+    }
+
     func testUpdateAndLayoutCost() {
         let src = Self.longSource(blocks: 300)
         let doc = Markdown.parse(src)

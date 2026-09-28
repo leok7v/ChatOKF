@@ -57,11 +57,9 @@ enum ImagePrefetch {
                 for item in items {
                     for b in item.blocks { collect(b, into: &urls) }
                 }
-            case .table(_, let rows, _):
-                for row in rows {
-                    for cell in row {
-                        if let info = imageInCell(cell) { urls.insert(info.0) }
-                    }
+            case .table(let headers, let rows, _):
+                for cell in headers + rows.joined() {
+                    if let info = imageInCell(cell) { urls.insert(info.0) }
                 }
             default:
                 break
@@ -83,21 +81,48 @@ enum ImagePrefetch {
         await fetch(collectURLs(in: document))
     }
 
+    static let byteLimit = 32 << 20
+    static let timeout: TimeInterval = 20
+
+    static func fetchable(_ url: URL) -> Bool {
+        let scheme = url.scheme?.lowercased()
+        return scheme == "http" || scheme == "https"
+    }
+
     static func fetch(_ urls: Set<URL>) async -> [URL: Data] {
         await withTaskGroup(of: (URL, Data?).self) { group in
-            for u in urls {
-                group.addTask {
-                    var req = URLRequest(url: u)
-                    req.setValue(userAgent,
-                                 forHTTPHeaderField: "User-Agent")
-                    let data = try? await URLSession.shared.data(for: req).0
-                    return (u, data)
-                }
+            for u in urls where fetchable(u) {
+                group.addTask { (u, await capped(u)) }
             }
             var result: [URL: Data] = [:]
             for await (u, d) in group where d != nil { result[u] = d }
             return result
         }
+    }
+
+    private static func capped(_ url: URL) async -> Data? {
+        var req = URLRequest(url: url, timeoutInterval: timeout)
+        req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+        var result: Data? = nil
+        if let (bytes, response) = try? await URLSession.shared.bytes(
+               for: req),
+           response.expectedContentLength <= Int64(byteLimit) {
+            var data = Data()
+            let deadline = ContinuousClock.now + .seconds(timeout)
+            do {
+                var iterator = bytes.makeAsyncIterator()
+                var byte = try await iterator.next()
+                while let b = byte, data.count <= byteLimit,
+                      ContinuousClock.now <= deadline {
+                    data.append(b)
+                    byte = try await iterator.next()
+                }
+                result = byte == nil ? data : nil
+            } catch {
+                result = nil
+            }
+        }
+        return result
     }
 
     static func fetchAndDecode<T>(in document: Markdown.Document,

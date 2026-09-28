@@ -46,12 +46,13 @@ import Foundation
         var live: [Int: RenderCache.Entry] = [:]
         for item in document.items {
             var entry = cache?.entries[item.id]
+            let own = ownImages(item.block, seen)
             let stale = entry?.block != item.block || entry?.style != style
-                || entry?.width != width || entry?.images != seen
+                || entry?.width != width || entry?.images != own
             if stale {
                 entry = RenderCache.Entry(
                     block: item.block, style: style, width: width,
-                    images: seen,
+                    images: own,
                     text: completed(
                         render(item, style: style, images: images,
                                seen: seen, width: width, cache: cache),
@@ -72,6 +73,20 @@ import Foundation
         return m
     }
 
+    private static func ownImages(_ block: Markdown.Block,
+                                  _ seen: [URL: ObjectIdentifier])
+        -> [URL: ObjectIdentifier] {
+        var result: [URL: ObjectIdentifier] = [:]
+        if !seen.isEmpty {
+            let alone = Markdown.Document(
+                items: [Markdown.Document.Item(id: 0, block: block)])
+            for url in ImagePrefetch.collectURLs(in: alone) {
+                result[url] = seen[url]
+            }
+        }
+        return result
+    }
+
     private static func completed(_ text: NSAttributedString,
                                   style: MarkdownStyle)
         -> NSAttributedString {
@@ -88,6 +103,7 @@ import Foundation
                                value: platformDefaultTextColor, range: r)
             }
         }
+        m.fixAttributes(in: full)
         return m
     }
 
@@ -118,11 +134,12 @@ import Foundation
         var result: TableCells? = nil
         if case .table(let headers, let rows, _) = item.block {
             var known = cache?.tables[item.id]
+            let own = ownImages(item.block, seen)
             let stale = known?.block != item.block || known?.style != style
-                || known?.images != seen
+                || known?.images != own
             if stale {
                 known = RenderCache.Table(
-                    block: item.block, style: style, images: seen,
+                    block: item.block, style: style, images: own,
                     cells: tableCells(headers: headers, rows: rows,
                                       style: style, images: images))
                 cache?.tables[item.id] = known
@@ -172,8 +189,9 @@ import Foundation
                 result = quote(inner, id: id, style: style, images: images,
                                width: width - 18)
             case .list(let items, let tight):
-                result = list(items: items, tight: tight, depth: 0, id: id,
-                              style: style, images: images, width: width)
+                result = list(items: items, tight: tight, depth: 0, base: 0,
+                              id: id, style: style, images: images,
+                              width: width)
             case .table(let headers, let rows, let aligns):
                 result = table(headers: headers, rows: rows,
                                alignments: aligns, id: id, style: style,
@@ -272,10 +290,12 @@ import Foundation
                 result = indented(minimumWidth(of: inner, style: style,
                                                formulas: formulas), by: 18)
             case .list(let items, _):
+                let step = markerStep(items, style: style)
                 for item in items {
                     let w = indented(minimumWidth(of: item.blocks,
                                                   style: style,
-                                                  formulas: formulas), by: 20)
+                                                  formulas: formulas),
+                                     by: step)
                     if w > result { result = w }
                 }
             default:
@@ -393,7 +413,7 @@ import Foundation
                 break
             case .paragraph?:
                 minimum = longestRunWidth(m)
-                natural = naturalWidth(m.string, font: base)
+                natural = tableUsesNaturals ? attributedWidth(m) : 0
             default:
                 minimum = longestRunWidth(m)
                 natural = naturalWidth(TeX.scriptsToUnicode(text),
@@ -410,6 +430,25 @@ import Foundation
                 .size(withAttributes: [.font: font]).width
         }
         return result
+    }
+
+    static func attributedWidth(_ drawn: NSAttributedString) -> CGFloat {
+        var widest: CGFloat = 0
+        let ns = drawn.string as NSString
+        var at = 0
+        while at < ns.length {
+            let end = ns.rangeOfCharacter(
+                from: CharacterSet(charactersIn: "\n\u{2028}"),
+                range: NSRange(location: at, length: ns.length - at))
+            let stop = end.location == NSNotFound ? ns.length : end.location
+            let line = CTLineCreateWithAttributedString(
+                drawn.attributedSubstring(
+                    from: NSRange(location: at, length: stop - at)))
+            let w = CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
+            if w > widest { widest = w }
+            at = stop + 1
+        }
+        return widest
     }
 
     private static func longestRunWidth(_ drawn: NSAttributedString)
@@ -526,28 +565,58 @@ import Foundation
     }
 
     private static func list(items: [Markdown.ListItem], tight: Bool,
-                             depth: Int, id: String, style: MarkdownStyle,
+                             depth: Int, base: CGFloat, id: String,
+                             style: MarkdownStyle,
                              images: [URL: PlatformImage],
                              width: CGFloat)
         -> NSAttributedString {
         let m = NSMutableAttributedString()
-        let indent = CGFloat(depth + 1) * 20
+        let indent = base + markerStep(items, style: style)
         for (idx, item) in items.enumerated() {
             let para = NSMutableParagraphStyle()
             para.headIndent = indent
-            para.firstLineHeadIndent = indent - 20
+            para.firstLineHeadIndent = base
             para.tabStops = [NSTextTab(textAlignment: .left,
                                        location: indent)]
             para.paragraphSpacing = tight ? 2 : 8
             para.paragraphSpacingBefore = tight ? 2 : 4
-            if idx == items.count - 1, depth == 0 {
-                para.paragraphSpacing = style.blockSpacing
-            }
             m.append(listItem(item, para: para, depth: depth,
                               id: id + "." + String(idx), style: style,
-                              images: images, width: width - indent))
+                              images: images, width: width))
         }
+        if depth == 0 { spaceAfter(m, style.blockSpacing) }
         return m
+    }
+
+    private static func markerText(_ item: Markdown.ListItem) -> String {
+        item.checked.map { c in c ? "\u{2611}" : "\u{2610}" } ?? item.marker
+    }
+
+    static func markerStep(_ items: [Markdown.ListItem],
+                           style: MarkdownStyle) -> CGFloat {
+        let font = bodyFont(style)
+        let widest = items.map { item in
+            NSAttributedString(string: markerText(item),
+                               attributes: [.font: font]).size().width
+        }.max() ?? 0
+        return max(20, ceil(widest + style.bodySize * 0.5))
+    }
+
+    private static func spaceAfter(_ m: NSMutableAttributedString,
+                                   _ spacing: CGFloat) {
+        if m.length > 0 {
+            let last = (m.string as NSString).paragraphRange(
+                for: NSRange(location: m.length - 1, length: 0))
+            m.enumerateAttribute(.paragraphStyle, in: last,
+                                 options: []) { value, r, _ in
+                let para = NSMutableParagraphStyle()
+                if let v = value as? NSParagraphStyle {
+                    para.setParagraphStyle(v)
+                }
+                para.paragraphSpacing = max(para.paragraphSpacing, spacing)
+                m.addAttribute(.paragraphStyle, value: para, range: r)
+            }
+        }
     }
 
     private static func listItem(_ item: Markdown.ListItem,
@@ -556,34 +625,98 @@ import Foundation
                                  images: [URL: PlatformImage],
                                  width: CGFloat)
         -> NSAttributedString {
-        let marker = item.checked.map { c in
-            c ? "\u{2611}" : "\u{2610}"
-        } ?? item.marker
-        let base = bodyFont(style)
-        let line = NSMutableAttributedString(
-            string: "\(marker)\t",
-            attributes: [.font: base,
-                         .foregroundColor: platformSecondaryColor,
-                         .paragraphStyle: para])
-        var headHandled = false
-        if let first = item.blocks.first, case .paragraph(let attr) = first {
-            let body = NSMutableAttributedString()
-            translateInline(attr, base: base, style: style, into: body)
-            body.addAttribute(.paragraphStyle, value: para,
-                              range: NSRange(location: 0, length: body.length))
-            line.append(body)
-            headHandled = true
+        let body = NSMutableAttributedString()
+        for (k, block) in item.blocks.enumerated() {
+            let blockId = id + "." + String(k)
+            if case .list(let inner, let innerTight) = block {
+                body.append(list(items: inner, tight: innerTight,
+                                 depth: depth + 1, base: para.headIndent,
+                                 id: blockId, style: style, images: images,
+                                 width: width))
+            } else if k == 0, case .paragraph(let attr) = block {
+                let line = NSMutableAttributedString()
+                translateInline(attr, base: bodyFont(style), style: style,
+                                into: line)
+                line.append(NSAttributedString(string: "\n"))
+                line.addAttribute(.paragraphStyle, value: para,
+                                  range: NSRange(location: 0,
+                                                 length: line.length))
+                body.append(line)
+            } else {
+                let rendered = NSMutableAttributedString(
+                    attributedString: render(
+                        block, id: blockId, style: style, images: images,
+                        width: width - para.headIndent))
+                shift(rendered, by: para.headIndent)
+                body.append(rendered)
+            }
         }
-        if !headHandled, let first = item.blocks.first {
-            line.append(render(first, id: id + ".0", style: style,
-                               images: images, width: width))
+        return marked(body, marker: markerText(item), para: para,
+                      first: item.blocks.first, style: style)
+    }
+
+    private static func shift(_ m: NSMutableAttributedString,
+                              by amount: CGFloat) {
+        let full = NSRange(location: 0, length: m.length)
+        m.enumerateAttribute(.paragraphStyle, in: full,
+                             options: []) { value, range, _ in
+            let kind = m.attribute(atomicKindKey, at: range.location,
+                                   effectiveRange: nil) as? String
+            if kind != AtomicKind.table.rawValue {
+                let para = NSMutableParagraphStyle()
+                if let v = value as? NSParagraphStyle {
+                    para.setParagraphStyle(v)
+                }
+                para.headIndent += amount
+                para.firstLineHeadIndent += amount
+                para.tabStops = para.tabStops.map { stop in
+                    NSTextTab(textAlignment: stop.alignment,
+                              location: stop.location + amount,
+                              options: stop.options)
+                }
+                m.addAttribute(.paragraphStyle, value: para, range: range)
+            }
         }
-        line.append(NSAttributedString(string: "\n"))
-        for (k, rest) in item.blocks.enumerated().dropFirst() {
-            line.append(render(rest, id: id + "." + String(k),
-                               style: style, images: images, width: width))
+    }
+
+    private static func marked(_ body: NSMutableAttributedString,
+                               marker: String, para: NSParagraphStyle,
+                               first: Markdown.Block?, style: MarkdownStyle)
+        -> NSAttributedString {
+        var attrs: [NSAttributedString.Key: Any] = [
+            .font: bodyFont(style),
+            .foregroundColor: platformSecondaryColor,
+            .paragraphStyle: para,
+        ]
+        var joins = false
+        switch first {
+            case .paragraph?, .list?, .heading?: joins = true
+            default: joins = false
         }
-        return line
+        let head = body.length > 0
+            ? body.attribute(.paragraphStyle, at: 0, effectiveRange: nil)
+                as? NSParagraphStyle
+            : nil
+        if joins, let head {
+            let joined = NSMutableParagraphStyle()
+            joined.setParagraphStyle(head)
+            joined.firstLineHeadIndent = para.firstLineHeadIndent
+            joined.tabStops = [NSTextTab(textAlignment: .left,
+                                         location: head.firstLineHeadIndent)]
+                + head.tabStops.filter { stop in
+                    stop.location > head.firstLineHeadIndent
+                }
+            let line = (body.string as NSString)
+                .paragraphRange(for: NSRange(location: 0, length: 0))
+            body.addAttribute(.paragraphStyle, value: joined, range: line)
+            attrs[.paragraphStyle] = joined
+            body.insert(NSAttributedString(string: marker + "\t",
+                                           attributes: attrs), at: 0)
+        } else {
+            body.insert(NSAttributedString(string: marker + "\n",
+                                           attributes: attrs), at: 0)
+        }
+        return body
     }
 
     private static func image(alt: String, url: URL, width: CGFloat?,
@@ -660,7 +793,6 @@ import Foundation
         let para = NSMutableParagraphStyle()
         para.alignment = .center
         para.paragraphSpacing = style.blockSpacing
-        para.paragraphSpacingBefore = style.blockSpacing
         m.addAttribute(.paragraphStyle, value: para,
                        range: NSRange(location: 0, length: m.length))
         return m

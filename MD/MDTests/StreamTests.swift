@@ -216,6 +216,15 @@ final class StreamTests: XCTestCase {
         "<img src=\"https://example.com/i.png\" alt=\"Logo\" width=\"32\">",
         "Bold <b>b</b>, <a href=\"https://example.com/a\">to a</a> and an "
             + "<unknown attr=\"x\">unknown tag</unknown> stays.",
+        "Displays:\n\n$$a$$ $$b$$ $$c$$\n\nafter them.",
+        "$$a$$ is the area\n$$b$$ $$c$$ and more",
+        "$$\nx^2\n$$ tail text\n\nnext",
+        "<!-- note --> visible after a comment\n\nmore",
+        "````md\n```swift\nlet x = 1\n```\n````\n\nafter",
+        "Title\n===\n\nSub\n---\n\n## Closed ##\n",
+        "In the year\n1984. Things changed.\n- a bullet\n- two",
+        "[Note]: not a definition.\n\n[^1]: nor a footnote",
+        "    # indented code\n    ---\n\nwords\n    still words",
     ]
 
     static let pieceSeeds: [UInt64] = [0, 7, 20260926]

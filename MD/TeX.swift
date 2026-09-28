@@ -7,6 +7,7 @@ enum TeX {
     private struct LayoutKey: Hashable {
         let tex: String
         let size: CGFloat
+        let display: Bool
     }
 
     private static let layoutLock = NSLock()
@@ -16,8 +17,9 @@ enum TeX {
 
     // KaTeX typesets a display where there is a context to draw into; nil
     // means it refused and the caller falls back to render(_:display:).
-    static func layout(_ tex: String, size: CGFloat) -> MathLayout? {
-        let key = LayoutKey(tex: tex, size: size)
+    static func layout(_ tex: String, size: CGFloat,
+                       display: Bool = true) -> MathLayout? {
+        let key = LayoutKey(tex: tex, size: size, display: display)
         layoutLock.lock()
         defer { layoutLock.unlock() }
         let result: MathLayout?
@@ -25,7 +27,7 @@ enum TeX {
             result = known
         } else {
             var settings = MathSettings()
-            settings.displayMode = true
+            settings.displayMode = display
             settings.fontSize = size
             result = try? KaTeX.layout(tex, settings: settings)
             if layouts.count >= layoutCapacity { layouts.removeAll() }
@@ -124,7 +126,7 @@ enum TeX {
         -> Range<String.Index>? {
         var result: Range<String.Index>? = nil
         if start < s.endIndex, !s[start].isWhitespace,
-           let close = s[start...].firstIndex(of: "$"), close > start {
+           let close = unescapedDollar(s, from: start), close > start {
             let after = s.index(after: close)
             let digit = after < s.endIndex && s[after].isNumber
             if !s[s.index(before: close)].isWhitespace, !digit {
@@ -132,6 +134,20 @@ enum TeX {
             }
         }
         return result
+    }
+
+    private static func unescapedDollar(_ s: String,
+                                        from start: String.Index)
+        -> String.Index? {
+        var found: String.Index? = nil
+        var i = start
+        var escaped = false
+        while found == nil, i < s.endIndex {
+            if s[i] == "$", !escaped { found = i }
+            escaped = s[i] == "\\" && !escaped
+            i = s.index(after: i)
+        }
+        return found
     }
 
     // A \( ... \) inline or \[ ... \] display span; an unclosed opener stays
@@ -165,25 +181,57 @@ enum TeX {
 
     private static func renderToString(_ src: String) -> String {
         var s = expandText(src)
+        for (pattern, template) in spelledOut {
+            s = s.replacingOccurrences(of: pattern, with: template,
+                                       options: .regularExpression)
+        }
         s = stripEnvironments(s)
-        s = expandFractions(s)
-        s = replaceTokens(s)
-        s = expandScript(s, prefix: "^", map: superscriptMap)
-        s = expandScript(s, prefix: "_", map: subscriptMap)
-        s = stripCommands(s)
+        if s.utf8.count <= spelledLimit {
+            s = expandFractions(s)
+            s = replaceTokens(s)
+            s = expandScript(s, prefix: "^", map: superscriptMap)
+            s = expandScript(s, prefix: "_", map: subscriptMap)
+        } else {
+            s = replaceTokens(s)
+        }
+        s = s.replacingOccurrences(of: #"\\[A-Za-z]+\s*"#, with: "",
+                                   options: .regularExpression)
+        s = s.replacingOccurrences(of: #"\\([^A-Za-z\n])"#, with: "$1",
+                                   options: .regularExpression)
         s = s.replacingOccurrences(of: "{", with: "")
              .replacingOccurrences(of: "}", with: "")
         return s.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    private static let textCommand = try? NSRegularExpression(
+        pattern: #"\\(?:text(?!color)[a-z]*|mbox)\s*\{([^{}]*)\}"#)
+
+    private static let spelledLimit = 4096
+
+    private static let spelledOut: [(String, String)] = [
+        (#"\\begin\s*\{(?:array|alignedat|alignat\*?)\}\s*\{[^{}]*\}"#, ""),
+        (#"\\(?:begin|end)\s*\{[^{}]*\}"#, ""),
+        (#"\\[dt]frac(?![A-Za-z])"#, "\\\\frac"),
+        (#"\\q?quad(?![A-Za-z])"#, "  "),
+        (#"\\over(?![A-Za-z])"#, "\u{2044}"),
+        (#"(?<!\\)&"#, " "),
+        (#"\\operatorname\*?\s*\{([^{}]*)\}"#, "$1"),
+        (#"\\xrightarrow\s*(?:\[[^\]]*\])?"#, "\u{2192}"),
+        (#"\\xleftarrow\s*(?:\[[^\]]*\])?"#, "\u{2190}"),
+        (#"\\(?:text)?color\s*\{[^{}]*\}"#, ""),
+        (#"\\not\s*="#, "\u{2260}"),
+        (#"\\("# + Symbols.namedOps.keys
+            .map { name in String(name.dropFirst()) }
+            .sorted { a, b in a.count > b.count }
+            .joined(separator: "|") + #")(?![A-Za-z])"#, "$1"),
+    ]
+
     private static func expandText(_ s: String) -> String {
         var out = s
-        let pattern = #"\\text\s*\{([^{}]*)\}"#
-        while let r = out.range(of: pattern, options: .regularExpression) {
-            let replaced = out[r].replacingOccurrences(
-                of: #"^\\text\s*\{([^{}]*)\}$"#,
-                with: "{$1}", options: .regularExpression)
-            out.replaceSubrange(r, with: replaced)
+        if let re = textCommand {
+            let full = NSRange(location: 0, length: (s as NSString).length)
+            out = re.stringByReplacingMatches(in: s, range: full,
+                                              withTemplate: "{$1}")
         }
         return out
     }
@@ -191,31 +239,7 @@ enum TeX {
     // Environments vanish and row breaks become newlines HERE, ahead of the
     // token map whose "\ " entry would race the break's second backslash.
     private static func stripEnvironments(_ s: String) -> String {
-        var out = s
-        let pattern = #"\\(begin|end)\s*\{[^}]*\}"#
-        while let r = out.range(of: pattern, options: .regularExpression) {
-            out.replaceSubrange(r, with: "")
-        }
-        return out.replacingOccurrences(of: "\\\\", with: "\n")
-            .replacingOccurrences(of: "&", with: "")
-    }
-
-    // Remaining unknown commands degrade to their bare word ("\operatorname"
-    // -> "operatorname"), never a leaked backslash.
-    private static func stripCommands(_ s: String) -> String {
-        var out = ""
-        var i = s.startIndex
-        while i < s.endIndex {
-            let c = s[i]
-            let next = s.index(after: i)
-            if c == "\\", next < s.endIndex, s[next].isLetter {
-                i = next
-            } else {
-                out.append(c)
-                i = next
-            }
-        }
-        return out
+        s.replacingOccurrences(of: "\\\\", with: "\n")
     }
 
     private static func expandFractions(_ s: String) -> String {
@@ -315,11 +339,29 @@ enum TeX {
                                      prefix: prefix))
                 result = s.index(after: close)
             }
+        } else if after == "\\" {
+            let word = controlWord(s, from: next)
+            out.append(mapScript(String(s[next..<word]), map: map,
+                                 prefix: prefix))
+            result = word
         } else {
             out.append(mapScript(String(after), map: map, prefix: prefix))
             result = s.index(after: next)
         }
         return result
+    }
+
+    private static func controlWord(_ s: String,
+                                    from start: String.Index) -> String.Index {
+        var end = s.index(after: start)
+        if end < s.endIndex, s[end].isLetter {
+            while end < s.endIndex, s[end].isLetter {
+                end = s.index(after: end)
+            }
+        } else if end < s.endIndex {
+            end = s.index(after: end)
+        }
+        return end
     }
 
     // A script whose every character has a Unicode form maps whole; anything
@@ -485,6 +527,10 @@ enum TeX {
         "\\Im": "\u{2111}", "\\mathbb{R}": "\u{211D}",
         "\\mathbb{N}": "\u{2115}", "\\mathbb{Z}": "\u{2124}",
         "\\mathbb{Q}": "\u{211A}", "\\mathbb{C}": "\u{2102}",
+        "\\iff": "\u{27FA}", "\\implies": "\u{27F9}",
+        "\\Longrightarrow": "\u{27F9}", "\\gets": "\u{2190}",
+        "\\leqslant": "\u{2A7D}", "\\geqslant": "\u{2A7E}", "\\colon": ":",
+        "\\pmod": "mod ",
         // Operator names render as their plain words; the wrappers vanish
         // (their brace payload survives the later brace strip).
         "\\arcsin": "arcsin", "\\arccos": "arccos", "\\arctan": "arctan",

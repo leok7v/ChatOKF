@@ -19,32 +19,99 @@ enum Highlight {
         return ns
     }
 
+    private typealias Span = (NSRange, PlatformColor)
+
+    static let budget: Duration = .milliseconds(250)
+
     private static func colorize(_ spec: Spec, code: String, full: NSRange,
                                  into ns: NSMutableAttributedString) {
         var mask = [Bool](repeating: false, count: full.length)
-        apply(spec.blockComment, code, full, data.comment, ns, &mask)
-        apply(spec.lineComment, code, full, data.comment, ns, &mask)
-        apply(spec.string, code, full, data.string, ns, &mask)
-        apply(spec.meta, code, full, data.builtin, ns, &mask)
-        apply(spec.tag, code, full, data.variable, ns, &mask)
-        apply(spec.attr, code, full, data.attr, ns, &mask)
-        apply(spec.type, code, full, data.type, ns, &mask)
-        apply(spec.builtin, code, full, data.builtin, ns, &mask)
-        apply(spec.number, code, full, data.number, ns, &mask)
-        applyKeywords(spec.keywords, code, full, data.keyword, ns, mask)
+        var spans: [Span] = []
+        let deadline = ContinuousClock.now + budget
+        tokenize([(spec.blockComment, data.comment),
+                  (spec.lineComment, data.comment),
+                  (spec.attr, data.attr),
+                  (spec.string, data.string)],
+                 code, full, deadline, &spans, &mask)
+        apply(spec.meta, code, full, data.builtin, deadline, &spans, &mask)
+        apply(spec.tag, code, full, data.variable, deadline, &spans, &mask)
+        apply(spec.type, code, full, data.type, deadline, &spans, &mask)
+        apply(spec.builtin, code, full, data.builtin, deadline, &spans,
+              &mask)
+        apply(spec.number, code, full, data.number, deadline, &spans, &mask)
+        applyKeywords(spec.keywords, code, full, data.keyword, deadline,
+                      &spans, mask)
+        spans.sort { a, b in a.0.location < b.0.location }
+        for (range, color) in spans {
+            ns.addAttribute(.foregroundColor, value: color, range: range)
+        }
+    }
+
+    private static func tokenize(
+        _ classes: [(NSRegularExpression?, PlatformColor)], _ code: String,
+        _ full: NSRange, _ deadline: ContinuousClock.Instant,
+        _ spans: inout [Span], _ mask: inout [Bool]) {
+        var next = classes.map { entry in
+            firstMatch(entry.0, code, from: 0, full, deadline)
+        }
+        var position = 0
+        var pending = true
+        while pending {
+            for k in next.indices {
+                if let r = next[k], r.location < position {
+                    next[k] = firstMatch(classes[k].0, code, from: position,
+                                         full, deadline)
+                }
+            }
+            let best = next.indices.compactMap { k in
+                next[k].map { r in (range: r, rank: k) }
+            }.min { a, b in
+                a.range.location != b.range.location
+                    ? a.range.location < b.range.location
+                    : a.rank < b.rank
+            }
+            if let best, NSMaxRange(best.range) <= mask.count {
+                fill(best.range, &mask)
+                spans.append((best.range, classes[best.rank].1))
+                position = NSMaxRange(best.range)
+            } else {
+                pending = false
+            }
+        }
+    }
+
+    private static func firstMatch(_ re: NSRegularExpression?,
+                                   _ code: String, from start: Int,
+                                   _ full: NSRange,
+                                   _ deadline: ContinuousClock.Instant)
+        -> NSRange? {
+        var result: NSRange? = nil
+        re?.enumerateMatches(
+            in: code, options: [.reportProgress, .withTransparentBounds,
+                                .withoutAnchoringBounds],
+            range: NSRange(location: start, length: full.length - start)) {
+            m, _, stop in
+            if let m, m.range.length > 0 {
+                result = m.range
+                stop.pointee = true
+            } else if ContinuousClock.now > deadline {
+                stop.pointee = true
+            }
+        }
+        return result
     }
 
     private static func apply(_ re: NSRegularExpression?, _ code: String,
                               _ full: NSRange, _ color: PlatformColor,
-                              _ ns: NSMutableAttributedString,
-                              _ mask: inout [Bool]) {
+                              _ deadline: ContinuousClock.Instant,
+                              _ spans: inout [Span], _ mask: inout [Bool]) {
         if let re {
-            re.enumerateMatches(in: code, options: [],
-                                range: full) { m, _, _ in
+            re.enumerateMatches(in: code, options: .reportProgress,
+                                range: full) { m, _, stop in
+                if ContinuousClock.now > deadline { stop.pointee = true }
                 if let m, canColor(m.range, mask) {
                     fill(m.range, &mask)
-                    ns.addAttribute(.foregroundColor, value: color,
-                                    range: m.range)
+                    spans.append((m.range, color))
                 }
             }
         }
@@ -53,14 +120,15 @@ enum Highlight {
     private static func applyKeywords(_ re: NSRegularExpression?,
                                       _ code: String, _ full: NSRange,
                                       _ color: PlatformColor,
-                                      _ ns: NSMutableAttributedString,
+                                      _ deadline: ContinuousClock.Instant,
+                                      _ spans: inout [Span],
                                       _ mask: [Bool]) {
         if let re {
-            re.enumerateMatches(in: code, options: [],
-                                range: full) { m, _, _ in
+            re.enumerateMatches(in: code, options: .reportProgress,
+                                range: full) { m, _, stop in
+                if ContinuousClock.now > deadline { stop.pointee = true }
                 if let m, canColor(m.range, mask) {
-                    ns.addAttribute(.foregroundColor, value: color,
-                                    range: m.range)
+                    spans.append((m.range, color))
                 }
             }
         }

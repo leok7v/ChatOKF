@@ -11,7 +11,7 @@ public final class MarkdownStream {
     private var openStart = 0               // first line of `open`'s block
     private var partial = ""                // trailing line, no newline yet
     private var refs: [String: URL] = [:]   // backward-resolving link defs
-    private var fenceMarker: String? = nil  // non-nil while inside a fence
+    private var fence: String? = nil        // non-nil while inside a fence
     private let mathEnabled: Bool
 
     // `math` mirrors MarkdownStyle.renderMath: pass the same value the view
@@ -75,7 +75,7 @@ public final class MarkdownStream {
         openStart = 0
         partial = ""
         refs = [:]
-        fenceMarker = nil
+        fence = nil
     }
 
     private func parsed<T>(_ body: () -> T) -> T {
@@ -87,12 +87,11 @@ public final class MarkdownStream {
     // Fold one complete line into the stripped stream, diverting reference
     // definitions to `refs` exactly as Markdown.parse's first pass does.
     private func ingest(_ line: String) {
-        let t = line.trimmedLeading()
-        if let marker = fenceMarker {
+        if let open = fence {
             lines.append(line)
-            if t.hasPrefix(marker) { fenceMarker = nil }
-        } else if t.hasPrefix("```") || t.hasPrefix("~~~") {
-            fenceMarker = String(t.prefix(3))
+            if Markdown.closesFence(line, open) { fence = nil }
+        } else if let run = Markdown.openingFence(line) {
+            fence = run
             lines.append(line)
         } else if let def = Markdown.parseLinkDefinition(line) {
             refs[def.label] = def.url
@@ -109,11 +108,17 @@ public final class MarkdownStream {
         let tail = Array(lines[sealedLines...])
         let grown = parsed { Markdown.openSpans(tail, resuming: open) }
         let spans = grown.spans
+        let lastStart = spans.last?.start ?? 0
+        let resumed = open == nil ? 0 : 1
         var k = 0
-        while k < spans.count - 1 {
+        while k < spans.count - 1,
+              k < resumed || spans[k].start < lastStart {
             sealed.append(Markdown.Document.Item(
                 id: sealed.count, block: spans[k].block))
             k += 1
+        }
+        for rewrite in grown.rewrites where rewrite.by < lastStart {
+            lines[sealedLines + rewrite.line] = rewrite.text
         }
         if let last = spans.last {
             if open == nil || spans.count >= 2 {
