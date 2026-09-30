@@ -674,10 +674,6 @@ public enum TurnEvent: Sendable {
         Task { await s?.setReasoningEffort(wire) }
     }
 
-    public func pushReasoningCaps(soft: Int, hard: Int) async {
-        await session?.setReasoningCaps(soft: soft, hard: hard)
-    }
-
     public func requestQuickAnswer() {
         let s = session
         Task { await s?.requestQuickAnswer() }
@@ -932,9 +928,7 @@ public enum TurnEvent: Sendable {
         -> (asked: Message, events: AsyncStream<TurnEvent>)? {
         var result: (asked: Message, events: AsyncStream<TurnEvent>)? = nil
         if let media, session != nil {
-            let previews = images.compactMap { img in
-                img.preview ?? VisionPreprocess.thumbnail(img.data, maxPx: 640)
-            }
+            let previews = images.compactMap { img in img.preview }
             var asked = Message(
                 fromUser: true, text: display, images: previews,
                 clips: clips.filter { c in c.isVideo }.map { c in c.url },
@@ -962,9 +956,7 @@ public enum TurnEvent: Sendable {
         var result: (asked: Message, events: AsyncStream<TurnEvent>)? = nil
         if let media, session != nil {
             let secs = said.reduce(0.0) { sum, u in sum + u.seconds }
-            let previews = images.compactMap { img in
-                img.preview ?? VisionPreprocess.thumbnail(img.data, maxPx: 640)
-            }
+            let previews = images.compactMap { img in img.preview }
             var asked = Message(
                 fromUser: true, text: String(format: "Spoken, %.1fs", secs),
                 images: previews,

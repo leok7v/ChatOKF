@@ -189,7 +189,7 @@ import UniformTypeIdentifiers
         }
     }
 
-    func observeDownload(_ s: HubFetch.Status, set: URL) {
+    func observeDownload(_ s: HubFetch.Status) {
         if downloadBase < 0 {
             downloadBase = s.done
         }
@@ -650,10 +650,6 @@ import UniformTypeIdentifiers
         }
     }
 
-    private static func tgKey(_ name: String) -> String { "tg.\(name)" }
-
-    private static func rate(_ v: Double) -> String { Session.rate(v) }
-
     var thinkTokenCap: Int {
         let raw = thinkBudget.seconds * session.measuredTG
         return max(300, Int((raw / 100).rounded()) * 100)
@@ -902,7 +898,7 @@ import UniformTypeIdentifiers
     }
 
     func confirmDownload() {
-        if let name = downloadName, let src = ModelCatalog.source(name) {
+        if let name = downloadName, ModelCatalog.source(name) != nil {
             downloadFallback = Session.isOnDisk(modelName)
                 ? modelName : downloadedFallback()
             commitSwitch(name)
@@ -913,15 +909,11 @@ import UniformTypeIdentifiers
             downloadBase = -1
             phaseStart = Date()
             status = "downloading \(name)…"
-            let dest = Bundle.modelStore().appendingPathComponent(name)
-            let setDir = dest.appendingPathComponent(src.revision)
             let pace = Paced(milliseconds: 100)
             fetchTask = Task { @MainActor in
                 let failure = await session.fetch(name: name) { s in
                     if pace.due(final: s.done >= s.total) {
-                        Task { @MainActor in
-                            self.observeDownload(s, set: setDir)
-                        }
+                        Task { @MainActor in self.observeDownload(s) }
                     }
                 }
                 downloading = false
@@ -993,6 +985,9 @@ import UniformTypeIdentifiers
     // clears it, exactly as New Chat saves before starting one.
     private func commitSwitch(_ name: String) {
         commitCurrent()
+        precondition(readOnly || genTask == nil,
+                     "a model switch never interrupts a live turn; every "
+                     + "way in is gated on !busy")
         genTask?.cancel()
         session.releaseSession(parking: liveConversation)
         for img in attachedImages {
@@ -1234,7 +1229,7 @@ import UniformTypeIdentifiers
                                              data: data)
             attachedImages.append(attachment)
             insertRef(unique, at: offset)
-            Task { @MainActor in
+            decoding[attachment.id] = Task { @MainActor in
                 let decoded = await ChatModel.decoded(data)
                 if let at = attachedImages.firstIndex(where: { img in
                     img.id == attachment.id
@@ -1242,18 +1237,36 @@ import UniformTypeIdentifiers
                     attachedImages[at].preview = decoded.preview
                     attachedImages[at].thumbnail = decoded.thumbnail
                 }
+                decoding[attachment.id] = nil
+                return decoded
             }
         }
     }
 
-    nonisolated private static func decoded(_ data: Data) async
-        -> (preview: CGImage?, thumbnail: CGImage?) {
+    typealias Decoded = (preview: CGImage?, thumbnail: CGImage?)
+
+    @ObservationIgnored private var decoding: [UUID: Task<Decoded, Never>] = [:]
+
+    nonisolated private static func decoded(_ data: Data) async -> Decoded {
         await Task.detached {
             let preview = VisionPreprocess.thumbnail(data, maxPx: 640)
             return (preview, preview.flatMap { cg in
                 VisionPreprocess.scaled(cg, maxPx: 96)
             })
         }.value
+    }
+
+    private func shown(_ images: [ImageAttachment]) async
+        -> [ImageAttachment] {
+        var out = images
+        for i in out.indices where out[i].preview == nil {
+            if let pending = decoding[out[i].id] {
+                let decoded = await pending.value
+                out[i].preview = decoded.preview
+                out[i].thumbnail = decoded.thumbnail
+            }
+        }
+        return out
     }
 
     func attachClip(_ url: URL, isVideo: Bool, at offset: Int,
@@ -1320,8 +1333,9 @@ import UniformTypeIdentifiers
         let room = attachedDocs.count < Self.maxDocs
         if room {
             let name = uniqueName(serialName("Text"))
-            attachDoc(name, text, at: offset,
-                      from: ChatModel.keepText(text, name + ".txt"))
+            let kept = ChatModel.keepText(text, name + ".txt")
+            if kept == nil { flashHUD("Could not keep \(name)") }
+            attachDoc(name, text, at: offset, from: kept)
         }
         return room
     }
@@ -1332,9 +1346,14 @@ import UniformTypeIdentifiers
             UUID().uuidString, isDirectory: true)
         try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
         let to = dir.appendingPathComponent(file)
-        let wrote = (try? text.write(to: to, atomically: true,
-                                     encoding: .utf8)) != nil
-        return wrote ? to : nil
+        var kept: URL? = to
+        do {
+            try text.write(to: to, atomically: true, encoding: .utf8)
+        } catch {
+            Diag.shared.report("[keep] \(file) not written: \(error)")
+            kept = nil
+        }
+        return kept
     }
 
     private(set) var convertingNames: [String] = []
@@ -1374,7 +1393,14 @@ import UniformTypeIdentifiers
             UUID().uuidString, isDirectory: true)
         try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
         let to = dir.appendingPathComponent(name)
-        return (try? fm.copyItem(at: from, to: to)) != nil ? to : nil
+        var kept: URL? = to
+        do {
+            try fm.copyItem(at: from, to: to)
+        } catch {
+            Diag.shared.report("[keep] \(name) not copied: \(error)")
+            kept = nil
+        }
+        return kept
     }
 
     private static func markdown(of url: URL) async -> String? {
@@ -1574,6 +1600,7 @@ import UniformTypeIdentifiers
             } else if let kept = read.kept, Self.convertExts.contains(ext) {
                 convertDoc(kept, name)
             } else if let text = read.text {
+                if read.kept == nil { flashHUD("Could not keep \(name)") }
                 attachDoc(name, text, at: caret, from: read.kept)
             } else {
                 flashHUD("Cannot read \(name)")
@@ -1842,7 +1869,7 @@ import UniformTypeIdentifiers
         }
         let display = AttachmentRefs.stripped(scrubbed)
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        if canRunTurn {
+        if canRunTurn, sendTask == nil {
             let images = attachedImages
             let clips = attachedClips
             let docs = Session.refs(attachedDocs)
@@ -1859,19 +1886,29 @@ import UniformTypeIdentifiers
             } else {
                 cue = .reading
             }
-            if let (asked, events) = session.sendSoft(
-                typed: typed, display: display, images: images, clips: clips,
-                docs: docs, budget: imageBudget.tokens, labelled: true,
-                placeholder: false,
-                thinkTokenCap: thinkTokenCap, thinkingActive: thinkingActive) {
-                beginTurn(asked, spoken: false, cue: cue, stage: .vision,
-                         events: events)
+            let serial = transcriptSerial
+            sendTask = Task { [weak self] in
+                if let self {
+                    let previewed = await self.shown(images)
+                    if self.canRunTurn, serial == self.transcriptSerial,
+                       let (asked, events) = self.session.sendSoft(
+                           typed: typed, display: display, images: previewed,
+                           clips: clips, docs: docs,
+                           budget: self.imageBudget.tokens, labelled: true,
+                           placeholder: false,
+                           thinkTokenCap: self.thinkTokenCap,
+                           thinkingActive: self.thinkingActive) {
+                        self.beginTurn(asked, spoken: false, cue: cue,
+                                       stage: .vision, events: events)
+                    }
+                }
+                self?.sendTask = nil
             }
         }
     }
 
     private func sendSpoken(_ said: [SpeechGate.Utterance]) {
-        if canRunTurn {
+        if canRunTurn, sendTask == nil {
             let typed = promptFor(input)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             let images = attachedImages
@@ -1882,15 +1919,25 @@ import UniformTypeIdentifiers
             attachedImages = []
             attachedClips = []
             attachedDocs = []
-            if let (asked, events) = session.sendSpoken(
-                said: said,
-                typed: typed.isEmpty ? Session.spokenPrompt : typed,
-                images: images, clips: clips, docs: docs,
-                budget: imageBudget.tokens, thinkTokenCap: thinkTokenCap,
-                thinkingActive: thinkingActive) {
-                beginTurn(asked, spoken: true,
-                          cue: images.isEmpty ? .thinking : .looking,
-                          stage: .vision, events: events)
+            let serial = transcriptSerial
+            sendTask = Task { [weak self] in
+                if let self {
+                    let previewed = await self.shown(images)
+                    if self.canRunTurn, serial == self.transcriptSerial,
+                       let (asked, events) = self.session.sendSpoken(
+                           said: said,
+                           typed: typed.isEmpty ? Session.spokenPrompt : typed,
+                           images: previewed, clips: clips, docs: docs,
+                           budget: self.imageBudget.tokens,
+                           thinkTokenCap: self.thinkTokenCap,
+                           thinkingActive: self.thinkingActive) {
+                        self.beginTurn(asked, spoken: true,
+                                       cue: images.isEmpty ? .thinking
+                                                           : .looking,
+                                       stage: .vision, events: events)
+                    }
+                }
+                self?.sendTask = nil
             }
         }
     }

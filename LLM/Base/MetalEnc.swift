@@ -82,17 +82,19 @@ struct MetalEnc {
     static let spanTypes: Set<GGUFType> = [.q8_0, .iq4_nl]
 
     func gemv(_ w: GGUFTensor, x: MTLBuffer, out: MTLBuffer, off: WeightRef,
-              xOff: Int = 0, outOff: Int = 0) {
+              xOffBytes: Int = 0, outOffBytes: Int = 0) {
         if Blocks.superBlocked(w.type) || MetalEnc.spanTypes.contains(w.type) {
-            iqGemv(w, x: x, out: out, off: off, xOff: xOff, outOff: outOff)
+            iqGemv(w, x: x, out: out, off: off, xOffBytes: xOffBytes,
+                   outOffBytes: outOffBytes)
         } else {
-            packedGemv(w, x: x, out: out, off: off, xOff: xOff,
-                       outOff: outOff)
+            packedGemv(w, x: x, out: out, off: off, xOffBytes: xOffBytes,
+                       outOffBytes: outOffBytes)
         }
     }
 
     private func packedGemv(_ w: GGUFTensor, x: MTLBuffer, out: MTLBuffer,
-                            off: WeightRef, xOff: Int, outOff: Int) {
+                            off: WeightRef, xOffBytes: Int,
+                            outOffBytes: Int) {
         let k = w.dims[0], m = w.dims[1]
         var a = GemvArgs(woff: off.local, K: UInt32(k), M: UInt32(m))
         let ty = w.type
@@ -106,17 +108,20 @@ struct MetalEnc {
         default:
             fatalError("MetalEnc.gemv: no kernel for \(ty) (\(w.name))")
         }
+        precondition(ty != .f16 && ty != .f32 || k % 4 == 0,
+                     "\(name) reads its row and x as float4, so K must be a "
+                     + "multiple of 4; \(w.name) has K \(k)")
         let rows = ty == .f16 || ty == .f32 ? 1 : 8
         groups(name, (m + rows - 1) / rows, tpg: 32) { e in
             e.setBuffer(off.buf, offset: 0, index: 0)
-            e.setBuffer(x, offset: xOff, index: 1)
-            e.setBuffer(out, offset: outOff, index: 2)
+            e.setBuffer(x, offset: xOffBytes, index: 1)
+            e.setBuffer(out, offset: outOffBytes, index: 2)
             e.setBytes(&a, length: MemoryLayout<GemvArgs>.stride, index: 3)
         }
     }
 
     private func iqGemv(_ w: GGUFTensor, x: MTLBuffer, out: MTLBuffer,
-                        off: WeightRef, xOff: Int, outOff: Int) {
+                        off: WeightRef, xOffBytes: Int, outOffBytes: Int) {
         var a = iqArgs(off, w.type, k: w.dims[0], m: w.dims[1])
         let rows = 8
         let name: String
@@ -141,8 +146,8 @@ struct MetalEnc {
         }
         groups(name, (w.dims[1] + rows - 1) / rows, tpg: 32) { e in
             e.setBuffer(off.buf, offset: 0, index: 0)
-            e.setBuffer(x, offset: xOff, index: 1)
-            e.setBuffer(out, offset: outOff, index: 2)
+            e.setBuffer(x, offset: xOffBytes, index: 1)
+            e.setBuffer(out, offset: outOffBytes, index: 2)
             e.setBytes(&a, length: MemoryLayout<IQArgs>.stride, index: 3)
         }
     }
@@ -159,8 +164,8 @@ struct MetalEnc {
                   off: WeightRef, N: Int) {
         let k = w.dims[0], m = w.dims[1]
         for j in 0 ..< N {
-            gemv(w, x: X, out: out, off: off, xOff: j * k * 4,
-                 outOff: j * m * 4)
+            gemv(w, x: X, out: out, off: off, xOffBytes: j * k * 4,
+                 outOffBytes: j * m * 4)
         }
     }
 
@@ -394,21 +399,19 @@ struct MetalEnc {
         pop()
     }
 
-    // `outOff` is a BYTE offset, so a batched caller dequants into row r
-    // directly.
     func dequantRow(weightOff: WeightRef, out: MTLBuffer, n: Int,
-                    type: GGUFType = .q2_0, outOff: Int = 0) {
+                    type: GGUFType = .q2_0, outOffBytes: Int = 0) {
         if Blocks.superBlocked(type) {
             var a = iqArgs(weightOff, type, k: n, m: n)
             grid1D(MetalEnc.dqRowName(type),
                    n / Blocks.superBlock) { e in
                 e.setBuffer(weightOff.buf, offset: 0, index: 0)
-                e.setBuffer(out, offset: outOff, index: 1)
+                e.setBuffer(out, offset: outOffBytes, index: 1)
                 e.setBytes(&a, length: MemoryLayout<IQArgs>.stride, index: 2)
             }
         } else {
             packedDequantRow(weightOff: weightOff, out: out, n: n,
-                             type: type, outOff: outOff)
+                             type: type, outOffBytes: outOffBytes)
         }
     }
 
@@ -435,7 +438,7 @@ struct MetalEnc {
     }
 
     private func packedDequantRow(weightOff: WeightRef, out: MTLBuffer,
-                                  n: Int, type: GGUFType, outOff: Int) {
+                                  n: Int, type: GGUFType, outOffBytes: Int) {
         var a = GemvArgs(woff: weightOff.local, K: UInt32(n), M: UInt32(n))
         let name: String
         switch type {
@@ -450,12 +453,15 @@ struct MetalEnc {
         }
         grid1D(name, n) { e in
             e.setBuffer(weightOff.buf, offset: 0, index: 0)
-            e.setBuffer(out, offset: outOff, index: 1)
+            e.setBuffer(out, offset: outOffBytes, index: 1)
             e.setBytes(&a, length: MemoryLayout<GemvArgs>.stride, index: 2)
         }
     }
 
     func assistTopClusters(x: MTLBuffer, out: MTLBuffer, n: Int, k: Int) {
+        precondition(n <= 2048,
+                     "assist_top_clusters stages the scores in s[2048]; "
+                     + "asked for \(n)")
         var a = AssistTopArgs(n: UInt32(n), k: UInt32(k))
         groups("assist_top_clusters", 1, tpg: 256) { e in
             e.setBuffer(x, offset: 0, index: 0)
@@ -469,6 +475,9 @@ struct MetalEnc {
                              ordering: WeightRef, clusters: MTLBuffer,
                              out: MTLBuffer, off: WeightRef, dim: Int,
                              per: Int, k: Int) {
+        precondition(w.type == .q4_0,
+                     "assist_cluster_argmax reads the q4_0 row layout; "
+                     + "\(w.name) is \(w.type)")
         var a = AssistPickArgs(
             woff: off.local, ooff: ordering.local, dim: UInt32(dim),
             per: UInt32(per), clusters: UInt32(k),
@@ -494,26 +503,27 @@ struct MetalEnc {
     }
 
     func rmsnorm(x: MTLBuffer, weightOff: WeightRef, out: MTLBuffer, n: Int,
-                 eps: Float, xOff: Int = 0, outOff: Int = 0) {
+                 eps: Float, xOffBytes: Int = 0, outOffBytes: Int = 0) {
         var a = NormArgs(woff: weightOff.local, n: UInt32(n), eps: eps)
         groups("rmsnorm", 1, tpg: 256, tgmem: 128) { e in
-            e.setBuffer(x, offset: xOff, index: 0)
+            e.setBuffer(x, offset: xOffBytes, index: 0)
             e.setBuffer(weightOff.buf, offset: 0, index: 1)
-            e.setBuffer(out, offset: outOff, index: 2)
+            e.setBuffer(out, offset: outOffBytes, index: 2)
             e.setBytes(&a, length: MemoryLayout<NormArgs>.stride, index: 3)
         }
     }
 
     func rmsnormBatch(x: MTLBuffer, weightOff: WeightRef, y: MTLBuffer, n: Int,
-                      rows: Int, eps: Float, xOff: Int = 0, xStride: Int? = nil,
-                      yOff: Int = 0, yStride: Int? = nil) {
+                      rows: Int, eps: Float, xOffBytes: Int = 0,
+                      xStride: Int? = nil, yOffBytes: Int = 0,
+                      yStride: Int? = nil) {
         var a = NormBatchArgs(woff: weightOff.local, n: UInt32(n), eps: eps,
                               xStride: UInt32(xStride ?? n),
                               yStride: UInt32(yStride ?? n))
         groups("rmsnorm_batch", rows, tpg: 256, tgmem: 128) { e in
-            e.setBuffer(x, offset: xOff, index: 0)
+            e.setBuffer(x, offset: xOffBytes, index: 0)
             e.setBuffer(weightOff.buf, offset: 0, index: 1)
-            e.setBuffer(y, offset: yOff, index: 2)
+            e.setBuffer(y, offset: yOffBytes, index: 2)
             e.setBytes(&a, length: MemoryLayout<NormBatchArgs>.stride,
                        index: 3)
         }
@@ -608,11 +618,11 @@ struct MetalEnc {
         }
     }
 
-    func scaleInPlace(x: MTLBuffer, n: Int, s: Float, off: Int = 0) {
+    func scaleInPlace(x: MTLBuffer, n: Int, s: Float, offBytes: Int = 0) {
         var nn = UInt32(n)
         var ss = s
         grid1D("scale_inplace", n) { e in
-            e.setBuffer(x, offset: off, index: 0)
+            e.setBuffer(x, offset: offBytes, index: 0)
             e.setBytes(&nn, length: 4, index: 1)
             e.setBytes(&ss, length: 4, index: 2)
         }
@@ -675,6 +685,8 @@ struct MetalEnc {
     func gemmaVisionAttn(q: MTLBuffer, k: MTLBuffer, v: MTLBuffer,
                          mask: MTLBuffer, out: MTLBuffer, n: Int, hd: Int,
                          nHead: Int) {
+        precondition(hd <= 256,
+                     "gemma_vit_attn: acc[8] caps head dim at 256, got \(hd)")
         var a = GVAttnArgs(n: UInt32(n), hd: UInt32(hd),
                            nHead: UInt32(nHead))
         groups("gemma_vit_attn", n * nHead, tpg: 32,
@@ -735,6 +747,8 @@ struct MetalEnc {
     }
 
     func srqTo(src: MTLBuffer, dst: MTLBuffer, n: Int, s: SRQ.Side) {
+        precondition(s.active, "srq_to has no identity case: an inactive "
+                     + "side would clamp every value to lo")
         var a = SrqArgs(n: UInt32(n), s: s.scale, lo: s.lo, hi: s.hi)
         grid1D("srq_to", n) { e in
             e.setBuffer(src, offset: 0, index: 0)
@@ -747,6 +761,9 @@ struct MetalEnc {
     // (one norm feeds q, k and v); the output belongs to this linear alone.
     func linear(_ w: GGUFTensor, X: MTLBuffer, out: MTLBuffer, off: WeightRef,
                 N: Int, srq: SRQ, scratch: MTLBuffer) {
+        precondition(!sync.grouped, "linear(X:N:) is three dependent "
+                     + "dispatches with no barrier of its own; it cannot "
+                     + "sit inside parallel")
         var input = X
         if srq.input.active {
             srqTo(src: X, dst: scratch, n: N * w.dims[0], s: srq.input)
@@ -1132,6 +1149,8 @@ struct MetalEnc {
     func gdnConvBatch(qkvMixN: MTLBuffer, convState: MTLBuffer,
                       cwOff: WeightRef, outN: MTLBuffer, convDim: Int,
                       dConv: Int, N: Int, ring: StateRing = .inPlace) {
+        precondition(dConv <= 4,
+                     "gdn_conv_batch: ring[3] caps dConv at 4, got \(dConv)")
         var a = ConvBatchArgs(cwOff: cwOff.local, convDim: UInt32(convDim),
                               dConv: UInt32(dConv), N: UInt32(N),
                               slot0: UInt32(ring.slot0),

@@ -465,8 +465,8 @@ public enum QwenMetalSelfTest {
                     f.gemm(w, X: xb, out: narrow, off: off, N: n)
                     for c in 0..<n {
                         f.gemv(w, x: xb, out: narrow, off: off,
-                               xOff: c * k * 4,
-                               outOff: (n + c) * m * 4)
+                               xOffBytes: c * k * 4,
+                               outOffBytes: (n + c) * m * 4)
                     }
                     e.endEncoding()
                     cb.commit()
@@ -513,8 +513,8 @@ public enum QwenMetalSelfTest {
                 let f = MetalEnc(ctx: ctx, e: e)
                 f.gemm(w, X: xb, out: both, off: off, N: n)
                 for c in 0..<n {
-                    f.gemv(w, x: xb, out: both, off: off, xOff: c * k * 4,
-                           outOff: (n + c) * m * 4)
+                    f.gemv(w, x: xb, out: both, off: off,
+                           xOffBytes: c * k * 4, outOffBytes: (n + c) * m * 4)
                 }
                 e.endEncoding()
                 cb.commit()

@@ -75,9 +75,10 @@ final class QwenMetalMTP {
     }
 
     func encodeStep(_ f: MetalEnc, token: Int, hidden: MTLBuffer,
-                    hiddenOff: Int, ropePos: Int, head wantHead: Bool) {
+                    hiddenOffBytes: Int, ropePos: Int, head wantHead: Bool) {
         let c = cfg
-        encodeInput(f, token: token, hidden: hidden, hiddenOff: hiddenOff)
+        encodeInput(f, token: token, hidden: hidden,
+                    hiddenOffBytes: hiddenOffBytes)
         encodeAttn(f, ropePos: ropePos)
         f.add(x: bCur, y: bContrib, n: c.nEmbd)
         f.rmsnorm(x: bCur, weightOff: off(w.attnPostNorm), out: bNormed,
@@ -96,7 +97,7 @@ final class QwenMetalMTP {
 
     func encodeRow(_ f: MetalEnc, token: Int, hidden: MTLBuffer,
                    ropePos: Int) {
-        encodeInput(f, token: token, hidden: hidden, hiddenOff: 0)
+        encodeInput(f, token: token, hidden: hidden, hiddenOffBytes: 0)
         encodeKV(f, ropePos: ropePos)
     }
 
@@ -113,11 +114,12 @@ final class QwenMetalMTP {
         let stride = MemoryLayout<Float>.stride
         let wide = 2 * c.nEmbd
         f.rmsnorm(x: prev, weightOff: off(w.hnorm), out: s.cat, n: c.nEmbd,
-                  eps: c.eps, outOff: c.nEmbd * stride)
+                  eps: c.eps, outOffBytes: c.nEmbd * stride)
         if N > 1 {
             f.rmsnormBatch(x: hidden, weightOff: off(w.hnorm), y: s.cat,
                            n: c.nEmbd, rows: N - 1, eps: c.eps,
-                           yOff: (wide + c.nEmbd) * stride, yStride: wide)
+                           yOffBytes: (wide + c.nEmbd) * stride,
+                           yStride: wide)
         }
         f.gemm(w.ehProj, X: s.cat, out: s.cur, off: off(w.ehProj), N: N)
         f.rmsnormBatch(x: s.cur, weightOff: off(w.attnNorm), y: s.normed,
@@ -137,7 +139,7 @@ final class QwenMetalMTP {
     }
 
     private func encodeInput(_ f: MetalEnc, token: Int, hidden: MTLBuffer,
-                             hiddenOff: Int) {
+                             hiddenOffBytes: Int) {
         let c = cfg
         let rowBytes = GGUF.rowByteCount(tokEmbd.type, c.nEmbd)
         f.dequantRow(weightOff: off(tokEmbd) + UInt64(token * rowBytes),
@@ -145,8 +147,8 @@ final class QwenMetalMTP {
         f.rmsnorm(x: bEmbed, weightOff: off(w.enorm), out: bCat, n: c.nEmbd,
                   eps: c.eps)
         f.rmsnorm(x: hidden, weightOff: off(w.hnorm), out: bCat, n: c.nEmbd,
-                  eps: c.eps, xOff: hiddenOff,
-                  outOff: c.nEmbd * MemoryLayout<Float>.stride)
+                  eps: c.eps, xOffBytes: hiddenOffBytes,
+                  outOffBytes: c.nEmbd * MemoryLayout<Float>.stride)
         f.gemv(w.ehProj, x: bCat, out: bCur, off: off(w.ehProj))
         f.rmsnorm(x: bCur, weightOff: off(w.attnNorm), out: bNormed,
                   n: c.nEmbd, eps: c.eps)

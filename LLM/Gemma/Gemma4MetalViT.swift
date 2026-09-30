@@ -44,6 +44,10 @@ public final class Gemma4MetalViT {
         let nH = cfg.heads
         let wide = nH * hd
         let padded = pos.map { p in p.0 < 0 && p.1 < 0 }
+        precondition(padded.first == false,
+                     "gemma_vit_attn needs a real patch in the first key "
+                     + "tile, or its running max starts at -inf and the row "
+                     + "is NaN")
         let rope = cpu.ropeForGPU(pos: pos)
 
         let bX = ctx.makeF32(cpu.embedForGPU(pixels: pixels, pos: pos))

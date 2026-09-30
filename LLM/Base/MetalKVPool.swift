@@ -329,9 +329,14 @@ final class MetalKVPool {
             let first = max(0, lo) / P
             let last = min(hi / P, kPages.count - 1)
             if first <= last {
-                for i in first...last where isLive(i) {
-                    out.append(kPages[i])
-                    out.append(vPages[i])
+                for i in first...last {
+                    precondition(isLive(i) || i >= capacity || !attached,
+                                 "rows \(lo)...\(hi) read page \(i), which "
+                                 + "was evicted; the range is the mask")
+                    if isLive(i) {
+                        out.append(kPages[i])
+                        out.append(vPages[i])
+                    }
                 }
             }
         }

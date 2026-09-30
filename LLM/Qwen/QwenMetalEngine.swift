@@ -479,7 +479,7 @@ public final class QwenMetalEngine {
         if head {
             f.gemv(model.output, x: b.normed, out: bLogits,
                    off: off(model.output),
-                   xOff: (N - 1) * c.nEmbd * MemoryLayout<Float>.stride)
+                   xOffBytes: (N - 1) * c.nEmbd * MemoryLayout<Float>.stride)
         }
     }
 
@@ -1201,7 +1201,7 @@ public final class QwenMetalEngine {
             let e = cb.makeComputeCommandEncoder(dispatchType: .concurrent)!
             let f = MetalEnc(ctx: ctx, e: e, concurrent: true)
             d.encodeStep(f, token: Int(fed[i]),
-                         hidden: i == 0 ? prev : d.bHidden, hiddenOff: 0,
+                         hidden: i == 0 ? prev : d.bHidden, hiddenOffBytes: 0,
                          ropePos: p0 + i, head: true)
             f.argmaxRows(x: d.bLogits, out: specPick!, n: c.nVocab, rows: 1)
             e.endEncoding()
@@ -1274,7 +1274,7 @@ public final class QwenMetalEngine {
         while j < m {
             let stride = MemoryLayout<Float>.stride
             d.encodeStep(f, token: Int(fed[j]), hidden: b.normed,
-                         hiddenOff: (j - 1) * c.nEmbd * stride,
+                         hiddenOffBytes: (j - 1) * c.nEmbd * stride,
                          ropePos: p0 + j, head: false)
             j += 1
         }
