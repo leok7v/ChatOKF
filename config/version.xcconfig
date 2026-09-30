@@ -1,5 +1,5 @@
 // version.xcconfig -- committed fallback stamp (md.too convention).
 // MARKETING_VERSION is YY.MM.DD; CURRENT_PROJECT_VERSION is YYMMDD.HHMM (UTC).
-MARKETING_VERSION = 26.09.28
-CURRENT_PROJECT_VERSION = 260928.0751
+MARKETING_VERSION = 26.09.30
+CURRENT_PROJECT_VERSION = 260930.2119
 #include? "version-generated.xcconfig"
