@@ -208,6 +208,37 @@ repacked into a single file at
 [leok7v/supertonic](https://huggingface.co/leok7v/supertonic), 79 MB at 4
 bits on an iPhone with 3 or 4 GB and 111 MB at 8 bits everywhere else.
 
+## Reading voice
+
+Replies are read aloud by Supertonic 3 through the engine in `TTS/`, one
+Swift file over Accelerate, on the CPU beside the chat model. On an iPhone
+SE with 3 GB it renders a sentence about twice as fast as it speaks it,
+while the chat model is still answering. Ten voices, chosen in Settings,
+Voice.
+
+The engine speaks 31 languages, each selected by its code:
+
+| Code | Language | Code | Language | Code | Language | Code | Language |
+|------|----------|------|----------|------|----------|------|----------|
+| `en` | English | `ko` | Korean | `ja` | Japanese | `ar` | Arabic |
+| `bg` | Bulgarian | `cs` | Czech | `da` | Danish | `de` | German |
+| `el` | Greek | `es` | Spanish | `et` | Estonian | `fi` | Finnish |
+| `fr` | French | `hi` | Hindi | `hr` | Croatian | `hu` | Hungarian |
+| `id` | Indonesian | `it` | Italian | `lt` | Lithuanian | `lv` | Latvian |
+| `nl` | Dutch | `pl` | Polish | `pt` | Portuguese | `ro` | Romanian |
+| `ru` | Russian | `sk` | Slovak | `sl` | Slovenian | `sv` | Swedish |
+| `tr` | Turkish | `uk` | Ukrainian | `vi` | Vietnamese | | |
+
+The app reads every reply as English for now. The command-line tool takes
+the code, so the other thirty can be heard today:
+
+    chatokf --tts "Guten Morgen, wie geht es dir?" --tts-lang de \
+        --tts-voice Emily --tts-pack supertonic-q8.safetensors \
+        --tts-out morgen.wav
+
+`chatokf --tts-voices` lists the voices; the pack is the file from
+[leok7v/supertonic](https://huggingface.co/leok7v/supertonic).
+
 ## License
 
 ChatOKF is under the **MIT License**, Copyright (c) 2026 Leo Kuznetsov. See
