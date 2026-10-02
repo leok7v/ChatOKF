@@ -199,9 +199,9 @@ a:hover { color: var(--delta); }
 :root[data-theme="dark"] .i-moon { display: none; }
 .tgl:hover { color: var(--trace); border-color: var(--trace-dim); }
 
-/* what a narrowing bar sheds, least useful first. The Mac download is the
-   last thing to go, because it is the only thing in the bar a visitor
-   might have come for. */
+/* what a narrowing bar sheds, least useful first. The App Store button is
+   the last thing to go, because on a phone it is the only thing in the bar
+   a visitor might have come for. */
 @media (max-width: 940px) { .top nav .lnk.opt1 { display: none; } }
 @media (max-width: 820px) { .top nav .lnk.opt2 { display: none; } }
 @media (max-width: 700px) { .top nav .lnk.opt3 { display: none; } }
@@ -378,12 +378,14 @@ footer { border-top: 1px solid var(--edge); padding: 2.2rem 0 3rem; }
     <a class="lnk opt1" href="#do">What it does</a>
     <a class="lnk opt2" href="#private">Privacy</a>
     <a class="lnk opt3" href="#models">Models</a>
+    <a class="get sm ghost" href="https://testflight.apple.com/join/Qsvxk5Mh"
+       target="_blank" rel="noopener noreferrer">TestFlight</a>
     <a class="get sm ghost"
-       href="https://apps.apple.com/us/app/chatokf/id6811258150"
-       target="_blank" rel="noopener noreferrer">App Store</a>
-    <a class="get sm"
        href="https://github.com/leok7v/ChatOKF/releases/latest/download/ChatOKF.dmg"
        target="_blank" rel="noopener noreferrer">Download</a>
+    <a class="get sm"
+       href="https://apps.apple.com/us/app/chatokf/id6811258150"
+       target="_blank" rel="noopener noreferrer">App Store</a>
     <button class="tgl" id="tgl" type="button" aria-label="Switch theme">
       <svg class="i-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor"
            stroke-width="1.7" stroke-linecap="round" aria-hidden="true">
@@ -409,11 +411,13 @@ footer { border-top: 1px solid var(--edge); padding: 2.2rem 0 3rem; }
     device, so your conversation never leaves it.</p>
     <div class="cta">
       <a class="get"
-         href="https://github.com/leok7v/ChatOKF/releases/latest/download/ChatOKF.dmg"
-         target="_blank" rel="noopener noreferrer">Download for macOS</a>
-      <a class="get ghost"
          href="https://apps.apple.com/us/app/chatokf/id6811258150"
          target="_blank" rel="noopener noreferrer">Get it on the App Store</a>
+      <a class="get ghost"
+         href="https://github.com/leok7v/ChatOKF/releases/latest/download/ChatOKF.dmg"
+         target="_blank" rel="noopener noreferrer">Download for macOS</a>
+      <a class="get ghost" href="https://testflight.apple.com/join/Qsvxk5Mh"
+         target="_blank" rel="noopener noreferrer">Try TestFlight Beta</a>
     </div>
     <p class="note"><b>Free.</b> No account, no sign-in, no subscription.
     Works with the Wi-Fi off. Signed and notarised by Apple. Apple silicon,
