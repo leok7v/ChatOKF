@@ -243,15 +243,35 @@ struct Composer: View {
     private var speakerButton: some View {
         let on = model.speech.enabled
         let live = model.speech.speaking
-        let tip = on ? "Replies are spoken" : "Speak replies"
-        return Button { model.speech.enabled.toggle() } label: {
-            Image(systemName: live ? "speaker.wave.2.fill"
-                                   : (on ? "speaker.wave.2" : "speaker.slash"))
-                .foregroundStyle(on ? Color.accentColor : .secondary)
-                .frame(width: slotSize, height: slotSize)
+        let fetching = model.speech.pack == .fetching
+        var tip = on ? "Replies are spoken" : "Speak replies"
+        if fetching { tip = "Downloading the voice. Tap to cancel." }
+        return Button { model.speech.toggle() } label: {
+            ZStack {
+                if fetching {
+                    fetchRing(model.speech.fetchFraction)
+                } else {
+                    Image(systemName: live ? "speaker.wave.2.fill"
+                              : (on ? "speaker.wave.2" : "speaker.slash"))
+                        .foregroundStyle(on ? Color.accentColor : .secondary)
+                }
+            }
+            .frame(width: slotSize, height: slotSize)
         }
         .buttonStyle(.plain)
         .help(tip)
+    }
+
+    private func fetchRing(_ fraction: Double) -> some View {
+        ZStack {
+            Circle().stroke(Color.secondary.opacity(0.3), lineWidth: 2)
+            Circle()
+                .trim(from: 0, to: max(0.03, fraction))
+                .stroke(Color.accentColor,
+                        style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                .rotationEffect(.degrees(-90))
+        }
+        .padding(3)
     }
 
     private var micButton: some View {
@@ -548,6 +568,9 @@ struct Composer: View {
             text = "Paused"
         } else if model.speech.speaking {
             text = "Speaking…"
+        } else if model.speech.pack == .fetching {
+            text = "Downloading the voice, "
+                + "\(Int(model.speech.fetchFraction * 100))%"
         } else {
             text = plainFootnote
         }

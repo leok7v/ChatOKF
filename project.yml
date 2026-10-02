@@ -40,12 +40,6 @@ targets:
       - path: LLM/Slugs
         excludes:
           - minilm.gguf
-      - path: LLM/TTS
-        excludes:
-          - kitten_full.gguf
-          - voices.safetensors
-          - en_rules
-          - en_list
     # Set directly, NOT via platform.xcconfig, which carries app-only
     # settings this library must not inherit.
     configFiles:
@@ -64,6 +58,29 @@ targets:
         OTHER_SWIFT_FLAGS: -Xcc -DACCELERATE_NEW_LAPACK
       configs:
         # OPTIMIZED EVEN IN DEBUG.
+        Debug:
+          SWIFT_OPTIMIZATION_LEVEL: "-O"
+  # Speech out: the Supertonic engine and the text shaping in front of it.
+  # Self contained, it imports neither LLM nor Chat.
+  TTS:
+    type: library.static
+    supportedDestinations: [macOS, iOS]
+    sources:
+      - path: TTS
+        excludes:
+          - TTSTests
+          - buildServer.json
+    settings:
+      base:
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: complete
+        SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
+        # As in LLM: no ditto header phase under the script sandbox.
+        SWIFT_INSTALL_OBJC_HEADER: "NO"
+        # Binds cblas_sgemm$NEWLAPACK.
+        OTHER_SWIFT_FLAGS: -Xcc -DACCELERATE_NEW_LAPACK
+      configs:
+        # Unusable unoptimized: the engine is plain loops over floats.
         Debug:
           SWIFT_OPTIMIZATION_LEVEL: "-O"
   # Markdown transcript rendering; a native static-library target like LLM
@@ -127,14 +144,6 @@ targets:
         buildPhase: resources
       - path: LLM/Base/e5-small.gguf
         buildPhase: resources
-      - path: LLM/TTS/kitten_full.gguf
-        buildPhase: resources
-      - path: LLM/TTS/voices.safetensors
-        buildPhase: resources
-      - path: LLM/TTS/en_rules
-        buildPhase: resources
-      - path: LLM/TTS/en_list
-        buildPhase: resources
       - path: MD/Resources/highlights.ini
         buildPhase: resources
       - path: MD/Resources/STIXTwoMath.otf
@@ -143,6 +152,7 @@ targets:
       - target: Chat
       - target: LLM
       - target: MD
+      - target: TTS
     configFiles:
       Debug: config/platform.xcconfig
       Release: config/platform.xcconfig
@@ -189,6 +199,7 @@ targets:
       - path: LLM/metal
     dependencies:
       - target: LLM
+      - target: TTS
     settings:
       base:
         SWIFT_VERSION: "6.0"
@@ -273,6 +284,23 @@ targets:
         # Ad hoc on macOS, as in ChatOKFTests.
         CODE_SIGN_STYLE: Automatic
         CODE_SIGN_IDENTITY[sdk=macosx*]: "-"
+  # UNHOSTED for the same reason as LLMTests.
+  TTSTests:
+    type: bundle.unit-test
+    supportedDestinations: [macOS, iOS]
+    sources:
+      - TTS/TTSTests
+    dependencies:
+      - target: TTS
+    settings:
+      base:
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: complete
+        SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
+        GENERATE_INFOPLIST_FILE: YES
+        # Ad hoc on macOS, as in ChatOKFTests.
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY[sdk=macosx*]: "-"
 schemes:
   ChatOKF:
     build:
@@ -281,12 +309,14 @@ schemes:
         ChatOKFTests: [test]
         LLMTests: [test]
         MDTests: [test]
+        TTSTests: [test]
     test:
       config: Debug
       targets:
         - ChatOKFTests
         - LLMTests
         - MDTests
+        - TTSTests
     run:
       config: Release
       # All DECLARED but UNCHECKED (isEnabled/value: false), so they survive a
@@ -313,6 +343,7 @@ schemes:
         ChatOKFTests: [test]
         LLMTests: [test]
         MDTests: [test]
+        TTSTests: [test]
     test:
       config: Debug
       environmentVariables:
@@ -321,3 +352,4 @@ schemes:
         - ChatOKFTests
         - LLMTests
         - MDTests
+        - TTSTests

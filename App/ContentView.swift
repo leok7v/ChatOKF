@@ -113,6 +113,14 @@ struct ContentView: View {
             } message: {
                 Text(model.downloadFailure ?? "")
             }
+            .alert("Voice Download Failed", isPresented: Binding(
+                get: { model.speech.fetchFailed },
+                set: { shown in model.speech.fetchFailed = shown }
+            )) {
+                Button("OK") { }
+            } message: {
+                Text(model.speech.fetchFailure ?? "")
+            }
             .alert("Download \(Models.display(model.resumeAsk ?? ""))?",
                    isPresented: Binding(
                 get: { model.resumeAsk != nil },
@@ -133,6 +141,10 @@ struct ContentView: View {
         if model.downloadName != nil || model.downloading
             || model.loadError != nil {
             onboarding
+        } else if model.speech.asking {
+            VoiceTermsView(size: VoicePack.sizeText,
+                           onAgree: model.speech.agree,
+                           onCancel: model.speech.decline)
         } else if model.showSettings {
             SettingsView(model: model, onClose: model.closeSettings)
         } else if model.showDebug {

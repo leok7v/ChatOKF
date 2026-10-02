@@ -1,6 +1,7 @@
 import Chat
 import LLM
 import SwiftUI
+import TTS
 
 struct SettingsView: View {
 
@@ -324,11 +325,30 @@ struct SettingsView: View {
                     creditRow(item)
                 }
             }
+            heading("The reading voice")
+            note("Supertonic 3 is provided by Supertone Inc. under the "
+                + "BigScience Open RAIL-M License. These restrictions are a "
+                + "condition of that license, and they apply to every use of "
+                + "the voice in this app and to whatever it says.")
+            card {
+                VoiceRestrictions()
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 12)
+                hairline
+                Link("The license on Hugging Face",
+                     destination: VoiceTerms.licenceURL)
+                    .appFont(.callout)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 11)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
             heading("Licences")
             card {
+                licence("MIT License", Licence.mit)
+                hairline
                 licence("Apache License 2.0", Licence.apache2)
                 hairline
-                licence("GNU General Public License v3", Licence.gpl3)
+                licence("BigScience Open RAIL-M License", Licence.openRailM)
             }
         }
     }
@@ -378,7 +398,10 @@ struct SettingsView: View {
                 + "stops the reading, so you can interrupt at any time.")
             card {
                 wideRow("Speak", speech.mode.detail) {
-                    Picker("Speak", selection: $speech.mode) {
+                    Picker("Speak", selection: Binding(
+                        get: { speech.mode },
+                        set: { wish in speech.choose(wish) }
+                    )) {
                         ForEach(VoiceSession.Mode.allCases) { mode in
                             Text(mode.label).tag(mode)
                         }
@@ -397,6 +420,7 @@ struct SettingsView: View {
                     }
                 }
             }
+            card { voicePackRow }
             heading("Voices")
             card {
                 ForEach(Speech.voices) { v in
@@ -407,8 +431,43 @@ struct SettingsView: View {
         }
     }
 
+    private var voicePackRow: some View {
+        row("Voice model",
+            "Supertonic 3 by Supertone, \(VoicePack.sizeText). It downloads "
+            + "once, after you agree to its use restrictions, and stays on "
+            + "this device.") {
+            switch model.speech.pack {
+            case .ready:
+                Button { model.speech.deletePack() } label: {
+                    Image(systemName: "trash").frame(width: 22, height: 22)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.red)
+                .help("Delete from this device")
+            case .fetching:
+                HStack(spacing: 10) {
+                    ProgressView(value: model.speech.fetchFraction)
+                        .frame(width: 90)
+                    Button("Cancel") { model.speech.cancelFetch() }
+                }
+            case .missing:
+                Button { model.speech.requestPack() } label: {
+                    Image(systemName: "arrow.down.circle")
+                        .frame(width: 22, height: 22)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Color.accentColor)
+                .help("Download the voice")
+            }
+        }
+    }
+
+    private var pickedVoice: SpeechVoice {
+        Speech.voice(named: model.speech.voiceName) ?? Speech.defaultVoice
+    }
+
     private func voiceRow(_ v: SpeechVoice) -> some View {
-        let picked = v.name == model.speech.voiceName
+        let picked = v.id == pickedVoice.id
         return Button {
             model.speech.voiceName = v.name
             model.speech.preview(v)
@@ -416,7 +475,12 @@ struct SettingsView: View {
             HStack(spacing: 8) {
                 Image(systemName: picked ? "checkmark.circle.fill" : "circle")
                     .foregroundStyle(picked ? Color.accentColor : .secondary)
-                Text(v.name)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(v.name)
+                    Text(v.detail)
+                        .appFont(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 Spacer()
                 Image(systemName: "play.circle")
                     .foregroundStyle(.secondary)

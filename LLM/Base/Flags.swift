@@ -186,6 +186,9 @@ public enum Flags {
             + "soft tokens, so a saved chat reopens live; --no-resumable "
             + "keeps one state as before", scope: .experiment,
             defaultValue: "0"),
+        Knob(name: "voice-pack", takesValue: true, help:
+            "q4 | q8: the reading voice's weights, in place of the pack the "
+            + "device's memory picks", scope: .diagnostic, defaultValue: ""),
         Knob(name: "gpu-fault-rate", takesValue: true, help:
             "the fraction of command buffers reported as failed, drawn from "
             + "the --seed generator, to drive the retry and the cancel on a "

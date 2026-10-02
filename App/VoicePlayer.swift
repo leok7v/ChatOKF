@@ -2,6 +2,7 @@ import AVFoundation
 import Chat
 import Foundation
 import LLM
+import TTS
 
 final class VoicePlayer: @unchecked Sendable {
 
@@ -51,13 +52,19 @@ final class VoicePlayer: @unchecked Sendable {
         lock.unlock()
         var result = have
         if result == nil {
-            let built = Speech()
+            let built = VoicePack.path.flatMap { path in Speech(pack: path) }
             lock.lock()
             if speech == nil { speech = built }
             result = speech
             lock.unlock()
         }
         return result
+    }
+
+    func forgetPack() {
+        lock.lock()
+        speech = nil
+        lock.unlock()
     }
 
     var isActive: Bool {
@@ -68,6 +75,15 @@ final class VoicePlayer: @unchecked Sendable {
 
     private func log(_ what: @autoclosure () -> String) {
         if DiagGate.voice.on { Diag.shared.report(.voice, "[tts] " + what()) }
+    }
+
+    private static func memory() -> String {
+        let mb = 1_048_576.0
+        return Footprint.sample().map { s in
+            String(format: "footprint %.0f MB, headroom %.0f MB",
+                   Double(s.footprint) / mb,
+                   Double(s.headroomToJetsam ?? 0) / mb)
+        } ?? "footprint unknown"
     }
 
     private func counts() -> String {
@@ -152,9 +168,10 @@ final class VoicePlayer: @unchecked Sendable {
         synthesizing -= 1
         let stale = mark != epoch
         lock.unlock()
-        log(String(format: "render %d chars -> %d samples in %.2fs, %@ | %@",
-                   text.count, pcm.count, Date().timeIntervalSince(t0),
-                   stale ? "STALE" : "live", counts()))
+        log(String(format: "render %d chars -> %d samples in %.2fs, %@, %@ "
+                   + "| %@", text.count, pcm.count,
+                   Date().timeIntervalSince(t0), stale ? "STALE" : "live",
+                   VoicePlayer.memory(), counts()))
         if !stale && !pcm.isEmpty {
             schedule(pcm, tag: tag, mark: mark, voice: voice, speed: speed)
         } else {

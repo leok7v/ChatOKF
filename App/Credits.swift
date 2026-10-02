@@ -18,7 +18,7 @@ enum Credits {
     static let app = Credit(
         name: "ChatOKF",
         author: "leok7v",
-        terms: "GPL-3.0",
+        terms: "MIT",
         source: "https://leok7v.github.io/ChatOKF/",
         changed: "Runs every model below on this device. Nothing you type "
             + "leaves it except where a tool you switched on says otherwise.")
@@ -55,13 +55,16 @@ enum Credits {
                changed: "Re-hosted as one file: the vision projector and "
                    + "the sampling card ride in the weight file's header, "
                    + "and the tensor data is PrismML's, unchanged."),
-        Credit(name: "KittenTTS",
-               author: "KittenML",
-               terms: "Apache-2.0",
-               source: "https://huggingface.co/KittenML/kitten-tts-nano-0.2",
-               changed: "The voice you hear. Reimplemented in Swift by way of "
-                   + "leok7v/tts.cli, so it synthesises on device with no "
-                   + "network and no system speech service."),
+        Credit(name: "Supertonic 3",
+               author: "Supertone Inc.",
+               terms: "Open RAIL-M",
+               source: "https://huggingface.co/Supertone/supertonic-3",
+               changed: "The voice you hear. The weights are modified copies: "
+                   + "repacked into one file and rounded to 8 or 4 bits, at "
+                   + "huggingface.co/leok7v/supertonic. Our own engine in "
+                   + "Swift speaks them on device with no network. The "
+                   + "license's use restrictions, shown below, bind every "
+                   + "use of the voice."),
         Credit(name: "all-MiniLM-L6-v2",
                author: "Sentence-Transformers",
                terms: "Apache-2.0",

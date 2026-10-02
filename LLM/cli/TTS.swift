@@ -1,17 +1,6 @@
 import Foundation
 import LLM
-
-// The acceptance test is a BYTE COMPARISON against the reference binary, so
-// this writes the same 24 kHz mono PCM WAV: cmp ours.wav ref.wav.
-
-// A NaN sample reaches the conversion: the reference C's cast lowers to
-// fcvtzs and answers 0 on arm64, where Int16(Float) traps.
-func wavClamp(_ v: Float) -> Int16 {
-    var s = v
-    if s > 1.0 { s = 1.0 }
-    if s < -1.0 { s = -1.0 }
-    return s.isNaN ? 0 : Int16(s * 32767.0)
-}
+import TTS
 
 func wavPutU32(_ f: inout [UInt8], _ v: UInt32) {
     f.append(UInt8(truncatingIfNeeded: v))
@@ -33,18 +22,38 @@ func wavBytes(_ pcm: [Float], rate: Int) -> [UInt8] {
     f.append(contentsOf: Array("WAVE".utf8))
     f.append(contentsOf: Array("fmt ".utf8))
     wavPutU32(&f, 16)
-    wavPutU16(&f, 1)                        // PCM
-    wavPutU16(&f, 1)                        // mono
+    wavPutU16(&f, 1)
+    wavPutU16(&f, 1)
     wavPutU32(&f, UInt32(rate))
-    wavPutU32(&f, UInt32(rate * 2))         // byte rate
-    wavPutU16(&f, 2)                        // block align
-    wavPutU16(&f, 16)                       // bits
+    wavPutU32(&f, UInt32(rate * 2))
+    wavPutU16(&f, 2)
+    wavPutU16(&f, 16)
     f.append(contentsOf: Array("data".utf8))
     wavPutU32(&f, dataBytes)
     for sample in pcm {
-        wavPutU16(&f, UInt16(bitPattern: wavClamp(sample)))
+        wavPutU16(&f, UInt16(bitPattern: Speech.pcm(sample)))
     }
     return f
+}
+
+@MainActor func ttsPack() -> String {
+    let home = FileManager.default.homeDirectoryForCurrentUser.path
+    return args.value("--tts-pack")
+        ?? home + "/huggingface.co/leok7v/supertonic/supertonic-q8.safetensors"
+}
+
+func ttsFootprint() -> Double {
+    var info = task_vm_info_data_t()
+    var count = mach_msg_type_number_t(
+        MemoryLayout<task_vm_info_data_t>.stride
+            / MemoryLayout<natural_t>.stride)
+    let kr = withUnsafeMutablePointer(to: &info) { p in
+        p.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { raw in
+            task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), raw,
+                      &count)
+        }
+    }
+    return kr == KERN_SUCCESS ? Double(info.phys_footprint) / 1_048_576 : 0
 }
 
 @MainActor func probeTTS() throws {
@@ -52,37 +61,41 @@ func wavBytes(_ pcm: [Float], rate: Int) -> [UInt8] {
     let outPath = args.value("--tts-out") ?? "tts.wav"
     let voiceName = args.value("--tts-voice")
     let speed = args.float("--tts-speed") ?? 1.0
+    let language = args.value("--tts-lang") ?? "en"
     let text = args.text("--tts")
     if listing {
-        for v in Speech.voices { err("  \(v.name)\n") }
+        for v in Speech.voices { err("  \(v.id) \(v.name): \(v.detail)\n") }
         exit(0)
     }
-    // --tts-md runs the text through the app's chunker; --tts stays raw, since
-    // the byte gate compares against a reference that has no chunker.
     let markdown = args.text("--tts-md")
-    let chunked = markdown.map { source -> String in
+    let chunked = markdown.map { source -> [String] in
         var chunker = SpeakableText()
         var segments = chunker.push(source)
         segments.append(contentsOf: chunker.finish())
         for s in segments { err("  say: \(s.spoken)\n") }
-        // One segment per line, so the engine's splitter gives each the pause.
-        return segments.map { s in s.spoken }.joined(separator: "\n")
+        return segments.map { s in s.spoken }
     }
-    if let text = chunked ?? text {
+    if let pieces = chunked ?? text.map({ whole in [whole] }) {
         let voice = voiceName.flatMap { name in Speech.voice(named: name) }
         if voiceName != nil && voice == nil {
             err("unknown voice '\(voiceName!)' (try --tts-voices)\n")
             exit(2)
         }
         let t0 = Date()
-        let speech = Speech()
+        let speech = Speech(pack: ttsPack())
         if speech == nil {
-            err("speech engine unavailable (bundled resources missing)\n")
+            err("no voice pack at \(ttsPack()) (try --tts-pack)\n")
             exit(1)
         }
         let load = Date().timeIntervalSince(t0)
         let t1 = Date()
-        let pcm = speech!.synthesize(text, voice: voice, speed: speed)
+        var pcm: [Float] = []
+        var peak = 0.0
+        for piece in pieces {
+            pcm += speech!.synthesize(piece, voice: voice, speed: speed,
+                                      language: language)
+            peak = max(peak, ttsFootprint())
+        }
         let synth = Date().timeIntervalSince(t1)
         if pcm.isEmpty {
             err("no audio produced\n")
@@ -93,9 +106,11 @@ func wavBytes(_ pcm: [Float], rate: Int) -> [UInt8] {
         let seconds = Double(pcm.count) / Double(Speech.sampleRate)
         err(String(format:
             "wrote %@  (%.2fs audio, voice %@, speed %.2f)\n"
-            + "[tts] load %.2fs, synth %.2fs, %.1fx realtime\n",
+            + "[tts] load %.2fs, synth %.2fs, %.1fx realtime, "
+            + "footprint %.0f MB after a piece at most, %.0f MB at rest\n",
             outPath, seconds, (voice ?? Speech.defaultVoice).name, speed,
-            load, synth, synth > 0 ? seconds / synth : 0))
+            load, synth, synth > 0 ? seconds / synth : 0, peak,
+            ttsFootprint()))
         exit(0)
     }
 }

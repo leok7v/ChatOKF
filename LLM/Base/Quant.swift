@@ -97,30 +97,6 @@ enum Dense {
         return out
     }
 
-    // F32 is WRAPPED IN PLACE over the mapping, so the GGUF must outlive every
-    // tensor made this way; F16 widens into the arena; a block type gives nil.
-    static func tensor(_ t: GGUFTensor, into arena: Arena) -> Tensor? {
-        var out: Tensor? = nil
-        var ne: [Int64] = [1, 1, 1, 1]
-        for d in 0..<t.dims.count { ne[d] = Int64(t.dims[d]) }
-        let nDims = Int32(t.dims.count)
-        if t.type == .f32 {
-            let data = UnsafeMutableRawPointer(mutating: t.base)
-                .assumingMemoryBound(to: Float.self)
-            out = tensorWrapNd(arena, nDims, data, ne)
-        } else if t.type == .f16 {
-            let o = tensorNewNd(arena, nDims, ne)
-            let total = Int(tensorNelements(o))
-            for i in 0..<total {
-                let h = (t.base + i * 2).loadUnaligned(as: UInt16.self)
-                o.data[i] = Float(Float16(bitPattern: h))
-            }
-            out = o
-        }
-        if let o = out { tensorSetName(o, t.name) }
-        return out
-    }
-
     static func floats(_ t: GGUFTensor) -> [Float] {
         let n = t.count
         return [Float](unsafeUninitializedCapacity: n) { buf, cnt in

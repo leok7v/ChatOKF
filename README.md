@@ -177,14 +177,17 @@ reader, the notes are the knowledge.
 
 ## Layout
 
-- `LLM/` - the engine: `Base`, `Qwen`, `Gemma`, `Quantize`, `Slugs`, `TTS`
+- `LLM/` - the engine: `Base`, `Qwen`, `Gemma`, `Quantize`, `Slugs`
   (the seams, tokenizer, chat template, sampler and ChatSession in Base; a
-  lineage per directory; the weight formats; wikipedia search; speech).
+  lineage per directory; the weight formats; wikipedia search).
 - `LLM/metal/` - the Metal kernels both lineages run on.
 - `LLM/cli/` - chatokf, the macOS command-line harness for the engine.
 - `Chat/` - the session driver and conversation store, no SwiftUI.
 - `App/` - SwiftUI app (macOS + iOS), no `#if os` (SDK file split).
 - `MD/` - Markdown transcript rendering package.
+- `TTS/` - the reading voice: the Supertonic 3 engine in one Swift file over
+  Accelerate, and the text shaping in front of it. It imports nothing else
+  here.
 - `config/platform.xcconfig` - the SDK-scoped source split for the app target.
 
 ## Models
@@ -199,40 +202,43 @@ The one cache beside the models is the precooked system prefix under
 prompt that a launch restores instead of re-prefilling. Deleting it costs one
 prefill per model.
 
+The reading voice is one more download, made the first time the speaker is
+switched on and only after its use restrictions are agreed to: Supertonic 3,
+repacked into a single file at
+[leok7v/supertonic](https://huggingface.co/leok7v/supertonic), 79 MB at 4
+bits on an iPhone with 3 or 4 GB and 111 MB at 8 bits everywhere else.
+
 ## License
 
-ChatOKF is **GPLv3 or later**. That is arithmetic, not preference -- it is the
-strongest obligation among the parts it is built from:
+ChatOKF is under the **MIT License**, Copyright (c) 2026 Leo Kuznetsov. See
+[LICENSE](LICENSE).
+
+The weights it downloads are not part of this repo and keep their own terms:
 
 | part | source | licence |
 |---|---|---|
-| speech model + voices | [KittenTTS](https://github.com/KittenML/KittenTTS) by KittenML | Apache-2.0 |
-| English pronunciation data (`en_rules`, `en_list`) | [eSpeak NG](https://github.com/espeak-ng/espeak-ng) | **GPLv3 or later** |
-| everything else here | this repo | Copyright (C) 2026 Leo Kuznetsov |
+| chat models | Google DeepMind, Qwen, PrismML, see Settings, About | Apache-2.0 |
+| the reading voice | [Supertonic 3](https://huggingface.co/Supertone/supertonic-3) by Supertone Inc. | BigScience Open RAIL-M |
+| everything in this repo | this repo | MIT |
 
-The pronunciation data is copyleft, and eSpeak NG grants **no exception for a
-program's output** -- so shipping those files, or a lexicon derived by running
-them, carries the same terms rather than escaping them. Apache-2.0 is
-one-way compatible with GPLv3 (it may be combined into a GPLv3 work, though
-not GPLv2), which is why the result is GPL **v3** specifically and cannot be
-anything more permissive.
+The Open RAIL-M license lets the voice be used and redistributed, also
+commercially, on the condition that the use restrictions of its Attachment A
+stay binding on everyone who uses it. The app shows those restrictions and
+asks for agreement before the voice downloads, and Settings, About carries
+them with the full license text. Among other things they forbid
+impersonating a person without consent, defaming or harassing others, and
+passing generated speech off as not machine made.
 
-This program is free software: you can redistribute it and/or modify it under
-the terms of the GNU General Public License as published by the Free Software
-Foundation, either version 3 of the License, or (at your option) any later
-version. See [LICENSE](LICENSE).
-
-It is distributed in the hope that it will be useful, but WITHOUT ANY
-WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR
-A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+Releases up to 26.09.30 shipped a speech model with eSpeak NG pronunciation
+data and were GPLv3 for that reason. That data is gone from the tree, and
+with it the last copyleft part.
 
 ### Credits
 
-- **[KittenML / KittenTTS](https://github.com/KittenML/KittenTTS)** -- the
-  speech model and its eight voices, Apache-2.0.
-- **[eSpeak NG](https://github.com/espeak-ng/espeak-ng)** -- the English
-  letter-to-sound rules and exception dictionary, Copyright (C) 2005-2014
-  Jonathan Duddington and Copyright (C) 2016-2017 Reece H. Dunn, GPLv3+.
+- **[Supertone / Supertonic 3](https://huggingface.co/Supertone/supertonic-3)**
+  -- the speech model and its ten voices, Copyright (c) 2026 Supertone Inc.,
+  BigScience Open RAIL-M. The engine that runs it here is
+  [leok7v/supertonic.tts](https://github.com/leok7v/supertonic.tts), MIT.
 
 Model weights are covered by their own upstream licences, not by this repo's.
 

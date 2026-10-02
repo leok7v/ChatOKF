@@ -901,6 +901,7 @@ import UniformTypeIdentifiers
         if let name = downloadName, ModelCatalog.source(name) != nil {
             downloadFallback = Session.isOnDisk(modelName)
                 ? modelName : downloadedFallback()
+            speech.cancelFetch()
             commitSwitch(name)
             downloadName = nil
             downloading = true
@@ -1833,6 +1834,7 @@ import UniformTypeIdentifiers
         try? fm.removeItem(at: Session.attachments)
         try? fm.removeItem(at: SoftFile.dir)
         try? fm.removeItem(at: Bundle.modelStore())
+        VoicePack.erase()
         Session.eraseParked()
         Memories.erase()
         Diag.eraseCaches()

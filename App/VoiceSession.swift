@@ -1,6 +1,8 @@
+import Chat
 import Foundation
 import LLM
 import Observation
+import TTS
 
 @MainActor @Observable final class VoiceSession {
 
@@ -51,18 +53,92 @@ import Observation
             let reasoning = d.object(forKey: "speakReasoning") as? Bool ?? false
             result = spoken ? (reasoning ? .everything : .replies) : .off
         }
-        return result!
+        return VoicePack.onDisk ? result! : .off
     }
 
-    var enabled: Bool {
-        get { mode != .off }
-        set {
-            if newValue {
-                let last = UserDefaults.standard.string(forKey: "voiceLast")
-                mode = Mode(rawValue: last ?? "") ?? .replies
-            } else {
-                mode = .off
+    var enabled: Bool { mode != .off }
+
+    enum Pack { case missing, fetching, ready }
+
+    private(set) var pack: Pack = VoicePack.onDisk ? .ready : .missing
+    private(set) var fetchFraction = 0.0
+    var asking = false
+    var fetchFailure: String?
+    @ObservationIgnored private var wanted: Mode?
+    @ObservationIgnored private var fetchTask: Task<Void, Never>?
+
+    var fetchFailed: Bool {
+        get { fetchFailure != nil }
+        set { if !newValue { fetchFailure = nil } }
+    }
+
+    func toggle() {
+        if enabled {
+            mode = .off
+        } else if pack == .fetching {
+            cancelFetch()
+        } else {
+            let last = UserDefaults.standard.string(forKey: "voiceLast")
+            choose(Mode(rawValue: last ?? "") ?? .replies)
+        }
+    }
+
+    func choose(_ wish: Mode) {
+        if wish == .off || pack == .ready {
+            mode = wish
+        } else {
+            wanted = wish
+            requestPack()
+        }
+    }
+
+    func requestPack() {
+        if pack == .missing { asking = true }
+    }
+
+    func agree() {
+        VoiceTerms.accept()
+        asking = false
+        fetch()
+    }
+
+    func decline() {
+        asking = false
+        wanted = nil
+    }
+
+    func cancelFetch() {
+        fetchTask?.cancel()
+    }
+
+    func deletePack() {
+        if pack == .ready {
+            mode = .off
+            player?.forgetPack()
+            VoicePack.erase()
+            pack = .missing
+        }
+    }
+
+    private func fetch() {
+        pack = .fetching
+        fetchFraction = 0
+        let pace = Paced(milliseconds: 100)
+        fetchTask = Task { @MainActor in
+            let failure = await VoicePack.fetch { s in
+                if pace.due(final: s.done >= s.total), s.total > 0 {
+                    let fraction = Double(s.done) / Double(s.total)
+                    Task { @MainActor in self.fetchFraction = fraction }
+                }
             }
+            let landed = failure == nil && VoicePack.onDisk
+            pack = landed ? .ready : .missing
+            if landed, let wanted { mode = wanted }
+            if !landed, !Task.isCancelled {
+                fetchFailure = failure ?? "download failed, try again"
+            }
+            wanted = nil
+            fetchTask = nil
         }
     }
 
@@ -221,20 +297,9 @@ import Observation
                 answerByTag[tag] = shown
                     .trimmingCharacters(in: .whitespacesAndNewlines)
             }
-            player?.enqueue(terminated(text), tag: tag, voice: voiceName,
+            player?.enqueue(text, tag: tag, voice: voiceName,
                             speed: Float(speed))
         }
-    }
-
-    // The synthesizer renders the last phoneme's release off the terminal
-    // punctuation; unterminated text comes back cut short.
-
-    private func terminated(_ text: String) -> String {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        let closed = trimmed.last.map { last in
-            last == "." || last == "!" || last == "?"
-        } ?? true
-        return closed ? trimmed : trimmed + "."
     }
 
     func pause() {
@@ -248,9 +313,13 @@ import Observation
     }
 
     func preview(_ voice: SpeechVoice) {
-        player?.stop()
-        player?.enqueue(SpokenCue.preview, tag: -1, voice: voice.name,
-                        speed: Float(speed))
+        if pack == .ready {
+            player?.stop()
+            player?.enqueue(SpokenCue.preview, tag: -1, voice: voice.name,
+                            speed: Float(speed))
+        } else {
+            requestPack()
+        }
     }
 }
 
