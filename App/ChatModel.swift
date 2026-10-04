@@ -577,7 +577,7 @@ import UniformTypeIdentifiers
     func refreshStorage() { session.refreshStorage() }
     var showSettings = false
     var showDebug = false
-    var settingsCategory: SettingsView.Category = .systemPrompt
+    var settingsCategory: SettingsView.Category = .youAndMe
     var optionDown = false
     var unlocked: Bool { statusLine && optionDown }
     var traceEvents: [TraceEvent] = []
@@ -1107,14 +1107,18 @@ import UniformTypeIdentifiers
         let chars = messages.reduce(0) { sum, m in sum + m.text.count }
         let titled = !readOnly && generatedTitle == nil
             && messages.count >= 2 && chars > 200
-        let extraction = session.memories.active && messages.count >= 2
+        let remembers = session.memories.active && messages.count >= 2
+        let extraction = remembers && !Models.isSimple(modelName)
+            && !ChatModel.sampleTexts.contains(lastSaid)
             ? Session.Extraction(said: lastSaid, exchange: lastExchange,
                                  conversation: currentConversationId)
             : nil
-        if !readOnly, titled || offersFollowupHint || extraction != nil {
+        let conversation = remembers ? conversationNote : nil
+        if !readOnly, titled || offersFollowupHint || extraction != nil
+            || conversation != nil {
             session.runMetaTurns(
                 titled: titled, wantsFollowup: offersFollowupHint,
-                extraction: extraction,
+                extraction: extraction, conversation: conversation,
                 onTitle: { [weak self] t in
                     self?.generatedTitle = t
                     self?.transcriptDirty = true
@@ -1133,6 +1137,31 @@ import UniformTypeIdentifiers
                     self?.transcriptDirty = true
                     self?.commitCurrent()
                 })
+        }
+    }
+
+    static let sampleTexts: Set<String> = Set(
+        [sampleResearch, sampleStory, sampleClip, sampleEuler,
+         sampleInterest, sampleCookies, sampleReport].map { text in
+            text.split(whereSeparator: { c in c.isWhitespace })
+                .joined(separator: " ")
+        })
+
+    private var conversationNote: ConversationNote? {
+        let asked = ConversationNote.asked(
+            messages.filter { m in m.fromUser && !m.placeholder }
+                .map { m in m.text },
+            samples: ChatModel.sampleTexts)
+        let heard = ([AboutYou.shared.line] + messages.flatMap { m in
+            [m.text] + m.toolRounds.compactMap { round in round.result }
+        }).joined(separator: "\n")
+        return currentConversationId.flatMap { id in
+            asked.isEmpty ? nil : ConversationNote(
+                conversation: id, title: conversationTitle(), asked: asked,
+                exchange: heard,
+                concludes: !Models.isSimple(modelName)
+                    && ConversationNote.asked([lastSaid], samples: [])
+                        == asked.suffix(1))
         }
     }
 
@@ -1197,7 +1226,7 @@ import UniformTypeIdentifiers
         showSettings = false
         if isOS {
             optionDown = false
-            settingsCategory = .systemPrompt
+            settingsCategory = .youAndMe
         }
     }
 
@@ -1897,7 +1926,7 @@ import UniformTypeIdentifiers
                            typed: typed, display: display, images: previewed,
                            clips: clips, docs: docs,
                            budget: self.imageBudget.tokens, labelled: true,
-                           placeholder: false,
+                           placeholder: false, preface: self.aboutPreface,
                            thinkTokenCap: self.thinkTokenCap,
                            thinkingActive: self.thinkingActive) {
                         self.beginTurn(asked, spoken: false, cue: cue,
@@ -1928,7 +1957,8 @@ import UniformTypeIdentifiers
                     if self.canRunTurn, serial == self.transcriptSerial,
                        let (asked, events) = self.session.sendSpoken(
                            said: said,
-                           typed: typed.isEmpty ? Session.spokenPrompt : typed,
+                           typed: self.aboutPreface
+                               + (typed.isEmpty ? Session.spokenPrompt : typed),
                            images: previewed, clips: clips, docs: docs,
                            budget: self.imageBudget.tokens,
                            thinkTokenCap: self.thinkTokenCap,
@@ -2155,7 +2185,8 @@ import UniformTypeIdentifiers
                               docs: [DocRef], stoppable: String?,
                               stage: Whimsical.Stage, serial: Int) async {
         let recall = await session.recall(display,
-                                          also: [generatedTitle ?? ""])
+                                          also: [generatedTitle ?? ""],
+                                          within: currentConversationId)
         if canRunTurn, serial == transcriptSerial {
             if let recall, !recall.silent {
                 let notes = zip(recall.ids, zip(recall.titles,
@@ -2174,11 +2205,17 @@ import UniformTypeIdentifiers
         }
     }
 
+    private var aboutPreface: String {
+        let first = messages.isEmpty && !Models.isSimple(modelName)
+        let line = first ? AboutYou.shared.line : ""
+        return line.isEmpty ? "" : line + "\n\n"
+    }
+
     private func submitText(prompt: String, display: String,
                             docs: [DocRef], stoppable: String?,
                             stage: Whimsical.Stage) {
         if let (asked, events) = session.sendText(
-            prompt: prompt, display: display, docs: docs,
+            prompt: aboutPreface + prompt, display: display, docs: docs,
             stoppable: stoppable,
             thinkTokenCap: thinkTokenCap, thinkingActive: thinkingActive) {
             beginTurn(asked, spoken: false, cue: .thinking, stage: stage,

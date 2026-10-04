@@ -163,13 +163,16 @@ final class VoicePlayer: @unchecked Sendable {
                         speed: Float, mark: Int) {
         let picked = Speech.voice(named: voice)
         let t0 = Date()
-        let pcm = ready()?.synthesize(text, voice: picked, speed: speed) ?? []
+        let whole = ready()?.synthesize(
+            text, voice: picked, speed: speed,
+            abandon: { [weak self] in self?.superseded(mark) ?? true }) ?? []
+        let pcm = Speech.trimmed(whole)
         lock.lock()
         synthesizing -= 1
         let stale = mark != epoch
         lock.unlock()
-        log(String(format: "render %d chars -> %d samples in %.2fs, %@, %@ "
-                   + "| %@", text.count, pcm.count,
+        log(String(format: "render %d chars -> %d samples of %d in %.2fs, "
+                   + "%@, %@ | %@", text.count, pcm.count, whole.count,
                    Date().timeIntervalSince(t0), stale ? "STALE" : "live",
                    VoicePlayer.memory(), counts()))
         if !stale && !pcm.isEmpty {
@@ -178,6 +181,12 @@ final class VoicePlayer: @unchecked Sendable {
             notify()
             pump(voice: voice, speed: speed)
         }
+    }
+
+    private func superseded(_ mark: Int) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return mark != epoch
     }
 
     private func schedule(_ pcm: [Float], tag: Int, mark: Int, voice: String,

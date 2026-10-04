@@ -57,6 +57,8 @@ final class Engine {
     let weights: Pack
     let arena:   UnsafeMutablePointer<Float>
     var used     = 0
+    var abandon: (() -> Bool)? = nil
+    func abandoned() -> Bool { return abandon?() ?? false }
     init(_ weights: Pack, _ arena: UnsafeMutablePointer<Float>) {
         self.weights = weights
         self.arena   = arena
@@ -1237,7 +1239,8 @@ func flow(_ tts: Engine, _ x: UnsafeMutablePointer<Float>, _ size: Int,
           _ steps: Int) {
     let out = weight(tts.weights,
                      FIELD + ".time_encoder.mlp.2.linear.weight")
-    for step in 0..<steps {
+    var step = 0
+    while step < steps && !tts.abandoned() {
         let mark = tts.used
         let time = floats(tts, out.shape.0)
         timeEmbedding(tts, time, Float(step) / Float(steps))
@@ -1248,6 +1251,7 @@ func flow(_ tts: Engine, _ x: UnsafeMutablePointer<Float>, _ size: Int,
                                           without[i] * guidance)
         }
         tts.used = mark
+        step += 1
     }
 }
 
@@ -1382,8 +1386,10 @@ func synthesize(_ tts: Engine, _ text: UnsafePointer<UInt32>, _ count: Int,
         let x      = floats(tts, rows * frames)
         for i in 0..<rows * frames { x[i] = Float(mtGauss(&mt)) }
         flow(tts, x, rows * frames, frames, spoken, silent, steps)
-        audio.samples = vocoder(tts, x, frames, &audio.count)
-        audio.seconds = seconds
+        if !tts.abandoned() {
+            audio.samples = vocoder(tts, x, frames, &audio.count)
+            audio.seconds = seconds
+        }
     }
     return audio
 }
@@ -1431,7 +1437,7 @@ func narrate(_ tts: Engine, _ text: String, _ lang: String, _ name: String,
     let mark  = tts.used
     var c     = chunkOpen(tts.weights, text, limit)
     mtSeed(&mt, seed)
-    while chunkNext(&c) {
+    while !tts.abandoned() && chunkNext(&c) {
         let part = synthesize(tts, c.cp, c.length, lang, voice, &mt, steps,
                               speed)
         if part.count > 0 {
@@ -1446,5 +1452,5 @@ func narrate(_ tts: Engine, _ text: String, _ lang: String, _ name: String,
     c.raw.deallocate()
     c.cp.deallocate()
     madvise(tts.arena, bytes, MADV_FREE_REUSABLE)
-    return whole
+    return tts.abandoned() ? [] : whole
 }

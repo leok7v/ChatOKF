@@ -4,13 +4,20 @@ import LLM
 public struct MemoryToolRunner: ToolRunner {
     let inner: SafeToolRunner
     let memories: Memories
+    let writes: Bool
 
-    public init(inner: SafeToolRunner, memories: Memories) {
+    public init(inner: SafeToolRunner, memories: Memories,
+                writes: Bool = true) {
         self.inner = inner
         self.memories = memories
+        self.writes = writes
     }
 
-    public var tools: [ToolSpec] { inner.tools + MemoryTools.specs }
+    public var tools: [ToolSpec] {
+        inner.tools + MemoryTools.specs.filter { spec in
+            writes || !MemoryTools.writeNames.contains(spec.name)
+        }
+    }
 
     public func execute(_ name: String, _ args: [ToolArg]) async -> String {
         var out = ""
@@ -31,6 +38,9 @@ public enum MemoryTools {
 
     public static let names = ["memory_search", "memory_read", "memory_create",
                                "memory_update", "memory_forget"]
+
+    static let writeNames: Set<String> = ["memory_create", "memory_update",
+                                          "memory_forget"]
 
     static let specs: [ToolSpec] = [
         ToolSpec(
@@ -125,22 +135,9 @@ public enum MemoryTools {
     }
 
     static func slug(_ text: String, words: Int) -> String {
-        text.lowercased()
+        text.lowercased().filter { c in c != "'" && c != "\u{2019}" }
             .split(whereSeparator: { c in !c.isLetter && !c.isNumber })
             .prefix(words).joined(separator: "-")
-    }
-
-    static func repaired(_ heading: String, _ title: String) -> String {
-        let parts = heading.split(separator: "/",
-                                  omittingEmptySubsequences: false)
-        var out = heading
-        if parts.count == 2 {
-            out = slug(String(parts[0]), words: 2) + "/"
-                + slug(String(parts[1]), words: 6)
-        } else if parts.count == 1, heading.split(separator: " ").count <= 2 {
-            out = slug(heading, words: 2) + "/" + slug(title, words: 6)
-        }
-        return out
     }
 
     static func validId(_ id: String) -> Bool {

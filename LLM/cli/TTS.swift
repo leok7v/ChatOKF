@@ -68,6 +68,7 @@ func ttsFootprint() -> Double {
         exit(0)
     }
     let markdown = args.text("--tts-md")
+    let shaped = markdown != nil
     let chunked = markdown.map { source -> [String] in
         var chunker = SpeakableText()
         var segments = chunker.push(source)
@@ -92,8 +93,9 @@ func ttsFootprint() -> Double {
         var pcm: [Float] = []
         var peak = 0.0
         for piece in pieces {
-            pcm += speech!.synthesize(piece, voice: voice, speed: speed,
-                                      language: language)
+            let whole = speech!.synthesize(piece, voice: voice,
+                                           speed: speed, language: language)
+            pcm += shaped ? Speech.trimmed(whole) : whole
             peak = max(peak, ttsFootprint())
         }
         let synth = Date().timeIntervalSince(t1)

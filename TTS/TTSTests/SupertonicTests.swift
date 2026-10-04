@@ -31,7 +31,40 @@ import Testing
         #expect(Speech.voice(named: "sarah")?.id == "F1")
         #expect(Speech.voice(named: "m5")?.name == "Daniel")
         #expect(Speech.voice(named: "Kiki") == nil)
-        #expect(Speech.defaultVoice.name == "Emily")
+        #expect(Speech.defaultVoice.name == "Sarah")
+    }
+
+    private static func tone(_ seconds: Double, _ level: Float) -> [Float] {
+        [Float](repeating: level, count: Int(seconds * 44100))
+    }
+
+    @Test func silenceAtBothEndsIsCutToAFixedPause() {
+        let quiet = SupertonicTests.tone(0.4, 0.001)
+        let voice = SupertonicTests.tone(1.0, 0.5)
+        let out = Speech.trimmed(quiet + voice + quiet, pause: 0.2)
+        let kept = 1.0 + Speech.leadIn + Speech.release + 0.2
+        #expect(abs(Double(out.count) / 44100 - kept) < 0.001)
+        #expect(out.first == 0)
+        #expect(out.suffix(Int(0.2 * 44100)).allSatisfy { s in s == 0 })
+        #expect(out.contains(0.5))
+    }
+
+    @Test func nothingAudibleIsNothingAndNoSilenceIsKeptWhole() {
+        #expect(Speech.trimmed(SupertonicTests.tone(1.0, 0.001)).isEmpty)
+        #expect(Speech.trimmed([]).isEmpty)
+        let voice = SupertonicTests.tone(0.5, 0.5)
+        let out = Speech.trimmed(voice, pause: 0)
+        #expect(out == voice)
+    }
+
+    @Test(.enabled(if: SupertonicTests.pack != nil))
+    func anAbandonedRenderReturnsNothingAndTheNextOneIsWhole() throws {
+        let speech = try #require(SupertonicTests.speech())
+        let alex = Speech.voice(named: "M1")
+        let dropped = speech.synthesize("Hello world.", voice: alex,
+                                        abandon: { true })
+        #expect(dropped.isEmpty)
+        #expect(speech.synthesize("Hello world.", voice: alex).count == 61440)
     }
 
     @Test(.enabled(if: SupertonicTests.pack != nil))

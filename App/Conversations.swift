@@ -158,6 +158,7 @@ extension ChatModel {
         Task { @MainActor in
             await ConversationStore.shared.trash(id)
             session.dropParked(id)
+            await session.memories.trash(ConversationNote.id(id))
             await sweepAttachments()
         }
     }
@@ -165,6 +166,7 @@ extension ChatModel {
     func restoreConversation(_ id: UUID) {
         Task { @MainActor in
             await ConversationStore.shared.restore(id)
+            await session.memories.restore(ConversationNote.id(id))
             session.refreshStorage()
         }
     }
@@ -174,6 +176,7 @@ extension ChatModel {
         Task { @MainActor in
             await ConversationStore.shared.deleteForever(id)
             session.dropParked(id)
+            await session.memories.deleteForever(ConversationNote.id(id))
             await sweepAttachments()
         }
     }
@@ -183,7 +186,10 @@ extension ChatModel {
         for id in gone { closeIfShowing(id) }
         Task { @MainActor in
             await ConversationStore.shared.emptyTrash()
-            for id in gone { session.dropParked(id) }
+            for id in gone {
+                session.dropParked(id)
+                await session.memories.deleteForever(ConversationNote.id(id))
+            }
             await sweepAttachments()
         }
     }
@@ -206,7 +212,10 @@ extension ChatModel {
         if readOnly { newChat() }
         Task { @MainActor in
             await ConversationStore.shared.trashAll()
-            for id in gone { session.dropParked(id) }
+            for id in gone {
+                session.dropParked(id)
+                await session.memories.trash(ConversationNote.id(id))
+            }
             await sweepAttachments()
         }
     }

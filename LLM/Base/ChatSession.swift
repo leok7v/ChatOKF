@@ -91,6 +91,7 @@ public actor ChatSession {
     private let wire: ChatWire
     private var turnSampler: Sampler?
     static let maxToolRounds = 10
+    static let maxFruitless = 2
     // While a call is open nothing streams and the loop breaker never trips, so
     // a model free-running a huge value is an invisible forever-decode.
     static let maxOpenCallBytes = 8192
@@ -742,6 +743,10 @@ public actor ChatSession {
         await oneShot(instruction, stopAfter: 2400, "extract")
     }
 
+    public func conclude(_ instruction: String) async -> String {
+        await oneShot(instruction, stopAfter: 320, "conclude")
+    }
+
     public func makeTitle() async -> String {
         let raw = await oneShot(ChatSession.titleInstruction, stopAfter: 160,
                                 "makeTitle")
@@ -963,10 +968,12 @@ public actor ChatSession {
             var pagedURL: String? = nil
             var paged = 0
             var spent: [String: String] = [:]
+            var fruitless = 0
             var step = await decodeStep(seed: first.seed, pp: pp, tally: tally,
                                         onReasoning: onReasoning, yield)
             tally = (lastMetrics.thinkTokens, lastMetrics.contentTokens)
-            while let call = step.pending, round < ChatSession.maxToolRounds {
+            while let call = step.pending, round < ChatSession.maxToolRounds,
+                  fruitless < ChatSession.maxFruitless {
                 let resolved = ChatSession.resolveTool(
                     call.functionName, toolSpecs.map { spec in spec.name })
                 let url = resolved == "fetch_url"
@@ -1004,8 +1011,13 @@ public actor ChatSession {
                 } ?? ""
                 if result.isEmpty {
                     result = await runTool(call, resolved: resolved)
+                    if result.hasPrefix("error"),
+                       spent.values.contains(result) {
+                        fruitless += 1
+                    }
                     spent[signature] = result
                 } else {
+                    fruitless += 1
                     toolLog("tool call \(round): REFUSED as an exact repeat")
                 }
                 onToolRound?(ToolRoundEvent(

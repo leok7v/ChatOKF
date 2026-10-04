@@ -922,6 +922,25 @@ final class ChatSessionTests: XCTestCase {
                        "the same call ran more than once")
     }
 
+    func testTheSameErrorTwiceMoreEndsTheToolLoop() async throws {
+        func call(_ expr: String) -> String {
+            "<tool_call><function=calculator>"
+                + "<parameter=expression>\(expr)</parameter>"
+                + "</function></tool_call>"
+        }
+        let backend = MockBackend(
+            scripts: [[1], [2], [3], [4]],
+            vocab: vocab([(1, call("a")), (2, call("b")), (3, call("c")),
+                          (4, "Here is the answer.")]))
+        let runner = RecordingRunner(reply: "error: not a number")
+        let session = ChatSession(
+            backend: backend, template: template, system: "You are a bot.",
+            vocabSize: 256, runner: runner)
+        let answer = await drain(session.reply("how much is the ball"))
+        XCTAssertEqual(runner.calls.count, 1 + ChatSession.maxFruitless)
+        XCTAssertEqual(answer, "Here is the answer.")
+    }
+
     func testDifferentArgumentsStillRun() async throws {
         func call(_ expr: String) -> String {
             "<tool_call><function=calculator>"
@@ -947,7 +966,7 @@ final class ChatSessionTests: XCTestCase {
         let call = "<tool_call><function=calculator></function></tool_call>"
         // A call script per round through the cap (seed + one per rewind), then
         let calls = Array(repeating: [Int32(1)],
-                          count: ChatSession.maxToolRounds + 1)
+                          count: ChatSession.maxFruitless + 1)
         let backend = MockBackend(
             scripts: calls + [[2]],
             vocab: vocab([(1, call), (2, "Answering from what I have.")]))

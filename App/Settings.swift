@@ -32,7 +32,7 @@ struct SettingsView: View {
     }
 
     enum Category: String, CaseIterable, Identifiable {
-        case systemPrompt = "System Prompt"
+        case youAndMe = "You & Me"
         case models = "Models"
         case voice = "Voice"
         case view = "View"
@@ -45,7 +45,7 @@ struct SettingsView: View {
         var id: String { rawValue }
         var symbol: String {
             switch self {
-            case .systemPrompt: return "text.bubble"
+            case .youAndMe: return "person.2"
             case .models: return "internaldrive"
             case .voice: return "waveform"
             case .view: return "paintbrush"
@@ -152,7 +152,7 @@ struct SettingsView: View {
             .toolbar { DoneToolbar(action: dismiss) }
         }
         .onAppear {
-            if model.settingsCategory != .systemPrompt {
+            if model.settingsCategory != .youAndMe {
                 path = [model.settingsCategory]
             }
         }
@@ -231,7 +231,7 @@ struct SettingsView: View {
     @ViewBuilder
     private func pane(_ item: Category) -> some View {
         switch item {
-        case .systemPrompt: systemPromptPane
+        case .youAndMe: youAndMePane
         case .models: modelsPane
         case .voice: voicePane
         case .view: viewPane
@@ -316,7 +316,17 @@ struct SettingsView: View {
     private var aboutPane: some View {
         VStack(alignment: .leading, spacing: 18) {
             title("About")
-            card { creditRow(Credits.app) }
+            card {
+                creditRow(Credits.app)
+                if !SettingsView.buildStamp.isEmpty {
+                    hairline
+                    row("Build") {
+                        Text(SettingsView.buildStamp)
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
             note("Built on the work below. Each entry says who made it, "
                 + "the terms it arrives under, and what this app changed.")
             card {
@@ -492,9 +502,39 @@ struct SettingsView: View {
         .buttonStyle(.plain)
     }
 
-    private var systemPromptPane: some View {
+    private func aboutRow(_ label: String, _ hint: String,
+                          _ text: Binding<String>) -> some View {
+        row(label) {
+            TextField(hint, text: text)
+                .textFieldStyle(.plain)
+                .multilineTextAlignment(.trailing)
+                .autocorrectionDisabled()
+                .frame(maxWidth: 240)
+        }
+    }
+
+    private var aboutYouCard: some View {
+        @Bindable var you = AboutYou.shared
+        return card {
+            aboutRow("Name", "your name", $you.name)
+            hairline
+            aboutRow("Gender", "in your own words", $you.gender)
+            hairline
+            aboutRow("Age", "in years", $you.age)
+        }
+    }
+
+    private var youAndMePane: some View {
         VStack(alignment: .leading, spacing: 18) {
-            title("System Prompt")
+            title("You & Me")
+            if !Models.isSimple(model.modelName) {
+                heading("You")
+                note("How the assistant should know you. Every line is "
+                    + "optional, stays on this device, and is told to the "
+                    + "assistant at the start of each new chat.")
+                aboutYouCard
+            }
+            heading("Me")
             note("Instructions the assistant reads before every "
                 + "conversation, for tone and behaviour. Applies from the "
                 + "next new chat.")
@@ -516,7 +556,7 @@ struct SettingsView: View {
 
     private var category: Category {
         categories.contains(model.settingsCategory)
-            ? model.settingsCategory : .systemPrompt
+            ? model.settingsCategory : .youAndMe
     }
 
     private var unlocked: Bool { model.unlocked }
@@ -1019,6 +1059,16 @@ struct SettingsView: View {
             storageSort == .size ? a.bytes > b.bytes : a.updated < b.updated
         }
     }
+
+    static let buildStamp: String = {
+        let format = DateFormatter()
+        format.locale = Locale(identifier: "en_US_POSIX")
+        format.timeZone = TimeZone(identifier: "UTC")
+        format.dateFormat = "yy-MM-dd HH:mm 'UTC'"
+        let built = (try? Bundle.main.executableURL?.resourceValues(
+            forKeys: [.contentModificationDateKey]))?.contentModificationDate
+        return built.map { date in format.string(from: date) } ?? ""
+    }()
 
     static func bytes(_ n: Int) -> String {
         ByteCountFormatter.string(fromByteCount: Int64(n), countStyle: .file)

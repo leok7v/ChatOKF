@@ -33,7 +33,7 @@ public final class Speech {
                     detail: "Warm and soft-spoken, a storyteller."),
     ]
 
-    public static let defaultVoice = voices[4]
+    public static let defaultVoice = voices[0]
 
     public static let languages: Set<String> = [
         "en", "ko", "ja", "ar", "bg", "cs", "da", "de", "el", "es", "et",
@@ -49,6 +49,32 @@ public final class Speech {
     }
 
     public static func pcm(_ sample: Float) -> Int16 { pcm16(sample) }
+
+    static let audible: Float = 0.01
+    static let leadIn = 0.02
+    static let release = 0.06
+    public static let pause = 0.2
+
+    public static func trimmed(_ pcm: [Float],
+                               pause: Double = Speech.pause) -> [Float] {
+        let rate = Double(sampleRate)
+        let first = pcm.firstIndex { s in abs(s) > audible }
+        let last = pcm.lastIndex { s in abs(s) > audible }
+        var out = [Float]()
+        if let first, let last {
+            let from = max(0, first - Int(leadIn * rate))
+            let to = min(pcm.count, last + 1 + Int(release * rate))
+            let rise = first - from
+            let fall = to - last - 1
+            out = Array(pcm[from..<to])
+            for i in 0..<rise { out[i] *= Float(i) / Float(rise) }
+            for i in 0..<fall {
+                out[out.count - 1 - i] *= Float(i) / Float(fall)
+            }
+            out.append(contentsOf: repeatElement(0, count: Int(pause * rate)))
+        }
+        return out
+    }
 
     static let pace: Float = 1.05
     static let flowSteps = 8
@@ -66,10 +92,12 @@ public final class Speech {
     }
 
     public func synthesize(_ text: String, voice: SpeechVoice? = nil,
-                           speed: Float = 1.0,
-                           language: String = "en") -> [Float] {
+                           speed: Float = 1.0, language: String = "en",
+                           abandon: (() -> Bool)? = nil) -> [Float] {
         lock.lock()
         defer { lock.unlock() }
+        engine.abandon = abandon
+        defer { engine.abandon = nil }
         let picked = voice ?? Speech.defaultVoice
         let lang = Speech.languages.contains(language) ? language : "en"
         let voiced = text.unicodeScalars.contains { s in

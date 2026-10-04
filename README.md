@@ -156,14 +156,21 @@ it is written, and the transcript shows one line naming it, `Remembered:
 delete, grouped by area, and a delete erases the note and collapses every
 link that named it down to the words it carried, so the store is never
 left with a dangling reference; a deleted note waits thirty days in its
-own trash. The model sees five tools, `memory_search`, `memory_read`,
-`memory_create`, `memory_update` and `memory_forget`, and each call shows
-in the transcript. At the start of every turn the question is embedded
+own trash. The model sees two tools, `memory_search` and `memory_read`,
+and each call shows in the transcript. It does not write notes itself:
+after a reply a separate pass keeps what you said about yourself, one
+sentence per fact, checked against your own words, and each saved
+conversation keeps one note of what you asked and what was concluded. At
+the start of every turn the question is embedded
 with multilingual-e5-small, the dense pass is fused with a verbatim pass
 by reciprocal rank, and the notes that fit are read into the context
 silently. A note that restates one already on file is refused, so the
 store does not fill with duplicates. One switch governs all of it:
 Settings, Intelligence, Total Recall.
+
+Settings, You & Me holds your name, gender and age if you care to give
+them. They are told to the model at the start of each chat and stay on the
+device.
 
 The notes are text and the index is built by an encoder that is not the
 chat model, so a memory belongs to the store, not to the model that wrote

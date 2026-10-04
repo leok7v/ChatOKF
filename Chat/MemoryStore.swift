@@ -125,8 +125,8 @@ actor MemoryStore {
         var kept: [Memories.Remembered] = []
         if let store {
             for draft in drafts where !Memories.grounded(draft, in: said) {
-                Diag.shared.report(.turn, "[extract] " + draft.id
-                                   + " shares no word with what the user said")
+                Diag.shared.report(.turn, "[extract] \"" + draft.title
+                                   + "\" is not what the user said")
             }
             for draft in drafts where Memories.grounded(draft, in: said) {
                 if let id = write(store, draft, source: source,
@@ -143,12 +143,19 @@ actor MemoryStore {
     private func write(_ store: Store, _ draft: Memories.Draft,
                        source: UUID?, excluding seen: Set<String>,
                        by model: String) -> String? {
-        var id = draft.id
+        let area = draft.area.isEmpty
+            ? self.area(for: draft.title + ". " + draft.description)
+            : draft.area
+        let kept = draft.isPrivate
+            || MemoryStore.privateAreas.contains(area)
+        let tags = [area] + (kept ? [MemoryRow.privateTag] : [])
+        var id = area + "/" + MemoryTools.slug(draft.title, words: 6)
         if store.concept(id) == nil, let same = store.duplicate(
             title: draft.title, description: draft.description,
-            tags: draft.tags, type: draft.type) {
+            tags: tags, type: MemoryStore.factType),
+           store.concept(same.id)?.type != ConversationNote.type {
             Diag.shared.report(.turn, String(
-                format: "[extract] %@ restates %@ (%.3f)", draft.id, same.id,
+                format: "[extract] %@ restates %@ (%.3f)", id, same.id,
                 same.score))
             id = same.id
         }
@@ -160,14 +167,80 @@ actor MemoryStore {
                           + source.uuidString]
         }
         var wrote: URL? = nil
-        if existing?.trust != .human, !seen.contains(id) {
+        if existing?.trust != .human, !seen.contains(id),
+           MemoryTools.validId(id) {
             wrote = try? store.write(
-                id: id, type: draft.type, title: draft.title,
-                description: draft.description, tags: draft.tags,
-                body: draft.body, status: "",
+                id: id, type: MemoryStore.factType, title: draft.title,
+                description: draft.description, tags: tags,
+                body: "", status: "",
                 adding: existing == nil ? lines : [])
         }
         return wrote == nil ? nil : id
+    }
+
+    static let factType = "Note"
+    static let privateAreas: Set<String> = ["health", "money"]
+
+    static let areas: [(name: String, gloss: String)] = [
+        ("person", "the user: name, age, tastes, preferences, habits"),
+        ("family", "family, partner, children, parents, friends"),
+        ("pets", "pets and animals the user keeps"),
+        ("home", "house, flat, garden, car, things the user owns"),
+        ("work", "job, profession, projects, colleagues, studies"),
+        ("health", "health, illness, medicine, diet, exercise"),
+        ("money", "money, income, savings, debts, purchases"),
+        ("travel", "trips, places lived in or visited, plans to go"),
+    ]
+
+    private var areaVectors: [[Float]] = []
+
+    func area(for text: String) -> String {
+        var out = MemoryStore.areas[0].name
+        if let embedder {
+            if areaVectors.isEmpty {
+                areaVectors = MemoryStore.areas.map { area in
+                    embedder.embedPassage(area.name + ": " + area.gloss)
+                }
+            }
+            let asked = embedder.embedQuery(text)
+            var best = -Float.greatestFiniteMagnitude
+            for (at, vector) in areaVectors.enumerated() {
+                var score: Float = 0
+                for i in 0..<min(asked.count, vector.count) {
+                    score += asked[i] * vector[i]
+                }
+                if score > best {
+                    best = score
+                    out = MemoryStore.areas[at].name
+                }
+            }
+        }
+        return out
+    }
+
+    func keep(_ note: ConversationNote, title: String, concluded: String,
+              by model: String) -> MemorySnapshot? {
+        var out: MemorySnapshot? = nil
+        let id = ConversationNote.id(note.conversation)
+        if let store, !note.asked.isEmpty {
+            let earlier = store.concept(id)
+            let fresh = earlier == nil
+            let lines = [Memories.generatedLine(model), "sources:",
+                         "  - resource: " + MemoryStore.sourceMark
+                             + note.conversation.uuidString]
+            let reached = note.reached(concluded,
+                                       after: earlier?.body ?? "")
+            let wrote = try? store.write(
+                id: id, type: ConversationNote.type, title: title,
+                description: note.description(reached),
+                tags: [ConversationNote.tag], body: note.body(reached),
+                status: "", adding: fresh ? lines : [])
+            if wrote != nil {
+                store.reload(id: id)
+                out = snapshot()
+            }
+        }
+        return out
     }
 
     func tool(_ name: String, _ args: [ToolArg], ticket: Int,
@@ -230,7 +303,9 @@ actor MemoryStore {
         let found = store.concept(id) != nil
         var out = ToolReply(text: "")
         if !MemoryTools.validId(id) {
-            out.text = "error: an id is area/name, letters, digits and dashes"
+            out.text = "error: the id needs an area word, a slash and a "
+                + "short dashed name. If the user did not ask you to remember "
+                + "this, do not save it: answer the user instead."
         } else if found && !existing {
             out.text = id + " already exists; use memory_update to replace it"
         } else if !found && existing {

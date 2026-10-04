@@ -257,6 +257,7 @@ public enum TurnEvent: Sendable {
     }
 
     private var pendingWarm: WeightWarm?
+    private var warming: Task<Void, Never>?
 
     private func warmBeside(cooking: Bool) {
         let warm = pendingWarm
@@ -266,7 +267,7 @@ public enum TurnEvent: Sendable {
                 format: "not warmed: the cook reads all %.2f GB itself",
                 Double(warm.bytes) / 1e9))
         } else if let warm {
-            Task.detached { Session.run(warm) }
+            warming = Task.detached { Session.run(warm) }
         }
     }
 
@@ -346,12 +347,15 @@ public enum TurnEvent: Sendable {
         recordRate(Session.ppKey(modelName), pp)
     }
 
-    public func recall(_ question: String, also: [String]) async
+    public func recall(_ question: String, also: [String],
+                       within conversation: UUID? = nil) async
         -> Memories.Recall? {
         var out: Memories.Recall? = nil
         if memories.active {
+            let own = conversation.map { id in [ConversationNote.id(id)] }
             let found = await memories.recall(
-                question, also: also, pp: measuredPP, excluding: recalledIds)
+                question, also: also, pp: measuredPP,
+                excluding: recalledIds.union(own ?? []))
             if let found {
                 Diag.shared.report(.turn, String(
                     format: "[recall] %@ %d note(s), standout %.1f, ~%d tok "
@@ -438,7 +442,9 @@ public enum TurnEvent: Sendable {
         }
         if memories.active {
             s += "\nThe user keeps their own notes. The ones that fit a "
-                + "message arrive with it; memory_search finds the rest."
+                + "message arrive with it; memory_search finds the rest. "
+                + "What the user asks you to remember is saved after your "
+                + "reply, so just confirm it."
         }
         return s
     }
@@ -452,7 +458,9 @@ public enum TurnEvent: Sendable {
             slugsPath: wikipedia ? Session.minilmPath : nil,
             wikipedia: wikipedia, network: webAccess)
         let runner: any ToolRunner = memories.active
-            ? MemoryToolRunner(inner: safe, memories: memories) : safe
+            ? MemoryToolRunner(inner: safe, memories: memories,
+                               writes: Models.offersNoteTools)
+            : safe
         return toolRunnerOverride ?? runner
     }
 
@@ -620,6 +628,7 @@ public enum TurnEvent: Sendable {
 
     public func awaitPrimed() async {
         await primingTask?.value
+        await warming?.value
     }
 
     public func awaitMeta() async {
@@ -833,6 +842,7 @@ public enum TurnEvent: Sendable {
         _ cont: AsyncStream<TurnEvent>.Continuation
     ) async {
         if let session {
+            await awaitPrimed()
             await drainMeta()
             let began = Date()
             _ = ggufBackend?.drainGPUSeconds()
@@ -870,7 +880,7 @@ public enum TurnEvent: Sendable {
     }
 
     private func softTurn(
-        _ typed: String, labelled: Bool,
+        _ typed: String, preface: String = "", labelled: Bool,
         thinkTokenCap: Int, thinkingActive: Bool,
         _ encode: @escaping @Sendable (
             @escaping @Sendable (VideoPeek) -> Void
@@ -889,8 +899,8 @@ public enum TurnEvent: Sendable {
                 parts: built.parts, spans: built.spans)) {
                 hooks.onSoft(kept)
             }
-            let ask = typed.isEmpty
-                ? Session.softDefaultPrompt(built.parts) : typed
+            let ask = preface + (typed.isEmpty
+                ? Session.softDefaultPrompt(built.parts) : typed)
             return session.replySoft(
                 ask, parts: built.parts + [.text(ask)], spans: built.spans,
                 labelled: labelled,
@@ -923,8 +933,8 @@ public enum TurnEvent: Sendable {
     public func sendSoft(typed: String, display: String,
                          images: [ImageAttachment], clips: [ClipAttachment],
                          docs: [DocRef], budget: Int, labelled: Bool,
-                         placeholder: Bool, thinkTokenCap: Int,
-                         thinkingActive: Bool)
+                         placeholder: Bool, preface: String = "",
+                         thinkTokenCap: Int, thinkingActive: Bool)
         -> (asked: Message, events: AsyncStream<TurnEvent>)? {
         var result: (asked: Message, events: AsyncStream<TurnEvent>)? = nil
         if let media, session != nil {
@@ -933,10 +943,10 @@ public enum TurnEvent: Sendable {
                 fromUser: true, text: display, images: previews,
                 clips: clips.filter { c in c.isVideo }.map { c in c.url },
                 posters: clips.compactMap { c in c.thumbnail },
-                prompt: typed)
+                prompt: typed.isEmpty ? "" : preface + typed)
             asked.docs = docs
             asked.placeholder = placeholder
-            let events = softTurn(typed, labelled: labelled,
+            let events = softTurn(typed, preface: preface, labelled: labelled,
                                   thinkTokenCap: thinkTokenCap,
                                   thinkingActive: thinkingActive
             ) { onFrame in
@@ -996,17 +1006,20 @@ public enum TurnEvent: Sendable {
 
     public func runMetaTurns(
         titled: Bool, wantsFollowup: Bool, extraction: Extraction?,
+        conversation: ConversationNote? = nil,
         onTitle: @escaping @MainActor (String) -> Void,
         onFollowup: @escaping @MainActor (String) -> Void,
         onRemembered: @escaping @MainActor ([Memories.Remembered]) -> Void
     ) {
-        if let session, titled || wantsFollowup || extraction != nil {
+        if let session, titled || wantsFollowup || extraction != nil
+            || conversation != nil {
             let running = metaTask
             metaTask = Task { @MainActor in
                 await running?.value
+                var made = ""
                 if titled, !Task.isCancelled {
-                    let t = await session.makeTitle()
-                    if !t.isEmpty, !Task.isCancelled { onTitle(t) }
+                    made = await session.makeTitle()
+                    if !made.isEmpty, !Task.isCancelled { onTitle(made) }
                 }
                 if wantsFollowup, !Task.isCancelled {
                     let hint = await session.makeFollowup()
@@ -1016,7 +1029,33 @@ public enum TurnEvent: Sendable {
                     let got = await extract(extraction)
                     if !got.isEmpty, !Task.isCancelled { onRemembered(got) }
                 }
+                if let conversation, !Task.isCancelled {
+                    await keep(conversation,
+                               title: made.isEmpty ? conversation.title : made)
+                }
                 self.metaTask = nil
+            }
+        }
+    }
+
+    private func keep(_ note: ConversationNote, title: String) async {
+        if let session, memories.active, memories.isOpen,
+           !note.asked.isEmpty {
+            let began = Date()
+            var concluded = ""
+            if note.concludes {
+                concluded = ConversationNote.concluded(
+                    await session.conclude(note.instruction),
+                    in: note.exchange, asked: note.asked)
+            }
+            if !Task.isCancelled {
+                await memories.keep(note, title: title, concluded: concluded)
+                Diag.shared.report(.turn, String(
+                    format: "[conversation] %@ %d asked, concluded %@ in "
+                        + "%.1fs", ConversationNote.id(note.conversation),
+                    note.asked.count,
+                    concluded.isEmpty ? "nothing" : concluded.debugDescription,
+                    Date().timeIntervalSince(began)))
             }
         }
     }
@@ -1025,27 +1064,40 @@ public enum TurnEvent: Sendable {
         -> [Memories.Remembered] {
         var out: [Memories.Remembered] = []
         if let session, memories.active, memories.isOpen {
-            let coverage = await memories.coverage(extraction.exchange)
-            if coverage.covered {
-                Diag.shared.report(.turn, String(
-                    format: "[extract] covered by the store, skipped, "
-                        + "searched %.2fs", coverage.seconds))
+            if !Memories.speaksOfSelf(extraction.said) {
+                Diag.shared.report(.turn, "[extract] the user said nothing "
+                    + "about themselves, skipped")
             } else {
-                let began = Date()
-                let raw = await session.extractNotes(
-                    Memories.extractionInstruction(known: coverage.known))
-                let drafts = Memories.parseDrafts(raw)
-                out = await memories.remember(
-                    drafts, said: extraction.said,
-                    source: extraction.conversation,
-                    excluding: recalledIds)
-                Diag.shared.report(.turn, String(
-                    format: "[extract] %d draft(s) of %d parsed from %d "
-                        + "chars in %.1fs, searched %.2fs: %@", out.count,
-                    drafts.count, raw.count,
-                    Date().timeIntervalSince(began), coverage.seconds,
-                    out.map { note in note.id }.joined(separator: " ")))
+                out = await extract(extraction, with: session)
             }
+        }
+        return out
+    }
+
+    private func extract(_ extraction: Extraction,
+                         with session: ChatSession) async
+        -> [Memories.Remembered] {
+        var out: [Memories.Remembered] = []
+        let coverage = await memories.coverage(extraction.exchange)
+        if coverage.covered {
+            Diag.shared.report(.turn, String(
+                format: "[extract] covered by the store, skipped, "
+                    + "searched %.2fs", coverage.seconds))
+        } else {
+            let began = Date()
+            let raw = await session.extractNotes(
+                Memories.extractionInstruction(known: coverage.known,
+                                               said: extraction.said))
+            let drafts = Memories.parseDrafts(raw)
+            out = await memories.remember(
+                drafts, said: extraction.said,
+                source: extraction.conversation, excluding: recalledIds)
+            Diag.shared.report(.turn, String(
+                format: "[extract] %d draft(s) of %d parsed from %d "
+                    + "chars in %.1fs, searched %.2fs: %@", out.count,
+                drafts.count, raw.count,
+                Date().timeIntervalSince(began), coverage.seconds,
+                out.map { note in note.id }.joined(separator: " ")))
         }
         return out
     }

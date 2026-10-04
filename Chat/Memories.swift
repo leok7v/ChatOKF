@@ -22,7 +22,8 @@ import Observation
         public let text: String
     }
 
-    public static let folder = "memories.noindex"
+    public static let folder = Flags.value("memories-folder")
+        ?? "memories.noindex"
     static let enabledKey = "totalRecall"
     static let backupKey = "backupMemories"
     static let bytesPerToken = 3.5
@@ -155,7 +156,11 @@ import Observation
 
     static func line(_ concept: Concept) -> String {
         var out = "- " + concept.title
-        if !concept.description.isEmpty { out += ": " + concept.description }
+        if concept.description.lowercased().hasPrefix(Memories.opening) {
+            out = "- " + concept.description
+        } else if !concept.description.isEmpty {
+            out += ": " + concept.description
+        }
         let body = concept.body.replacingOccurrences(of: "\n", with: " ")
         if !body.isEmpty {
             out += "\n  " + String(body.prefix(Memories.bodyCap))
@@ -174,7 +179,7 @@ import Observation
         if isOpen, !concepts.isEmpty {
             let queries = [question] + also.filter { text in
                 !text.isEmpty
-            }
+            } + Memories.clauses(question)
             let ticket = owner.searches.take()
             let found = await owner.search(
                 ticket, queries, limit: Memories.recallLimit + read.count)
@@ -199,8 +204,9 @@ import Observation
             !read.contains(hit.concept.id) && relevant(hit)
         }.prefix(Memories.recallLimit)
         if !fresh.isEmpty {
-            var block = "Notes remembered about this user that may "
-                + "bear on the message below:\n"
+            var block = "What you remember about me from our earlier "
+                + "chats (in these notes \"the user\" is me, the person "
+                + "writing to you); use what bears on my message:\n"
             for hit in fresh { block += Memories.line(hit.concept) }
             block += "\n"
             let tokens = Int(Double(block.utf8.count)
@@ -248,12 +254,18 @@ import Observation
     }
 
     public struct Draft: Sendable {
-        public let id: String
-        public let type: String
+        public let area: String
         public let title: String
         public let description: String
-        public let tags: [String]
-        public let body: String
+        public let isPrivate: Bool
+
+        public init(area: String = "", title: String, description: String,
+                    isPrivate: Bool = false) {
+            self.area = area
+            self.title = title
+            self.description = description
+            self.isPrivate = isPrivate
+        }
     }
 
     public struct Remembered: Identifiable, Sendable {
@@ -262,78 +274,123 @@ import Observation
     }
 
     public static let extractionInstruction =
-        "From the user's LAST message and the answer to it, write what is "
-        + "worth keeping about this user, at most five entries. Two kinds: "
-        + "a durable fact they stated about themselves (preferences, "
-        + "possessions, people, places, plans, habits, health or money "
-        + "facts, still true in six months), and an interest, a subject "
-        + "they asked to have explained or explored, one entry per subject "
-        + "under the area interest saying what they asked, so a question "
-        + "about X and Y is two entries, interest/x and interest/y, and a "
-        + "third names the field both belong to when it is clear. Not a "
-        + "lookup, a calculation, a translation or small talk, and never a "
-        + "fact only the assistant supplied. "
-        + "If there is nothing, reply NONE. Otherwise reply only entries in "
-        + "this exact form:\n"
-        + "### area/name\ntype: Note\ntitle: a few words\n"
-        + "description: one sentence stating the fact, or what was asked\n"
-        + "tags: comma separated; include private for medical, financial "
-        + "or address facts\nbody:\none to three sentences\n"
-        + "The id is an area word, a slash and a dashed name, like "
-        + "person/coffee, house/roof-leak or interest/black-holes; areas are "
-        + "person, house, work, family, health, interest and the like."
+        "From the user's LAST message only, list the durable facts the "
+        + "user stated about themselves: preferences, possessions, people, "
+        + "pets, places, plans, habits, health or money facts that will "
+        + "still be true in six months. Only what the user said, never what "
+        + "the assistant supplied, and never a question they asked, a "
+        + "lookup, a calculation, a what-if, a story or small talk. If "
+        + "there is nothing, reply NONE. Otherwise write one short sentence "
+        + "per fact, three at most, each on its own line, and begin every "
+        + "sentence with the words The user."
+
+    static let draftLimit = 3
+    static let opening = "the user"
+    static let titleWords = 5
+    static let trailing: Set<String> = [
+        "and", "or", "is", "are", "was", "a", "an", "the", "who", "that",
+        "which", "in", "at", "of", "to", "with", "as", "for", "on", "has",
+    ]
+
+    nonisolated static func leading(_ text: String,
+                                    sentences: Int) -> String {
+        var ends = 0
+        var cut = text.endIndex
+        var i = text.startIndex
+        while i < text.endIndex && ends < sentences {
+            let next = text.index(after: i)
+            let closes = ".!?".contains(text[i])
+                && (next == text.endIndex || text[next].isWhitespace)
+            if closes {
+                ends += 1
+                cut = next
+            }
+            i = next
+        }
+        return String(text[..<(ends == sentences ? cut : text.endIndex)])
+    }
+
+    static func title(of sentence: String) -> String {
+        var words = sentence.split(separator: " ").map { word in
+            word.trimmingCharacters(in: .punctuationCharacters)
+        }.filter { word in !word.isEmpty }
+        words = Array(words.dropFirst(2).prefix(Memories.titleWords))
+        while let last = words.last,
+              Memories.trailing.contains(last.lowercased()) {
+            words.removeLast()
+        }
+        let joined = words.joined(separator: " ")
+        return joined.prefix(1).uppercased() + joined.dropFirst()
+    }
 
     static func parseDrafts(_ raw: String) -> [Draft] {
         var out: [Draft] = []
-        var fields: [String: String] = [:]
-        var body: [String] = []
-        var id = ""
-        var inBody = false
-        func flush() {
-            let title = fields["title"] ?? ""
-            let draft = Draft(
-                id: MemoryTools.validId(id)
-                    ? id : MemoryTools.repaired(id, title),
-                type: fields["type"] ?? "Note", title: title,
-                description: fields["description"] ?? "",
-                tags: MemoryTools.list(fields["tags"], ","),
-                body: body.joined(separator: "\n")
-                    .trimmingCharacters(in: .whitespacesAndNewlines))
-            if MemoryTools.validId(draft.id), !draft.title.isEmpty,
-               !draft.description.isEmpty {
-                out.append(draft)
-            }
-            fields = [:]
-            body = []
-            inBody = false
-        }
-        for line in raw.components(separatedBy: "\n") {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            let marked = trimmed.hasPrefix("### ")
-            let bare = marked
-                ? String(trimmed.dropFirst(4)).trimmingCharacters(
-                    in: .whitespaces)
-                : trimmed
-            if marked || (!inBody && MemoryTools.validId(bare.lowercased())) {
-                if !id.isEmpty { flush() }
-                id = bare.lowercased()
-            } else if id.isEmpty || trimmed.hasPrefix("```") {
-                inBody = inBody && !trimmed.hasPrefix("```")
-            } else if inBody {
-                body.append(line)
-            } else if trimmed.hasPrefix("body:") {
-                inBody = true
-                let rest = String(trimmed.dropFirst(5))
-                    .trimmingCharacters(in: .whitespaces)
-                if !rest.isEmpty { body.append(rest) }
-            } else if let colon = trimmed.firstIndex(of: ":") {
-                let key = String(trimmed[..<colon]).lowercased()
-                fields[key] = String(trimmed[trimmed.index(after: colon)...])
-                    .trimmingCharacters(in: .whitespaces)
+        for line in raw.components(separatedBy: "\n")
+        where out.count < Memories.draftLimit {
+            let stated = line.trimmingCharacters(
+                in: CharacterSet(charactersIn: " \t-*`\"0123456789.)"))
+            let fact = Memories.leading(stated, sentences: 1)
+            let title = Memories.title(of: fact)
+            if fact.lowercased().hasPrefix(Memories.opening),
+               !title.isEmpty {
+                out.append(Draft(title: title, description: fact))
             }
         }
-        if !id.isEmpty { flush() }
         return out
+    }
+
+    nonisolated static let selfWords: Set<String> = [
+        "i", "my", "me", "mine", "myself", "we", "our", "us", "remember",
+        "\u{044F}", "\u{043C}\u{0435}\u{043D}\u{044F}",
+        "\u{043C}\u{043D}\u{0435}", "\u{043C}\u{043E}\u{0439}",
+        "\u{043C}\u{043E}\u{044F}", "\u{043C}\u{043E}\u{0451}",
+        "\u{043C}\u{043E}\u{0435}", "\u{043C}\u{043E}\u{0438}",
+        "\u{043C}\u{044B}", "\u{043D}\u{0430}\u{0441}",
+        "\u{043D}\u{0430}\u{0448}",
+        "\u{0437}\u{0430}\u{043F}\u{043E}\u{043C}\u{043D}\u{0438}",
+        "ich", "mein", "meine", "mich", "mir", "wir", "unser",
+        "yo", "mi", "mis", "nosotros", "je", "mon", "ma", "mes", "moi",
+        "nous",
+    ]
+
+    nonisolated static func speaksOfSelf(_ said: String) -> Bool {
+        let lower = said.lowercased()
+        let tokens = lower.split(whereSeparator: { c in !c.isLetter })
+        let foreign = lower.unicodeScalars.contains { s in
+            s.properties.isAlphabetic && s.value > 0x052F
+        }
+        let stated = lower.trimmingCharacters(in: .whitespacesAndNewlines)
+        let asking = stated.hasSuffix("?")
+            && Memories.leading(stated, sentences: 1) == stated
+        return !asking && (foreign || tokens.contains { word in
+            Memories.selfWords.contains(String(word))
+        })
+    }
+
+    nonisolated static let askings = [
+        "wants to", "would like", "asked", "is asking", "is interested",
+        "is considering", "is curious", "wonders", "prefers to be called",
+        "needs to know",
+    ]
+
+    nonisolated static func numbers(_ text: String) -> Set<String> {
+        Set(text.split(whereSeparator: { c in !c.isNumber })
+            .map(String.init))
+    }
+
+    nonisolated static let clauseWords = 3
+    nonisolated static let clauseLimit = 3
+
+    nonisolated static func clauses(_ question: String) -> [String] {
+        let parts = question
+            .replacingOccurrences(of: " and ", with: ",")
+            .split(whereSeparator: { c in ",;?.!".contains(c) })
+            .map { part in part.trimmingCharacters(in: .whitespaces) }
+            .filter { part in
+                part.split(separator: " ").count >= Memories.clauseWords
+            }
+        return parts.count > 1
+            ? Array(parts.prefix(Memories.clauseLimit)) : []
     }
 
     public struct Coverage {
@@ -351,9 +408,11 @@ import Observation
             let found = await owner.search(ticket, [text],
                                            limit: Memories.recallLimit)
             if let found {
-                covered = found.hits.first.map { top in relevant(top) }
-                    ?? false
-                known = found.hits.filter { hit in relevant(hit) }
+                let facts = found.hits.filter { hit in
+                    hit.concept.type != ConversationNote.type
+                }
+                covered = facts.first.map { top in relevant(top) } ?? false
+                known = facts.filter { hit in relevant(hit) }
                     .map { hit in (hit.concept.id, hit.concept.title) }
             } else {
                 Diag.shared.report(.turn, "[extract] coverage superseded")
@@ -363,15 +422,20 @@ import Observation
                         seconds: Date().timeIntervalSince(began))
     }
 
+    static let quotedLimit = 600
+
     public static func extractionInstruction(
-        known: [(id: String, title: String)]) -> String {
+        known: [(id: String, title: String)], said: String = "") -> String {
         var out = extractionInstruction
+        if !said.isEmpty {
+            out = "The user's last message was:\n\"\"\"\n"
+                + String(said.prefix(Memories.quotedLimit))
+                + "\n\"\"\"\n" + out
+        }
         if !known.isEmpty {
-            out += "\nNotes already on file: " + known.map { note in
-                note.id + " (" + note.title + ")"
-            }.joined(separator: "; ") + ". A fact one of them already "
-                + "covers is not new, leave it out; a fact that adds to one "
-                + "of them uses that note's id."
+            out += "\nAlready on file: " + known.map { note in note.title }
+                .joined(separator: "; ") + ". Leave out a fact one of them "
+                + "already covers."
         }
         return out
     }
@@ -408,16 +472,25 @@ import Observation
             }
     }
 
+    nonisolated static let stem = 5
+
     nonisolated static func grounded(_ draft: Draft, in said: String)
         -> Bool {
-        let heard = Memories.words(said)
-        let claimed = Memories.words(draft.title + " " + draft.description
-                                     + " " + draft.body)
-        return claimed.contains { word in
-            heard.contains { spoken in
-                spoken.hasPrefix(word) || word.hasPrefix(spoken)
-            }
+        let heard = Set(Memories.words(said).map { word in
+            String(word.prefix(Memories.stem))
+        })
+        let claimed = Memories.words(draft.title + " " + draft.description)
+        let spoken = claimed.filter { word in
+            heard.contains(String(word.prefix(Memories.stem)))
         }
+        let stated = draft.description.lowercased()
+        let asking = Memories.askings.contains { phrase in
+            stated.contains(phrase)
+        }
+        let counted = Memories.numbers(draft.description)
+            .isSubset(of: Memories.numbers(said))
+        return !claimed.isEmpty && spoken.count * 2 >= claimed.count
+            && !asking && counted
     }
 
     public func remember(_ drafts: [Draft], said: String,
@@ -432,6 +505,14 @@ import Observation
             out = got.kept
         }
         return out
+    }
+
+    public func keep(_ note: ConversationNote, title: String,
+                     concluded: String) async {
+        if isOpen {
+            adopt(await owner.keep(note, title: title, concluded: concluded,
+                                   by: modelName))
+        }
     }
 
     nonisolated static func generatedLine(_ by: String) -> String {

@@ -142,6 +142,18 @@ public enum Flags {
             "the memory store; --no-memories runs a turn on the context "
             + "alone, neither recalling nor writing a note",
             scope: .engine, defaultValue: "1"),
+        Knob(name: "note-tools", takesValue: false, help:
+            "offer the model the tools that write, replace and retire "
+            + "notes; off, the extraction turn is the only writer",
+            scope: .experiment, defaultValue: ""),
+        Knob(name: "about-you", takesValue: true, help:
+            "the line that introduces the user in the first turn, in place "
+            + "of the one built from Settings, You & Me",
+            scope: .diagnostic, defaultValue: ""),
+        Knob(name: "memories-folder", takesValue: true, help:
+            "the folder under Application Support the notes live in, so a "
+            + "scripted run leaves the user's own notes alone",
+            scope: .diagnostic, defaultValue: "memories.noindex"),
         Knob(name: "read-file", takesValue: true, help:
             "a file in the app's Caches folder the app attaches under UL "
             + "and sends at launch; repeatable, each in its own chat",

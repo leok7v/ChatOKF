@@ -111,6 +111,14 @@ public enum Models {
 
     public static let fallback = "Ternary-Bonsai-1.7B"
 
+    static let simple: Set<String> = ["Ternary-Bonsai-1.7B"]
+
+    public static var offersNoteTools: Bool { Flags.on("note-tools") }
+
+    public static func isSimple(_ name: String) -> Bool {
+        simple.contains(name)
+    }
+
     public static var start: String {
         let list = all
         var out = list.contains(fallback) ? fallback : (list.first ?? fallback)
