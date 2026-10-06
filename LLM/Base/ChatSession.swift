@@ -693,7 +693,8 @@ public actor ChatSession {
             bosToken: backend.bosToken)) ?? ""
     }
 
-    private func metaAppend(_ instruction: String) async -> [Int32]? {
+    private func metaAppend(_ instruction: String,
+                            fenced: Bool = true) async -> [Int32]? {
         var out: [Int32]? = nil
         let end = lastMetrics
         let position = await backend.position
@@ -709,6 +710,7 @@ public actor ChatSession {
                full.hasPrefix(asked) {
                 var gen = String(full.dropFirst(asked.count))
                 gen += ChatSession.titleSeed(gen, wire)
+                if !fenced { gen.removeLast(ChatSession.metaBlock.count) }
                 let laid = backend.encode(String(asked[body.upperBound...]))
                 var head: [Int32]? = nil
                 if end.overrun == 0 {
@@ -737,6 +739,68 @@ public actor ChatSession {
             }
         }
         return collected.text
+    }
+
+    private func judgeIds(_ ask: String) async -> [Int32]? {
+        var out: [Int32]? = nil
+        if history.count == 1 {
+            history.append(AgentMessage(role: "user", content: ask))
+            out = backend.encode(renderDelta(fresh: false).fullText)
+            history.removeLast()
+        } else {
+            out = await metaAppend(ask, fenced: false)
+        }
+        return out
+    }
+
+    private func judgeShares(_ laid: [[Int32]], _ wanted: [Set<Int32>],
+                             _ tap: LogitTap) async throws -> [[Double]] {
+        var out: [[Double]] = []
+        var head = laid.count > 1 ? laid[0] : []
+        for ids in laid {
+            head = Array(head.prefix(Judge.common(head, ids)))
+        }
+        if !head.isEmpty { _ = try await backend.extend(head) }
+        var rest = try await backend.checkpoint()
+        for (index, ids) in laid.enumerated() {
+            _ = try await backend.extend(Array(ids[head.count...]))
+            out.append(Judge.shares(tap.logits, wanted))
+            try await backend.rollback(rest)
+            if index + 1 < laid.count { rest = try await backend.checkpoint() }
+        }
+        return out
+    }
+
+    public func judge(frame: String, items: [String],
+                      options: [String]) async -> [[Double]] {
+        await priming?.value
+        enterEngine()
+        defer { leaveEngine() }
+        var out: [[Double]] = []
+        let position = await backend.position
+        if position > 0, let save = try? await backend.checkpoint() {
+            let savedThinking = enableThinking
+            enableThinking = false
+            var laid: [[Int32]] = []
+            for item in items {
+                let ask = frame.replacingOccurrences(of: "{item}", with: item)
+                if let ids = await judgeIds(ask) { laid.append(ids) }
+            }
+            enableThinking = savedThinking
+            if laid.count == items.count, !laid.isEmpty {
+                let helper = Judge(backend: backend, template: template,
+                                   vocabSize: vocabSize)
+                let wanted = options.map { option in helper.ids(option) }
+                let tap = LogitTap()
+                var sampler = Sampler(vocabSize: vocabSize, config: .greedy)
+                sampler.logitMask = { logits in tap.keep(logits) }
+                await backend.useSampler(sampler)
+                out = (try? await judgeShares(laid, wanted, tap)) ?? []
+                await backend.useSampler(turnSampler)
+            }
+            try? await backend.rollback(save)
+        }
+        return out
     }
 
     public func extractNotes(_ instruction: String) async -> String {

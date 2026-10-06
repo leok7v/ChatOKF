@@ -517,10 +517,6 @@ struct SettingsView: View {
         @Bindable var you = AboutYou.shared
         return card {
             aboutRow("Name", "your name", $you.name)
-            hairline
-            aboutRow("Gender", "in your own words", $you.gender)
-            hairline
-            aboutRow("Age", "in years", $you.age)
         }
     }
 
@@ -529,9 +525,8 @@ struct SettingsView: View {
             title("You & Me")
             if !Models.isSimple(model.modelName) {
                 heading("You")
-                note("How the assistant should know you. Every line is "
-                    + "optional, stays on this device, and is told to the "
-                    + "assistant at the start of each new chat.")
+                note("What the assistant should call you. It is optional "
+                    + "and stays on this device.")
                 aboutYouCard
             }
             heading("Me")

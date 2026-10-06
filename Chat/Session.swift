@@ -366,9 +366,73 @@ public enum TurnEvent: Sendable {
                     found.ids.joined(separator: " ")))
                 if found.silent { recalledIds.formUnion(found.ids) }
                 out = found
+            } else if Models.judges(modelName), let session {
+                out = await judged(question, session,
+                                   excluding: recalledIds.union(own ?? []))
             }
             Footprint.report(.memory, "after recall")
         }
+        return out
+    }
+
+    static let judgeCuts: [Double] = Session.cuts(
+        Flags.value("judge-cuts") ?? "")
+    static let judgedNotes = 3
+
+    nonisolated static func cuts(_ text: String) -> [Double] {
+        let given = text.split(separator: ",")
+            .compactMap { part in Double(part) }
+        return given.count == 2 ? given : [0.3, 0.6]
+    }
+
+    nonisolated static func yes(_ shares: [Double]) -> Double {
+        let total = shares.reduce(0, +)
+        return total > 0 ? (shares.first ?? 0) / total : 0
+    }
+
+    private func judged(_ question: String, _ session: ChatSession,
+                        excluding read: Set<String>) async
+        -> Memories.Recall? {
+        var out: Memories.Recall? = nil
+        await awaitPrimed()
+        await drainMeta()
+        let began = Date()
+        let about = Session.yes(await session.judge(
+            frame: Memories.aboutFrame, items: [question],
+            options: ["yes", "no"]).first ?? [])
+        Diag.shared.report(.turn, String(
+            format: "[judge] about-memory %.2f in %.1fs", about,
+            Date().timeIntervalSince(began)))
+        if about >= Session.judgeCuts[0] {
+            out = memories.listing(pp: measuredPP)
+        } else {
+            let near = await memories.candidates(
+                question, excluding: read, limit: Session.judgedNotes)
+            let shares = await session.judge(
+                frame: Memories.helpsFrame,
+                items: near.map { note in
+                    "Note: " + (note.description.isEmpty
+                        ? note.title : note.description)
+                        + "\nMessage: " + question
+                }, options: ["yes", "no"])
+            var kept: [Concept] = []
+            for (note, share) in zip(near, shares) {
+                Diag.shared.report(.turn, String(
+                    format: "[judge] note-helps %.2f %@", Session.yes(share),
+                    note.id))
+                if Session.yes(share) >= Session.judgeCuts[1] {
+                    kept.append(note)
+                }
+            }
+            if !kept.isEmpty {
+                out = Memories.recall(of: kept, pp: measuredPP)
+                out?.judged = true
+            }
+            Diag.shared.report(.turn, String(
+                format: "[judge] %d of %d near notes kept in %.1fs",
+                kept.count, near.count, Date().timeIntervalSince(began)))
+        }
+        if let out { recalledIds.formUnion(out.ids) }
         return out
     }
 
@@ -613,6 +677,28 @@ public enum TurnEvent: Sendable {
             await s.awaitPriming()
             Session.recordParkRate(modelName, await s.lastSaved)
             Task.detached { Session.prunePrecook(keeping: url) }
+        }
+        await judgeIfAsked(s)
+    }
+
+    private func judgeIfAsked(_ s: ChatSession) async {
+        let file = Flags.value("judge") ?? ""
+        if !file.isEmpty, let ggufBackend {
+            let url = FileManager.default
+                .urls(for: .cachesDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent(file)
+            let judge = Judge(backend: ggufBackend, template: ggufTemplate,
+                              vocabSize: ggufVocabCount)
+            await warming?.value
+            do {
+                try await judge.run(file: url) { line in
+                    Diag.shared.report("[judge] " + line)
+                }
+            } catch {
+                Diag.shared.report("[judge] failed: \(error)")
+            }
+            await s.reset()
+            Diag.shared.report("[judge] done")
         }
     }
 
@@ -1088,7 +1174,8 @@ public enum TurnEvent: Sendable {
             let raw = await session.extractNotes(
                 Memories.extractionInstruction(known: coverage.known,
                                                said: extraction.said))
-            let drafts = Memories.parseDrafts(raw)
+            let drafts = Memories.parseDrafts(
+                raw, name: AboutYou.called(AboutYou.shared.name))
             out = await memories.remember(
                 drafts, said: extraction.said,
                 source: extraction.conversation, excluding: recalledIds)

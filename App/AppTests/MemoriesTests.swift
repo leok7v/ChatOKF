@@ -101,6 +101,36 @@ import XCTest
         try? FileManager.default.removeItem(at: memories.root)
     }
 
+    func testTheListingNamesEveryFactAndCandidatesSkipConversations()
+        async throws {
+        let memories = try seeded()
+        await memories.awaitOpen()
+        let note = ConversationNote(conversation: UUID(), title: "Greeting",
+                                    asked: ["Hi there"], exchange: "Hi there",
+                                    concludes: false)
+        await memories.keep(note, title: "Greeting", concluded: "")
+        let listed = memories.listing(pp: 400)
+        XCTAssertEqual(listed?.ids.count, 5)
+        XCTAssertTrue(listed?.block.contains("Biscuit") == true)
+        XCTAssertTrue(listed?.block.contains("Our earlier conversations:\n"
+                                            + "- Greeting") == true)
+        XCTAssertTrue(listed?.silent == true)
+        let near = await memories.candidates("hello", excluding: [], limit: 9)
+        XCTAssertEqual(near.count, 4)
+        XCTAssertFalse(near.contains { note in
+            note.type == ConversationNote.type
+        })
+        try? FileManager.default.removeItem(at: memories.root)
+    }
+
+    func testJudgeCutsFallBackWhenMalformed() {
+        XCTAssertEqual(Session.cuts("0.2,0.65"), [0.2, 0.65])
+        XCTAssertEqual(Session.cuts("0.2"), [0.3, 0.6])
+        XCTAssertEqual(Session.cuts(""), [0.3, 0.6])
+        XCTAssertEqual(Session.yes([0.3, 0.1]), 0.75, accuracy: 1e-9)
+        XCTAssertEqual(Session.yes([]), 0)
+    }
+
     func testSwitchOffRecallsNothing() async throws {
         let memories = try seeded()
         memories.enabled = false
@@ -390,6 +420,11 @@ import XCTest
                        + "old.")
         XCTAssertEqual(Memories.parseDrafts("NONE\n```").count, 0)
         XCTAssertEqual(Memories.parseDrafts("The user.").count, 0)
+        let named = Memories.parseDrafts(
+            "Leo's cat is called Marmalade.\nLeo works in Lisbon.\n"
+            + "Marmalade is a cat.", name: "Leo")
+        XCTAssertEqual(named.map { d in d.title },
+                       ["Cat is called Marmalade", "Works in Lisbon"])
         XCTAssertFalse(Memories.extractionInstruction.contains("/"),
                        "the form shows no id to copy")
     }

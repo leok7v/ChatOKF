@@ -13,7 +13,10 @@ import Observation
         public let seconds: Double
         public let searchSeconds: Double
         public let readSeconds: [Double]
-        public var silent: Bool { seconds <= Memories.budgetSeconds }
+        public var judged = false
+        public var silent: Bool {
+            judged || seconds <= Memories.budgetSeconds
+        }
     }
 
     public struct Note {
@@ -204,24 +207,9 @@ import Observation
             !read.contains(hit.concept.id) && relevant(hit)
         }.prefix(Memories.recallLimit)
         if !fresh.isEmpty {
-            var block = "What you remember about me from our earlier "
-                + "chats (in these notes \"the user\" is me, the person "
-                + "writing to you); use what bears on my message:\n"
-            for hit in fresh { block += Memories.line(hit.concept) }
-            block += "\n"
-            let tokens = Int(Double(block.utf8.count)
-                             / Memories.bytesPerToken)
-            let reads = fresh.map { hit in
-                Memories.seconds(bytes: hit.concept.passage.utf8.count
-                                     + hit.concept.body.utf8.count, pp)
-            }
-            let titles = fresh.map { hit in hit.concept.title }
-            out = Recall(titles: titles,
-                         ids: fresh.map { hit in hit.concept.id },
-                         block: block, standout: result.standout,
-                         tokens: tokens,
-                         seconds: pp > 0 ? Double(tokens) / pp : 0,
-                         searchSeconds: searched, readSeconds: reads)
+            out = Memories.recall(of: fresh.map { hit in hit.concept },
+                                  standout: result.standout,
+                                  searched: searched, pp: pp)
         } else {
             let unread = result.hits.first { hit in
                 !read.contains(hit.concept.id)
@@ -232,6 +220,89 @@ import Observation
                     + "searched %.2fs",
                 unread?.relevance ?? 0, floor, result.standout, fresh.count,
                 concepts.count, searched))
+        }
+        return out
+    }
+
+    static let heading = "What you remember about me from our earlier "
+        + "chats (in these notes \"the user\" is me, the person "
+        + "writing to you); use what bears on my message:\n"
+
+    static func recall(of notes: [Concept], standout: Float = 0,
+                       searched: Double = 0, pp: Double,
+                       block given: String = "") -> Recall {
+        var block = given
+        if block.isEmpty {
+            block = Memories.heading
+            for note in notes { block += Memories.line(note) }
+            block += "\n"
+        }
+        let tokens = Int(Double(block.utf8.count) / Memories.bytesPerToken)
+        return Recall(
+            titles: notes.map { note in note.title },
+            ids: notes.map { note in note.id }, block: block,
+            standout: standout, tokens: tokens,
+            seconds: pp > 0 ? Double(tokens) / pp : 0,
+            searchSeconds: searched,
+            readSeconds: notes.map { note in
+                Memories.seconds(bytes: note.passage.utf8.count
+                                     + note.body.utf8.count, pp)
+            })
+    }
+
+    static let aboutFrame = "Read the message below. Is the person asking "
+        + "what you remember or know about them, or about your earlier "
+        + "conversations with them? Answer with one word, yes or no."
+        + "\n\nMessage:\n{item}"
+    static let helpsFrame = "Below are a note saved from an earlier chat "
+        + "with a person, and a new message from that person. Would knowing "
+        + "the note help you give a better answer to the message? Answer "
+        + "with one word, yes or no.\n\n{item}"
+    static let listedFacts = 10
+    static let listedChats = 6
+
+    public func listing(pp: Double) -> Recall? {
+        let rows = list.compactMap { row in concepts[row.id] }
+        let facts = rows.filter { note in
+            note.type != ConversationNote.type
+        }
+        let chats = rows.filter { note in
+            note.type == ConversationNote.type
+        }
+        var block = "Everything you remember about me from our earlier "
+            + "chats (in these notes \"the user\" is me, the person writing "
+            + "to you):\n"
+        if !facts.isEmpty { block += "What I told you about myself:\n" }
+        for note in facts.prefix(Memories.listedFacts) {
+            block += "- " + (note.description.isEmpty
+                ? note.title : note.description) + "\n"
+        }
+        if !chats.isEmpty { block += "Our earlier conversations:\n" }
+        for note in chats.prefix(Memories.listedChats) {
+            block += "- " + note.title + ": " + note.description + "\n"
+        }
+        let shown = Array(facts.prefix(Memories.listedFacts))
+            + Array(chats.prefix(Memories.listedChats))
+        var out: Recall? = nil
+        if !shown.isEmpty {
+            out = Memories.recall(of: shown, pp: pp, block: block + "\n")
+            out?.judged = true
+        }
+        return out
+    }
+
+    public func candidates(_ question: String, excluding read: Set<String>,
+                           limit: Int) async -> [Concept] {
+        var out: [Concept] = []
+        if isOpen, !concepts.isEmpty {
+            let ticket = owner.searches.take()
+            let found = await owner.search(ticket, [question],
+                                           limit: limit + read.count)
+            out = Array((found?.hits ?? []).map { hit in hit.concept }
+                .filter { note in
+                    !read.contains(note.id)
+                        && note.type != ConversationNote.type
+                }.prefix(limit))
         }
         return out
     }
@@ -314,7 +385,7 @@ import Observation
         var words = sentence.split(separator: " ").map { word in
             word.trimmingCharacters(in: .punctuationCharacters)
         }.filter { word in !word.isEmpty }
-        words = Array(words.dropFirst(2).prefix(Memories.titleWords))
+        words = Array(words.prefix(Memories.titleWords))
         while let last = words.last,
               Memories.trailing.contains(last.lowercased()) {
             words.removeLast()
@@ -323,16 +394,31 @@ import Observation
         return joined.prefix(1).uppercased() + joined.dropFirst()
     }
 
-    static func parseDrafts(_ raw: String) -> [Draft] {
+    static func subject(_ fact: String, name: String) -> String {
+        let lower = fact.lowercased()
+        let called = name.lowercased()
+        var out = ""
+        if lower.hasPrefix(Memories.opening) {
+            out = Memories.opening
+        } else if !called.isEmpty, lower.hasPrefix(called) {
+            out = called
+        }
+        return out
+    }
+
+    static func parseDrafts(_ raw: String, name: String = "") -> [Draft] {
         var out: [Draft] = []
         for line in raw.components(separatedBy: "\n")
         where out.count < Memories.draftLimit {
             let stated = line.trimmingCharacters(
                 in: CharacterSet(charactersIn: " \t-*`\"0123456789.)"))
             let fact = Memories.leading(stated, sentences: 1)
-            let title = Memories.title(of: fact)
-            if fact.lowercased().hasPrefix(Memories.opening),
-               !title.isEmpty {
+            let subject = Memories.subject(fact, name: name)
+            let rest = String(fact.dropFirst(subject.count))
+            let said = rest.hasPrefix("'s") || rest.hasPrefix("\u{2019}s")
+                ? String(rest.dropFirst(2)) : rest
+            let title = Memories.title(of: said)
+            if !subject.isEmpty, !title.isEmpty {
                 out.append(Draft(title: title, description: fact))
             }
         }

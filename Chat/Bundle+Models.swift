@@ -113,10 +113,16 @@ public enum Models {
 
     static let simple: Set<String> = ["Ternary-Bonsai-1.7B"]
 
+    static let unjudged: Set<String> = ["Ternary-Bonsai-1.7B", "Qwen3.5-2B"]
+
     public static var offersNoteTools: Bool { Flags.on("note-tools") }
 
     public static func isSimple(_ name: String) -> Bool {
         simple.contains(name)
+    }
+
+    public static func judges(_ name: String) -> Bool {
+        !unjudged.contains(name) && Flags.on("judged-recall")
     }
 
     public static var start: String {

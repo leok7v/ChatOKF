@@ -3,23 +3,16 @@ import XCTest
 
 final class AboutYouTests: XCTestCase {
 
-    private let opening = "[About the user you are talking to: "
-
-    func testNothingFilledIsNoLine() {
-        XCTAssertEqual(AboutYou.line(name: "", gender: " ", age: "\n"), "")
+    func testNoNameIsNoLine() {
+        XCTAssertEqual(AboutYou.line(name: " \n"), "")
     }
 
-    func testTheLineCarriesOnlyWhatIsFilled() {
-        XCTAssertEqual(
-            AboutYou.line(name: "Leo", gender: "male", age: "63"),
-            opening + "name Leo, gender male, age 63." + AboutYou.kept
-            + AboutYou.byName + "]")
-        XCTAssertEqual(
-            AboutYou.line(name: " Leo \n", gender: "", age: ""),
-            opening + "name Leo." + AboutYou.kept
-            + AboutYou.byName + "]")
-        XCTAssertEqual(AboutYou.line(name: "", gender: "", age: "9"),
-                       opening + "age 9." + AboutYou.kept + "]")
+    func testTheLineAsksForTheNameInTheReasoningToo() {
+        let line = AboutYou.line(name: " Leo \n")
+        XCTAssertEqual(line, "[You are talking to Leo. In your private "
+            + "reasoning, refer to this person as Leo. In your replies, "
+            + "speak to Leo directly as you." + AboutYou.byName)
+        XCTAssertFalse(line.contains("\""), "no phrase to copy")
     }
 
     func testTheSmallestModelIsNotTold() {
@@ -27,15 +20,12 @@ final class AboutYouTests: XCTestCase {
         XCTAssertFalse(Models.isSimple("gemma-4-E2B"))
     }
 
-    func testWhitespaceInsideAFieldIsOneSpace() {
-        XCTAssertTrue(AboutYou.line(name: "Mary \n\t Ann", gender: "",
-                                    age: "")
-            .contains("name Mary Ann."))
+    func testWhitespaceInsideTheNameIsOneSpace() {
+        XCTAssertEqual(AboutYou.called("Mary \n\t Ann"), "Mary Ann")
     }
 
-    func testAFieldIsCutAtItsLimit() {
-        let long = String(repeating: "x", count: 200)
-        let line = AboutYou.line(name: long, gender: "", age: "")
-        XCTAssertFalse(line.contains(String(repeating: "x", count: 41)))
+    func testTheNameIsCutAtItsLimit() {
+        XCTAssertEqual(
+            AboutYou.called(String(repeating: "x", count: 200)).count, 40)
     }
 }

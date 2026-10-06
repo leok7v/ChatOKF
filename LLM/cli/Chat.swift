@@ -205,6 +205,7 @@ func benchIds(_ encode: (String) -> [Int32]) -> [Int32] {
                                   useGPU ? "Metal/GPU" : "SIMD/CPU ")
     }
     if rawArgs.contains("--probe") { try await runProbe(loaded) }
+    if let file = args.value("--judge") { try await runJudge(loaded, file) }
     try await runChat(loaded)
 }
 

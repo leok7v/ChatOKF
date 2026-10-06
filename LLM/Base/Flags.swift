@@ -161,6 +161,18 @@ public enum Flags {
         Knob(name: "read-prompt", takesValue: true, help:
             "the question sent with read-file, default a summary request",
             scope: .diagnostic, defaultValue: ""),
+        Knob(name: "judged-recall", takesValue: false, help:
+            "when recall finds nothing, read yes or no off the prefill: is "
+            + "the message about the memory itself, and does a near note "
+            + "help; --no-judged-recall leaves recall to similarity alone",
+            scope: .engine, defaultValue: "1"),
+        Knob(name: "judge-cuts", takesValue: true, help:
+            "the yes shares that count as yes, about-memory then note-helps",
+            scope: .engine, defaultValue: "0.3,0.6"),
+        Knob(name: "judge", takesValue: true, help:
+            "a task file in the app's Caches folder; the app reads each "
+            + "item's answer shares off the prefill at launch and logs them",
+            scope: .diagnostic, defaultValue: ""),
         Knob(name: "prompt", takesValue: true, help:
             "a turn the app sends at launch, repeatable and in order; "
             + "'new' leaves the conversation, 'reopen' brings it back, "
