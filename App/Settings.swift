@@ -32,7 +32,7 @@ struct SettingsView: View {
     }
 
     enum Category: String, CaseIterable, Identifiable {
-        case youAndMe = "You & Me"
+        case system = "System"
         case models = "Models"
         case voice = "Voice"
         case view = "View"
@@ -45,7 +45,7 @@ struct SettingsView: View {
         var id: String { rawValue }
         var symbol: String {
             switch self {
-            case .youAndMe: return "person.2"
+            case .system: return "text.bubble"
             case .models: return "internaldrive"
             case .voice: return "waveform"
             case .view: return "paintbrush"
@@ -152,7 +152,7 @@ struct SettingsView: View {
             .toolbar { DoneToolbar(action: dismiss) }
         }
         .onAppear {
-            if model.settingsCategory != .youAndMe {
+            if model.settingsCategory != .system {
                 path = [model.settingsCategory]
             }
         }
@@ -231,7 +231,7 @@ struct SettingsView: View {
     @ViewBuilder
     private func pane(_ item: Category) -> some View {
         switch item {
-        case .youAndMe: youAndMePane
+        case .system: systemPane
         case .models: modelsPane
         case .voice: voicePane
         case .view: viewPane
@@ -318,10 +318,10 @@ struct SettingsView: View {
             title("About")
             card {
                 creditRow(Credits.app)
-                if !SettingsView.buildStamp.isEmpty {
+                if !Instrument.built.isEmpty {
                     hairline
                     row("Build") {
-                        Text(SettingsView.buildStamp)
+                        Text(Instrument.built)
                             .monospacedDigit()
                             .foregroundStyle(.secondary)
                     }
@@ -520,16 +520,16 @@ struct SettingsView: View {
         }
     }
 
-    private var youAndMePane: some View {
+    private var systemPane: some View {
         VStack(alignment: .leading, spacing: 18) {
-            title("You & Me")
+            title("System")
             if !Models.isSimple(model.modelName) {
-                heading("You")
+                heading("Name")
                 note("What the assistant should call you. It is optional "
                     + "and stays on this device.")
                 aboutYouCard
             }
-            heading("Me")
+            heading("System Prompt")
             note("Instructions the assistant reads before every "
                 + "conversation, for tone and behaviour. Applies from the "
                 + "next new chat.")
@@ -551,7 +551,7 @@ struct SettingsView: View {
 
     private var category: Category {
         categories.contains(model.settingsCategory)
-            ? model.settingsCategory : .youAndMe
+            ? model.settingsCategory : .system
     }
 
     private var unlocked: Bool { model.unlocked }
@@ -1054,16 +1054,6 @@ struct SettingsView: View {
             storageSort == .size ? a.bytes > b.bytes : a.updated < b.updated
         }
     }
-
-    static let buildStamp: String = {
-        let format = DateFormatter()
-        format.locale = Locale(identifier: "en_US_POSIX")
-        format.timeZone = TimeZone(identifier: "UTC")
-        format.dateFormat = "yy-MM-dd HH:mm 'UTC'"
-        let built = (try? Bundle.main.executableURL?.resourceValues(
-            forKeys: [.contentModificationDateKey]))?.contentModificationDate
-        return built.map { date in format.string(from: date) } ?? ""
-    }()
 
     static func bytes(_ n: Int) -> String {
         ByteCountFormatter.string(fromByteCount: Int64(n), countStyle: .file)

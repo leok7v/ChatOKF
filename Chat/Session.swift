@@ -537,7 +537,8 @@ public enum TurnEvent: Sendable {
     public func hookTrace(thinkingActive: Bool,
                           onEvent: @escaping @MainActor (TraceEvent) -> Void) {
         traceFile?.note("=== \(modelName) thinking=\(thinkingActive) "
-            + "wiki=\(wikipedia) web=\(webAccess) \(Date())")
+            + "wiki=\(wikipedia) web=\(webAccess) \(Date()) app "
+            + Instrument.build)
         let s = session
         let sink: @Sendable (TraceEvent) -> Void = { [weak self] e in
             Task { @MainActor in self?.recordTrace(e, onEvent: onEvent) }

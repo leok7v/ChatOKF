@@ -168,7 +168,7 @@ silently. A note that restates one already on file is refused, so the
 store does not fill with duplicates. One switch governs all of it:
 Settings, Intelligence, Total Recall.
 
-Settings, You & Me holds your name if you care to give it. It is told to
+Settings, System holds your name if you care to give it. It is told to
 the model at the start of each chat and stays on the device.
 
 The notes are text and the index is built by an encoder that is not the

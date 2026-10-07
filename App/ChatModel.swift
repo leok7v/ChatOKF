@@ -577,7 +577,7 @@ import UniformTypeIdentifiers
     func refreshStorage() { session.refreshStorage() }
     var showSettings = false
     var showDebug = false
-    var settingsCategory: SettingsView.Category = .youAndMe
+    var settingsCategory: SettingsView.Category = .system
     var optionDown = false
     var unlocked: Bool { statusLine && optionDown }
     var traceEvents: [TraceEvent] = []
@@ -1226,7 +1226,7 @@ import UniformTypeIdentifiers
         showSettings = false
         if isOS {
             optionDown = false
-            settingsCategory = .youAndMe
+            settingsCategory = .system
         }
     }
 

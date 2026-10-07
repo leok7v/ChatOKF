@@ -148,7 +148,7 @@ public enum Flags {
             scope: .experiment, defaultValue: ""),
         Knob(name: "about-you", takesValue: true, help:
             "the line that introduces the user in the first turn, in place "
-            + "of the one built from Settings, You & Me",
+            + "of the one built from Settings, System",
             scope: .diagnostic, defaultValue: ""),
         Knob(name: "memories-folder", takesValue: true, help:
             "the folder under Application Support the notes live in, so a "

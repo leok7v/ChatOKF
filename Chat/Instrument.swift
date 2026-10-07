@@ -8,9 +8,28 @@ public enum Instrument {
 
     private static func stampLaunch() { _ = launched }
 
+    public static let built: String = {
+        let format = DateFormatter()
+        format.locale = Locale(identifier: "en_US_POSIX")
+        format.timeZone = TimeZone(identifier: "UTC")
+        format.dateFormat = "yy-MM-dd HH:mm 'UTC'"
+        let at = (try? Bundle.main.executableURL?.resourceValues(
+            forKeys: [.contentModificationDateKey]))?.contentModificationDate
+        return at.map { date in format.string(from: date) } ?? ""
+    }()
+
+    public static let build: String = {
+        let info = Bundle.main.infoDictionary ?? [:]
+        let version = info["CFBundleShortVersionString"] as? String ?? ""
+        let number = info["CFBundleVersion"] as? String ?? ""
+        return version + " (" + number + ")"
+            + (built.isEmpty ? "" : " built " + built)
+    }()
+
     public static func install() -> Bool {
         stampLaunch()
         Diag.shared.report(.load, "[args] \(Flags.given)")
+        Diag.shared.report(.load, "[app] " + build)
         MarkdownDiag.report = { s in Diag.shared.report(.perf, s) }
         MainQueueWatch.shared.start()
         Footprint.watch()
