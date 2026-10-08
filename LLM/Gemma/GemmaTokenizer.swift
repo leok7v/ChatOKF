@@ -12,6 +12,7 @@ public struct GemmaTokenizer: Sendable {
     private let byteFallback: Bool
     private let ignoreMerges: Bool
     private let specials: SpecialIndex
+    public let controlIds: Set<Int32>
 
     public let eosId: Int32
     // A runtime comparing against the scalar alone runs past <end_of_turn>.
@@ -53,6 +54,7 @@ public struct GemmaTokenizer: Sendable {
         }
         sp.sort { a, b in a.0.count > b.0.count }
         specials = SpecialIndex(sp)
+        controlIds = Set(sp.map { pair in pair.1 })
 
         let ids = g.ints("tokenizer.ggml.eos_token_ids")?
             .map { id in Int32(id) }

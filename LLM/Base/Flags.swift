@@ -161,6 +161,10 @@ public enum Flags {
         Knob(name: "read-prompt", takesValue: true, help:
             "the question sent with read-file, default a summary request",
             scope: .diagnostic, defaultValue: ""),
+        Knob(name: "answer-tokens", takesValue: true, help:
+            "the most content tokens an answer may run to, as the CLI's "
+            + "-n; a scripted run with thinking off ends before the "
+            + "universe does", scope: .diagnostic, defaultValue: ""),
         Knob(name: "judged-recall", takesValue: false, help:
             "when recall finds nothing, read yes or no off the prefill: is "
             + "the message about the memory itself, and does a near note "

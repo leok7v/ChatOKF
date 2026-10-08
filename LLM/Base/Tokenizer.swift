@@ -11,6 +11,7 @@ public struct Tokenizer: Sendable {
     private let table: MergeTable
     private let byteToUni: [UInt8: Character]
     private let specials: SpecialIndex
+    public let controlIds: Set<Int32>
     private let splitRegex: RegexBox
     public let eosId: Int32
     public private(set) var eosIds: Set<Int32>
@@ -73,6 +74,7 @@ public struct Tokenizer: Sendable {
         self.table = MergeTable(joined)
         self.byteToUni = b2u
         self.specials = SpecialIndex(special)
+        self.controlIds = Set(special.map { pair in pair.1 })
         self.splitRegex = RegexBox(regex: try Regex(patt))
         self.eosId = v["<|im_end|>"] ?? 0
         self.eosIds = [self.eosId]
@@ -151,6 +153,7 @@ public struct Tokenizer: Sendable {
         self.table = MergeTable(merges)
         self.byteToUni = b2u
         self.specials = SpecialIndex(special)
+        self.controlIds = Set(special.map { pair in pair.1 })
         self.splitRegex = RegexBox(regex: try Regex(Tokenizer.qwenPretokenizer))
         let stops = g.ints("tokenizer.ggml.eos_token_id")
         self.eosId = Int32(stops?.first

@@ -33,11 +33,9 @@ public enum Continuation {
         return out
     }
 
-    // 5 identical short blocks (k <= 4) or 3 long ones (k <= 64) is a loop;
-    // a k-gram of only structural bytes needs 24, a table separator repeats.
     static func isLooping(_ ids: [Int32], reps: Int = 5,
                           structuralReps: Int = 24,
-                          longK: Int = 64, longReps: Int = 3,
+                          longK: Int = 256, longReps: Int = 3,
                           tokenBytes: ((Int32) -> [UInt8])? = nil) -> Bool {
         var result = false
         var k = 1

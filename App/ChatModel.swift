@@ -160,6 +160,7 @@ import UniformTypeIdentifiers
     var consulting = false
     var thinkStatus = "Thinking"
     var thinkLabel = "Thinking"
+    var footStatus = "Thinking"
     var eulaAccepted = UserDefaults.standard.bool(forKey: ChatModel.eulaKey)
     var accepted = UserDefaults.standard.bool(forKey: "disclaimerAccepted")
     private static func startModel() -> String {
@@ -404,7 +405,7 @@ import UniformTypeIdentifiers
 
     func forgetAllMemories() {
         session.memories.forgetAll()
-        flashHUD("Memories forgotten")
+        flashNote("Memories forgotten")
     }
 
     var memoriesOn: Bool { session.memories.active }
@@ -481,6 +482,22 @@ import UniformTypeIdentifiers
             hud = nil
         }
     }
+
+    private(set) var notice: String?
+    @ObservationIgnored private var noticeTask: Task<Void, Never>?
+
+    func flashNote(_ text: String, seconds: Double = 4) {
+        noticeTask?.cancel()
+        notice = text
+        noticeTask = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(seconds))
+            if !Task.isCancelled { notice = nil }
+        }
+    }
+
+    var working: Bool { busy || replaying || converting > 0 }
+
+    private(set) var recalling = false
 
     func downloadForResume() {
         if let name = resumeAsk {
@@ -1364,7 +1381,7 @@ import UniformTypeIdentifiers
         if room {
             let name = uniqueName(serialName("Text"))
             let kept = ChatModel.keepText(text, name + ".txt")
-            if kept == nil { flashHUD("Could not keep \(name)") }
+            if kept == nil { flashNote("Could not keep \(name)") }
             attachDoc(name, text, at: offset, from: kept)
         }
         return room
@@ -1402,7 +1419,7 @@ import UniformTypeIdentifiers
                 attachDoc(name, text, at: caret, from: kept)
             } else {
                 try? FileManager.default.removeItem(at: kept)
-                flashHUD("Cannot read \(name)")
+                flashNote("Cannot read \(name)")
             }
         }
     }
@@ -1614,7 +1631,7 @@ import UniformTypeIdentifiers
         if !reading.isEmpty {
             Task { @MainActor in await attachDropped(reading) }
         }
-        if !refused.isEmpty { flashHUD(refusedText(refused)) }
+        if !refused.isEmpty { flashNote(refusedText(refused)) }
     }
 
     private func attachDropped(_ urls: [URL]) async {
@@ -1630,10 +1647,10 @@ import UniformTypeIdentifiers
             } else if let kept = read.kept, Self.convertExts.contains(ext) {
                 convertDoc(kept, name)
             } else if let text = read.text {
-                if read.kept == nil { flashHUD("Could not keep \(name)") }
+                if read.kept == nil { flashNote("Could not keep \(name)") }
                 attachDoc(name, text, at: caret, from: read.kept)
             } else {
-                flashHUD("Cannot read \(name)")
+                flashNote("Cannot read \(name)")
             }
             if scoped { url.stopAccessingSecurityScopedResource() }
         }
@@ -1742,10 +1759,10 @@ import UniformTypeIdentifiers
                     } catch {
                         AudioSession.endRecording()
                         Diag.shared.report("[mic] FAILED to start: \(error)")
-                        flashHUD("\(error)")
+                        flashNote("\(error)")
                     }
                 } else {
-                    flashHUD("Microphone access is off")
+                    flashNote("Microphone access is off")
                 }
             }
         }
@@ -1824,10 +1841,10 @@ import UniformTypeIdentifiers
             heard.peak, heard.rms, send ? "yes" : "no",
             AudioSession.describe()))
         if !send {
-            flashHUD("Microphone off")
+            flashNote("Microphone off")
         } else if said.isEmpty {
-            flashHUD(secs < 0.5 ? "No audio from the microphone"
-                                : "Nothing was said")
+            flashNote(secs < 0.5 ? "No audio from the microphone"
+                                 : "Nothing was said")
         } else {
             flashHUD(Whimsical.current(.heard, hold: 0), prominent: true,
                      seconds: 2)
@@ -2100,8 +2117,8 @@ import UniformTypeIdentifiers
                     metrics.readFraction, messages[idx - 1].docs,
                     cut: metrics.readStop)
                 if metrics.readStop == "memory" {
-                    flashHUD("Out of memory: answered from what was read",
-                             prominent: true, seconds: 5)
+                    flashNote("Out of memory: answered from what was read",
+                              seconds: 6)
                 }
             }
             commitCurrent()
@@ -2184,9 +2201,11 @@ import UniformTypeIdentifiers
     private func sendRecalled(prompt: String, display: String,
                               docs: [DocRef], stoppable: String?,
                               stage: Whimsical.Stage, serial: Int) async {
+        recalling = true
         let recall = await session.recall(display,
                                           also: [generatedTitle ?? ""],
                                           within: currentConversationId)
+        recalling = false
         if canRunTurn, serial == transcriptSerial {
             if let recall, !recall.silent {
                 let notes = zip(recall.ids, zip(recall.titles,
@@ -2239,18 +2258,34 @@ import UniformTypeIdentifiers
             statsLabel = ChatModel.statsText(
                 ctx: t.ctx, think: t.thinkTokens, content: t.contentTokens,
                 split: thinkingActive, pp: lastPP, tg: lastTG,
-                ram: Self.footprintGiB())
+                ram: Self.footprintGiB(),
+                thermal: ChatModel.thermalGlyph(GPUGate.shared.thermal))
         }
+    }
+
+    nonisolated static func thermalGlyph(
+        _ state: ProcessInfo.ThermalState) -> String {
+        let out: String
+        switch state {
+        case .nominal: out = "❄️"
+        case .fair: out = "🌡️"
+        case .serious: out = "🔥"
+        case .critical: out = "🔥🔥"
+        @unknown default: out = ""
+        }
+        return out
     }
 
     nonisolated static func statsText(ctx: Int, think: Int, content: Int,
                                       split: Bool, pp: Double, tg: Double,
-                                      ram: Double?) -> String {
+                                      ram: Double?,
+                                      thermal: String = "") -> String {
         let tokens = split ? "🤔 \(think) 💬 \(content)"
                            : "💬 \(think + content)"
         let memory = ram.map { gb in String(format: "🐏 %.1fGB ", gb) } ?? ""
         return "⇄ \(ctx.formatted(.number))  \(tokens) " + memory
             + "t/s: \(Session.rate(pp))/\(Session.rate(tg))"
+            + (thermal.isEmpty ? "" : "  " + thermal)
     }
 
     struct SavedStats: Equatable {
@@ -2395,9 +2430,10 @@ import UniformTypeIdentifiers
     private func phraseCycler() -> Task<Void, Never> {
         Task { @MainActor in
             while (busy || listening) && !Task.isCancelled {
-                let p = Whimsical.pair(whimsicalStage)
+                let p = Whimsical.trio(whimsicalStage)
                 thinkStatus = p.first
                 thinkLabel = p.second
+                footStatus = p.third
                 try? await Task.sleep(for: .seconds(listening ? 2 : 5))
             }
         }
@@ -2605,7 +2641,7 @@ import UniformTypeIdentifiers
             markSampleUsed("document")
             input = ""
             caret = 0
-            flashHUD("Reading the report")
+            flashNote("Reading the report")
             Task { @MainActor in
                 if let text = await ChatModel.markdown(of: url) {
                     attachDoc("harvest-report.pdf", text, at: 0,
@@ -2613,7 +2649,7 @@ import UniformTypeIdentifiers
                     input += ChatModel.sampleReport
                     send()
                 } else {
-                    flashHUD("Cannot read the report")
+                    flashNote("Cannot read the report")
                 }
             }
         }

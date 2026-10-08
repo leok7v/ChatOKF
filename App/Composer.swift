@@ -547,17 +547,21 @@ struct Composer: View {
             .minimumScaleFactor(0.75)
             .frame(maxWidth: .infinity)
             .contentTransition(.identity)
+            .modifier(Whimsy(active: model.working))
     }
 
     private var noteText: String {
         let text: String
-        if model.stopAsked && model.prefilling {
+        if let notice = model.notice {
+            text = notice
+        } else if model.stopAsked && model.prefilling {
             text = "Answering from what was read\u{2026}"
         } else if model.replaying {
             text = ChatModel.resumingNotice + "\u{2026}"
-        } else if model.busy, !model.listening, !model.speech.engaged,
-                  model.session.metaTaskRunning {
-            text = model.thinkStatus + "\u{2026}"
+        } else if model.recalling {
+            text = "Checking what you remember\u{2026}"
+        } else if model.busy, !model.listening, !model.speech.engaged {
+            text = model.footStatus
         } else if let progress = model.prefillProgress {
             text = "Reading \(progress.done.formatted(.number)) of "
                 + "\(progress.total.formatted(.number)) tokens, "
@@ -589,9 +593,9 @@ struct Composer: View {
 
     private var listeningNote: String {
         model.heardSeconds > 0.05
-            ? String(format: "%@…  heard %.1fs", model.thinkStatus,
+            ? String(format: "%@  heard %.1fs", model.footStatus,
                      model.heardSeconds)
-            : model.thinkStatus + "…"
+            : model.footStatus
     }
 
     private var plainFootnote: String {

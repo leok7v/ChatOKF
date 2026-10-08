@@ -1708,36 +1708,48 @@ private struct ToolRoundDetail: View {
 
 }
 
-private struct Whimsy: ViewModifier {
+struct Whimsy: ViewModifier {
 
-    @State private var travel: CGFloat = -2
+    var active = true
     private static let dim: CGFloat = 0.55
     private static let sweep: TimeInterval = 2.6
 
     func body(content: Content) -> some View {
-        content
-            .mask {
-                GeometryReader { geo in
-                    let w = max(geo.size.width, 1)
-                    LinearGradient(stops: [
-                        .init(color: .white.opacity(Whimsy.dim),
-                              location: 0),
-                        .init(color: .white.opacity(Whimsy.dim),
-                              location: 0.34),
-                        .init(color: .white, location: 0.5),
-                        .init(color: .white.opacity(Whimsy.dim),
-                              location: 0.66),
-                        .init(color: .white.opacity(Whimsy.dim),
-                              location: 1),
-                    ], startPoint: .leading, endPoint: .trailing)
-                        .frame(width: w * 3)
-                        .offset(x: travel * w)
+        if active {
+            sweeping(content)
+        } else {
+            content
+        }
+    }
+
+    private static func travel(_ date: Date) -> CGFloat {
+        let t = date.timeIntervalSinceReferenceDate
+        let phase = t.truncatingRemainder(dividingBy: 2 * sweep) / sweep
+        return -2 + 2 * CGFloat(phase <= 1 ? phase : 2 - phase)
+    }
+
+    private func sweeping(_ content: Content) -> some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { ctx in
+            content
+                .mask {
+                    GeometryReader { geo in
+                        let w = max(geo.size.width, 1)
+                        LinearGradient(stops: [
+                            .init(color: .white.opacity(Whimsy.dim),
+                                  location: 0),
+                            .init(color: .white.opacity(Whimsy.dim),
+                                  location: 0.34),
+                            .init(color: .white, location: 0.5),
+                            .init(color: .white.opacity(Whimsy.dim),
+                                  location: 0.66),
+                            .init(color: .white.opacity(Whimsy.dim),
+                                  location: 1),
+                        ], startPoint: .leading, endPoint: .trailing)
+                            .frame(width: w * 3)
+                            .offset(x: Whimsy.travel(ctx.date) * w)
+                    }
                 }
-            }
-            .onAppear {
-                withAnimation(.linear(duration: Whimsy.sweep)
-                    .repeatForever(autoreverses: false)) { travel = 0 }
-            }
+        }
     }
 
 }

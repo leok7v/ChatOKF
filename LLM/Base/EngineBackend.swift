@@ -45,9 +45,14 @@ public protocol Tokenizing: Sendable {
     var eosIds: Set<Int32> { get }
     var bosToken: String { get }
     var vocabCount: Int { get }
+    var controlIds: Set<Int32> { get }
     func encode(_ text: String, addSpecial: Bool) -> [Int32]
     func decodeBytes(_ ids: [Int32]) -> [UInt8]
     func decode(_ ids: [Int32]) -> String
+}
+
+public extension Tokenizing {
+    var controlIds: Set<Int32> { [] }
 }
 
 public class EngineBackend<E: TextEngine, T: Tokenizing>: AgentBackend,
@@ -64,6 +69,7 @@ public class EngineBackend<E: TextEngine, T: Tokenizing>: AgentBackend,
     public var eos: Int32 { tokenizer.eosId }
     public var eosIds: Set<Int32> { tokenizer.eosIds }
     public var bosToken: String { tokenizer.bosToken }
+    public var controlIds: Set<Int32> { tokenizer.controlIds }
     public var position: Int { get async { engine.pos } }
 
     public func encode(_ text: String) -> [Int32] {

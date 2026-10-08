@@ -109,6 +109,7 @@ public protocol AgentBackend: Sendable {
     func extendSoft(_ ids: [Int32], spans: [SoftSpan]) async throws -> Int32
     func supportsSoftTokens() async -> Bool
     var bosToken: String { get }
+    var controlIds: Set<Int32> { get }
     func supportsVision() async -> Bool
     func saveState() async throws -> any BackendState
     func loadState(_ state: any BackendState) async throws
@@ -139,6 +140,7 @@ public extension AgentBackend {
     func supportsVision() async -> Bool { false }
     func supportsSoftTokens() async -> Bool { false }
     var bosToken: String { "" }
+    var controlIds: Set<Int32> { [] }
     func extendSoft(_ ids: [Int32], spans: [SoftSpan]) async throws -> Int32 {
         throw EngineError.missingModel("soft tokens")
     }

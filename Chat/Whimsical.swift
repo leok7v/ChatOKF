@@ -73,19 +73,28 @@ public enum Whimsical {
         return result
     }
 
-    public static func pair(_ stage: Stage) -> (first: String, second: String) {
+    public static func trio(_ stage: Stage)
+        -> (first: String, second: String, third: String) {
         let all = list(stage)
         let n = all.count
-        var result = (first: "Thinking", second: "Thinking")
+        var result = (first: "Thinking", second: "Thinking",
+                      third: "Thinking")
         if n > 0 {
             lock.lock()
             var (up, down) = cursors[stage] ?? (0, n - 1)
             if up == down { down = (down + n - 1) % n }
-            result = (first: all[up], second: all[down])
+            var mid = (up + n / 2) % n
+            if mid == down { mid = (mid + 1) % n }
+            result = (first: all[up], second: all[down], third: all[mid])
             cursors[stage] = ((up + 1) % n, (down + n - 1) % n)
             lock.unlock()
         }
         return result
+    }
+
+    public static func pair(_ stage: Stage) -> (first: String, second: String) {
+        let t = trio(stage)
+        return (t.first, t.second)
     }
 
 }

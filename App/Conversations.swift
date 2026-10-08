@@ -33,7 +33,7 @@ extension ChatModel {
                     if case .needsModel(let name) = plan,
                        let kin = ChatModel.onDiskKin(name) {
                         resumeAfterLoad = id
-                        flashHUD("Switching to \(Models.display(kin))")
+                        flashNote("Switching to \(Models.display(kin))")
                         switchModel(kin)
                     } else {
                         show(restored, as: id)
@@ -90,7 +90,7 @@ extension ChatModel {
     private func noteReadOnly(_ why: String) {
         let note = "read only: " + why
         savedLabel += savedLabel.isEmpty ? note : "  " + note
-        flashHUD("Read only: " + why)
+        flashNote("Read only: " + why)
     }
 
     private func offerDownload(_ name: String, for id: UUID) {
@@ -122,12 +122,10 @@ extension ChatModel {
     private func replay(_ id: UUID, _ turns: [PlannedTurn]) async {
         replaying = true
         prefilling = true
-        flashHUD(ChatModel.resumingNotice, seconds: 600)
         let ok = await session.replay(turns, budget: imageBudget.tokens,
                                       sessionConfig()) { [weak self] e in
             self?.recordTrace(e)
         }
-        clearHUD(ChatModel.resumingNotice)
         replaying = false
         prefilling = false
         if currentConversationId == id {

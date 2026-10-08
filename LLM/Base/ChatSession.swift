@@ -257,6 +257,7 @@ public actor ChatSession {
     }
 
     public func reset() async {
+        unanswered = ""
         history = Array(history.prefix(1))
         committed = []
         primedCount = 0
@@ -982,9 +983,11 @@ public actor ChatSession {
         defer { leaveEngine() }
         let saved = await enterTurn()
         self.stoppable = stoppable
+        let asked = ChatSession.folded(unanswered, user)
+        unanswered = ""
         trace(.user, ctx: await backend.position,
-              summary: String(user.prefix(80)), text: user)
-        history.append(AgentMessage(role: "user", content: user))
+              summary: String(asked.prefix(80)), text: asked)
+        history.append(AgentMessage(role: "user", content: asked))
         await installTurnSampler(vision: visionContext)
         await runSeed(soft: [], saved: saved,
                       onReasoning: onReasoning, onTool: onTool,
@@ -1449,8 +1452,21 @@ public actor ChatSession {
                          committed: committed, toolTokens: toolTokens)
     }
 
+    private var unanswered = ""
+
+    static func folded(_ earlier: String, _ user: String) -> String {
+        earlier.isEmpty ? user
+            : "[My earlier message, which got no answer:]\n" + earlier
+                + "\n\n" + user
+    }
+
     private func rollbackTurn(_ saved: SavedTurn,
                               why: TurnOutcome = .stopped) async {
+        if why == .answerless,
+           let asked = history.last(where: { m in m.role == "user" }),
+           history.count > saved.history.count {
+            unanswered = asked.content
+        }
         if let checkpoint = saved.checkpoint {
             try? await backend.rollback(checkpoint)
         }
@@ -1479,7 +1495,9 @@ public actor ChatSession {
         if samplerSeed != 0 { turnConfig.seed = samplerSeed }
         var sampler = Sampler(vocabSize: vocabSize, config: turnConfig)
         sampler.penaltyExempt = wireTokens
-        if !reasons { sampler.banned = reasoningOpeners }
+        sampler.banned = backend.controlIds.subtracting(wireTokens)
+            .subtracting(backend.eosIds)
+        if !reasons { sampler.banned.formUnion(reasoningOpeners) }
         if turnConfig.dryMultiplier > 0 {
             sampler.dryBreakers = sequenceBreakers()
         }
@@ -1900,7 +1918,7 @@ public actor ChatSession {
             let openRunaway = toolAt.map { at in
                 bytes.count - at > ChatSession.maxOpenCallBytes
             } == true
-            stop = steps >= maxTokens
+            stop = content >= maxTokens
                 || (looping && !loopRescue)
                 || pending != nil
                 || openRunaway
@@ -1978,7 +1996,7 @@ public actor ChatSession {
             reason = "stop"
         } else if backend.eosIds.contains(cur) {
             reason = "eos"
-        } else if steps >= maxTokens {
+        } else if content >= maxTokens {
             reason = "max-tokens"
         } else if toolAt.map({ at in
             bytes.count - at > ChatSession.maxOpenCallBytes }) == true {

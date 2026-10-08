@@ -1617,6 +1617,21 @@ final class ChatSessionTests: XCTestCase {
             "a 45-token paragraph cycle must trip")
     }
 
+    func testLoopBreakerCatchesAStanzaSizedCycle() {
+        let stanza: [Int32] = (1000 ..< 1120).map { i in Int32(i) }
+        XCTAssertFalse(Continuation.isLooping(stanza + stanza),
+                       "two copies of a 120-token stanza are not a loop")
+        XCTAssertTrue(Continuation.isLooping(stanza + stanza + stanza),
+                      "a 120-token stanza repeated three times must trip")
+    }
+
+    func testAnUnansweredMessageIsFoldedIntoTheNext() {
+        XCTAssertEqual(ChatSession.folded("", "Hi"), "Hi")
+        XCTAssertEqual(ChatSession.folded("First", "Second"),
+                       "[My earlier message, which got no answer:]\nFirst"
+                           + "\n\nSecond")
+    }
+
     // A thinking turn that ends (Stop / EOS) BEFORE </think> must commit an
     // EMPTY answer.
     func testInterruptedThinkingCommitsNoAnswer() async throws {
@@ -1631,7 +1646,7 @@ final class ChatSessionTests: XCTestCase {
         let before = backend.extendedTokens
         _ = await drain(session.reply("next"))
         let delta = backend.extendedTokens - before
-        XCTAssertLessThan(delta, 130,
+        XCTAssertLessThan(delta, 190,
             "interrupted reasoning was committed and re-prefilled: \(delta)")
     }
 

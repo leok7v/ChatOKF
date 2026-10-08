@@ -68,6 +68,26 @@ public enum TurnEvent: Sendable {
 
     public static let overthinkLambda: Float = 1.0
 
+    private var activity: NSObjectProtocol?
+    private var working = 0
+
+    private func beginWork() {
+        working += 1
+        if activity == nil {
+            activity = ProcessInfo.processInfo.beginActivity(
+                options: [.userInitiated, .idleSystemSleepDisabled],
+                reason: "answering")
+        }
+    }
+
+    private func endWork() {
+        working -= 1
+        if working == 0, let activity {
+            ProcessInfo.processInfo.endActivity(activity)
+            self.activity = nil
+        }
+    }
+
     public init(modelName: String, systemPrompt: String) {
         self.modelName = modelName
         self.systemPrompt = systemPrompt
@@ -394,6 +414,8 @@ public enum TurnEvent: Sendable {
                         excluding read: Set<String>) async
         -> Memories.Recall? {
         var out: Memories.Recall? = nil
+        beginWork()
+        defer { endWork() }
         await awaitPrimed()
         await drainMeta()
         let began = Date()
@@ -490,6 +512,11 @@ public enum TurnEvent: Sendable {
                 + "Wikipedia (wikipedia_query) and today's headlines "
                 + "(get_news); for anything else answer from your own "
                 + "knowledge."
+        } else {
+            s += "\nWhen a question names a year, a product, a model or an "
+                + "event you may not know, or asks what is current, search "
+                + "the web before answering instead of guessing, and say "
+                + "when something is past what you know."
         }
         if canAttachAudio {
             s += "\nThe user may speak to you. Their speech reaches you "
@@ -572,6 +599,7 @@ public enum TurnEvent: Sendable {
                 enableThinking: thinkingActive,
                 suppressReasoning: !thinkingActive,
                 reasoningEffort: modelSupportsReasoningEffort ? wire : nil,
+                maxTokens: Flags.int("answer-tokens") ?? .max,
                 maxReasoning: config.thinkTokenCap * 2,
                 softReasoningCap: config.thinkTokenCap,
                 overthink: Session.overthinkLambda,
@@ -929,6 +957,8 @@ public enum TurnEvent: Sendable {
         _ cont: AsyncStream<TurnEvent>.Continuation
     ) async {
         if let session {
+            beginWork()
+            defer { endWork() }
             await awaitPrimed()
             await drainMeta()
             let began = Date()
@@ -1101,7 +1131,9 @@ public enum TurnEvent: Sendable {
         if let session, titled || wantsFollowup || extraction != nil
             || conversation != nil {
             let running = metaTask
+            beginWork()
             metaTask = Task { @MainActor in
+                defer { endWork() }
                 await running?.value
                 var made = ""
                 if titled, !Task.isCancelled {
