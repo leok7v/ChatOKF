@@ -10,6 +10,7 @@ import SwiftUI
         Window(Bundle.appName, id: "main") {
             ContentView(model: model).frame(minWidth: 800, minHeight: 600)
         }
+        .defaultLaunchBehavior(.presented)
         .commands { ViewCommands(model: model) }
     }
 

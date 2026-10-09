@@ -398,6 +398,7 @@ import UniformTypeIdentifiers
     func dropHeldSend() {
         if let held = heldSend {
             heldSend = nil
+            dropPendingAsk()
             input = held.display
             caret = input.utf16.count
         }
@@ -495,9 +496,30 @@ import UniformTypeIdentifiers
         }
     }
 
-    var working: Bool { busy || replaying || converting > 0 }
+    var waiting: Bool {
+        recalling || prefilling
+            || (genTask == nil && session.metaTaskRunning)
+    }
+
+    var working: Bool { waiting || replaying || converting > 0 }
 
     private(set) var recalling = false
+    @ObservationIgnored private var pendingAsk: UUID?
+
+    private func showAsk(_ display: String, prompt: String,
+                         docs: [DocRef]) {
+        var shown = Message(fromUser: true, text: display, prompt: prompt)
+        shown.docs = docs
+        messages.append(shown)
+        pendingAsk = shown.id
+    }
+
+    private func dropPendingAsk() {
+        if let id = pendingAsk {
+            messages.removeAll { m in m.id == id }
+            pendingAsk = nil
+        }
+    }
 
     func downloadForResume() {
         if let name = resumeAsk {
@@ -2000,7 +2022,13 @@ import UniformTypeIdentifiers
         prefilling = true
         stopAsked = false
         activePrefillStage = stage
-        messages.append(asked)
+        if let id = pendingAsk,
+           let at = messages.firstIndex(where: { m in m.id == id }) {
+            messages[at] = asked
+        } else {
+            messages.append(asked)
+        }
+        pendingAsk = nil
         messages.append(Message(fromUser: false, text: ""))
         let idx = messages.count - 1
         resetLiveBuffers()
@@ -2117,8 +2145,8 @@ import UniformTypeIdentifiers
                     metrics.readFraction, messages[idx - 1].docs,
                     cut: metrics.readStop)
                 if metrics.readStop == "memory" {
-                    flashNote("Out of memory: answered from what was read",
-                              seconds: 6)
+                    flashNote("Out of memory, so I answered from what I "
+                              + "could read", seconds: 6)
                 }
             }
             commitCurrent()
@@ -2189,6 +2217,7 @@ import UniformTypeIdentifiers
             let stoppable = ChatModel.stoppableSpan(made, attachedDocs)
             attachedDocs = []
             let serial = transcriptSerial
+            showAsk(display, prompt: prompt, docs: docs)
             sendTask = Task { [weak self] in
                 await self?.sendRecalled(prompt: prompt, display: display,
                                          docs: docs, stoppable: stoppable,
@@ -2221,6 +2250,8 @@ import UniformTypeIdentifiers
                 submitText(prompt: text, display: display, docs: docs,
                            stoppable: stoppable, stage: stage)
             }
+        } else if serial == transcriptSerial {
+            dropPendingAsk()
         }
     }
 

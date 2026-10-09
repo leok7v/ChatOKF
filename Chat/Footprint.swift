@@ -96,10 +96,7 @@ public enum Footprint {
             + (debugBuild ? " (debug)" : ""))
     }
 
-    public static var watching: Bool {
-        DiagGate.memory.on
-            || UserDefaults.standard.bool(forKey: DiagGate.masterKey)
-    }
+    public static var watching: Bool { DiagGate.memory.on }
 
     public static func watch() {
         queue.async {

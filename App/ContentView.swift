@@ -983,6 +983,17 @@ struct ContentView: View {
                     follow = g.contentSize.height - g.visibleRect.maxY < 60
                 }
             }
+            .onScrollGeometryChange(for: ScrollPlace.self, of: { g in
+                ScrollPlace(top: g.visibleRect.minY,
+                            bottom: g.visibleRect.maxY,
+                            height: g.contentSize.height)
+            }, action: { was, now in
+                if now.top < was.top - 1, now.height >= was.height {
+                    follow = false
+                } else if now.height - now.bottom < 60 {
+                    follow = true
+                }
+            })
             .onChange(of: model.messages.last?.text) { _, _ in
                 if follow { scrollToBottom(proxy) }
             }
@@ -1543,6 +1554,12 @@ private struct ReasoningView: View {
 }
 
 private let transcriptSpace = "transcript"
+
+private struct ScrollPlace: Equatable {
+    let top: CGFloat
+    let bottom: CGFloat
+    let height: CGFloat
+}
 
 @MainActor @Observable final class ToolPeek {
 

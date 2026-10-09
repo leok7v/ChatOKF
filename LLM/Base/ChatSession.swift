@@ -71,6 +71,7 @@ public actor ChatSession {
     private let overthinkTokens: Set<Int32>
     private let overthinkLambda: Float
     private let wireTokens: Set<Int32>
+    private let bannedControl: Set<Int32>
     private let reasoningOpeners: Set<Int32>
     private var runner: (any ToolRunner)?
     private var toolSpecs: [ToolSpec] { runner?.tools ?? [] }
@@ -186,6 +187,7 @@ public actor ChatSession {
             if ids.count == 1 { specials.insert(ids[0]) }
         }
         self.wireTokens = specials
+        self.bannedControl = ChatSession.bannedControl(backend, template)
         var openers: Set<Int32> = []
         if wire.derivedReasoning,
            let first = backend.encode(wire.reasoningOpen).first {
@@ -205,6 +207,31 @@ public actor ChatSession {
 
     public func setThinking(_ on: Bool) {
         enableThinking = on
+    }
+
+    static func bannedControl(_ backend: any AgentBackend,
+                              _ template: String) -> Set<Int32> {
+        let probe = [
+            AgentMessage(role: "system", content: "s"),
+            AgentMessage(role: "user", content: "u"),
+            AgentMessage(role: "assistant", content: "a",
+                         toolCalls: [AgentToolCall(
+                             name: "f",
+                             arguments: [ToolArg(name: "k", value: "v")])],
+                         reasoning: "r"),
+            AgentMessage(role: "tool", content: "t", name: "f"),
+            AgentMessage(role: "user", content: "w"),
+        ]
+        var seen: Set<Int32> = []
+        for thinking in [true, false] {
+            let text = (try? renderPrompt(
+                template: template, messages: probe, tools: [],
+                addGenerationPrompt: true, enableThinking: thinking,
+                reasoningEffort: nil, bosToken: backend.bosToken)) ?? ""
+            seen.formUnion(backend.encode(text))
+        }
+        return backend.controlIds.subtracting(seen)
+            .subtracting(backend.eosIds)
     }
 
     public func setSuppressReasoning(_ on: Bool) {
@@ -1495,8 +1522,7 @@ public actor ChatSession {
         if samplerSeed != 0 { turnConfig.seed = samplerSeed }
         var sampler = Sampler(vocabSize: vocabSize, config: turnConfig)
         sampler.penaltyExempt = wireTokens
-        sampler.banned = backend.controlIds.subtracting(wireTokens)
-            .subtracting(backend.eosIds)
+        sampler.banned = bannedControl
         if !reasons { sampler.banned.formUnion(reasoningOpeners) }
         if turnConfig.dryMultiplier > 0 {
             sampler.dryBreakers = sequenceBreakers()

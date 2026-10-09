@@ -88,9 +88,9 @@ extension ChatModel {
     }
 
     private func noteReadOnly(_ why: String) {
-        let note = "read only: " + why
+        let note = "read only, " + why
         savedLabel += savedLabel.isEmpty ? note : "  " + note
-        flashNote("Read only: " + why)
+        flashNote("Read only, " + why)
     }
 
     private func offerDownload(_ name: String, for id: UUID) {
@@ -98,7 +98,7 @@ extension ChatModel {
             resumeAfterLoad = id
             resumeAsk = name
         } else {
-            noteReadOnly("needs " + Models.display(name))
+            noteReadOnly("it needs " + Models.display(name))
         }
     }
 

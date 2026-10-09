@@ -555,12 +555,12 @@ struct Composer: View {
         if let notice = model.notice {
             text = notice
         } else if model.stopAsked && model.prefilling {
-            text = "Answering from what was read\u{2026}"
+            text = "Answering from what I've read so far\u{2026}"
         } else if model.replaying {
             text = ChatModel.resumingNotice + "\u{2026}"
         } else if model.recalling {
-            text = "Checking what you remember\u{2026}"
-        } else if model.busy, !model.listening, !model.speech.engaged {
+            text = "Recalling what I already know\u{2026}"
+        } else if model.waiting, !model.listening, !model.speech.engaged {
             text = model.footStatus
         } else if let progress = model.prefillProgress {
             text = "Reading \(progress.done.formatted(.number)) of "
