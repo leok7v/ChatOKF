@@ -161,6 +161,10 @@ public enum Flags {
         Knob(name: "read-prompt", takesValue: true, help:
             "the question sent with read-file, default a summary request",
             scope: .diagnostic, defaultValue: ""),
+        Knob(name: "tts-lang", takesValue: true, help:
+            "the language tag the reading voice wraps a sentence in: na is "
+            + "Supertonic's language-agnostic tag, or one of its 31 codes",
+            scope: .experiment, defaultValue: "na"),
         Knob(name: "answer-tokens", takesValue: true, help:
             "the most content tokens an answer may run to, as the CLI's "
             + "-n; a scripted run with thinking off ends before the "

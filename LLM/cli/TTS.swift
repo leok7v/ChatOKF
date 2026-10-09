@@ -61,7 +61,7 @@ func ttsFootprint() -> Double {
     let outPath = args.value("--tts-out") ?? "tts.wav"
     let voiceName = args.value("--tts-voice")
     let speed = args.float("--tts-speed") ?? 1.0
-    let language = args.value("--tts-lang") ?? "en"
+    let language = args.value("--tts-lang") ?? "na"
     let text = args.text("--tts")
     if listing {
         for v in Speech.voices { err("  \(v.id) \(v.name): \(v.detail)\n") }

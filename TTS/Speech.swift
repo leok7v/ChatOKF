@@ -36,6 +36,7 @@ public final class Speech {
     public static let defaultVoice = voices[0]
 
     public static let languages: Set<String> = [
+        "na",
         "en", "ko", "ja", "ar", "bg", "cs", "da", "de", "el", "es", "et",
         "fi", "fr", "hi", "hr", "hu", "id", "it", "lt", "lv", "nl", "pl",
         "pt", "ro", "ru", "sk", "sl", "sv", "tr", "uk", "vi",

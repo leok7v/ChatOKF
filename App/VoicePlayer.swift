@@ -165,6 +165,7 @@ final class VoicePlayer: @unchecked Sendable {
         let t0 = Date()
         let whole = ready()?.synthesize(
             text, voice: picked, speed: speed,
+            language: Flags.value("tts-lang") ?? "na",
             abandon: { [weak self] in self?.superseded(mark) ?? true }) ?? []
         let pcm = Speech.trimmed(whole)
         lock.lock()
