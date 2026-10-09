@@ -235,8 +235,11 @@ The engine speaks 31 languages, each selected by its code:
 | `ru` | Russian | `sk` | Slovak | `sl` | Slovenian | `sv` | Swedish |
 | `tr` | Turkish | `uk` | Ukrainian | `vi` | Vietnamese | | |
 
-The app reads every reply as English for now. The command-line tool takes
-the code, so the other thirty can be heard today:
+The app does not pick a language: it hands every reply to the engine
+under the default `en` tag, and Supertonic reads the text in the language
+it is written in, a Russian reply in Russian. The tag steers how
+ambiguous words and numbers are pronounced, and the command-line tool
+takes it:
 
     chatokf --tts "Guten Morgen, wie geht es dir?" --tts-lang de \
         --tts-voice Emily --tts-pack supertonic-q8.safetensors \
