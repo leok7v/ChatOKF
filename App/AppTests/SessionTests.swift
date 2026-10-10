@@ -337,6 +337,44 @@ private final class TestRunner: ToolRunner, @unchecked Sendable {
         XCTAssertEqual(outcome, .answered)
     }
 
+    func testVoiceRulesRideTheSystemTextWithTheToolsOn() {
+        let backend = MockBackend(scripts: [], vocab: [:])
+        let session = Session(modelName: "test", systemPrompt: "You are a bot.")
+        session.installBackend(backend, template: template, vocabSize: 256,
+                               presets: .greedy)
+        session.toolRunnerOverride = TestRunner(reply: "4")
+        let plain = Session.SessionConfig(
+            thinking: true, reasoningEffortRaw: "medium",
+            reasoningEffortSlot: 1, thinkTokenCap: 200)
+        session.makeSession(plain) { _ in }
+        XCTAssertTrue(session.systemText.hasPrefix("You are a bot."))
+        XCTAssertFalse(session.systemText.contains("voice companion"))
+        XCTAssertFalse(session.voiceRules)
+        var voiced = plain
+        voiced.voice = true
+        session.makeSession(voiced) { _ in }
+        XCTAssertTrue(session.systemText.hasPrefix("You are a bot."))
+        XCTAssertTrue(session.systemText.hasSuffix("directly."))
+        XCTAssertTrue(session.systemText.contains("exactly one sentence"))
+        XCTAssertTrue(session.systemText.contains("Your tools are Calculator:"))
+        XCTAssertTrue(session.voiceRules)
+    }
+
+    func testVoiceRulesNameEveryToolOnceAndNoToolsWhenThereAreNone() {
+        let rules = Session.voiceRules(tools: [
+            "web_search", "fetch_url", "calculator", "get_current_time",
+            "get_news", "get_weather", "wikipedia_query", "memory_search"])
+        for label in ["Web Search", "URL Fetch", "Calculator", "Current Time",
+                      "News", "Weather", "Wikipedia", "Memory Search"] {
+            XCTAssertEqual(rules.components(separatedBy: label).count, 2,
+                           label)
+        }
+        XCTAssertTrue(rules.contains("Web Search, URL Fetch, Calculator"))
+        XCTAssertFalse(Session.voiceRules(tools: []).contains("Your tools"))
+        XCTAssertTrue(Session.voiceRules(tools: ["unknown_tool"])
+            .contains("unknown_tool"))
+    }
+
     func testMetaTaskClearingIsObservable() async throws {
         let backend = MockBackend(scripts: [[1]], vocab: vocab([(1, "hi")]))
         let session = driven(backend)

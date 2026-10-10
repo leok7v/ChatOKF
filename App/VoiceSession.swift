@@ -42,8 +42,11 @@ import TTS
                 UserDefaults.standard.set(mode.rawValue, forKey: "voiceLast")
             }
             if mode == .off { stopSpeaking() }
+            if (oldValue == .off) != (mode == .off) { onEnabledChanged?() }
         }
     }
+
+    @ObservationIgnored var onEnabledChanged: (@MainActor () -> Void)?
 
     private static func startMode() -> Mode {
         let d = UserDefaults.standard
@@ -56,7 +59,14 @@ import TTS
         return VoicePack.onDisk ? result! : .off
     }
 
-    var enabled: Bool { mode != .off }
+    var enabled: Bool { mode != .off || demoVoice != nil }
+
+    @ObservationIgnored var demoVoice: String? {
+        didSet {
+            player?.holdsOpen = demoVoice != nil
+            if demoVoice == nil { player?.idle() }
+        }
+    }
 
     enum Pack { case missing, fetching, ready }
 
@@ -297,7 +307,7 @@ import TTS
                 answerByTag[tag] = shown
                     .trimmingCharacters(in: .whitespacesAndNewlines)
             }
-            player?.enqueue(text, tag: tag, voice: voiceName,
+            player?.enqueue(text, tag: tag, voice: demoVoice ?? voiceName,
                             speed: Float(speed))
         }
     }
@@ -310,6 +320,32 @@ import TTS
     func resume() {
         player?.resume()
         paused = false
+    }
+
+    func warm() {
+        if pack == .ready { player?.warm() }
+    }
+
+    func record(to url: URL, muted: Bool) {
+        if pack == .ready { player?.record(to: url, muted: muted) }
+    }
+
+    func endRecording() {
+        player?.endRecording()
+    }
+
+    func read(_ text: String, voice: String) async {
+        if pack == .ready, let player {
+            player.stop()
+            player.enqueue(text, tag: -1, voice: voice, speed: Float(speed))
+            try? await Task.sleep(for: .milliseconds(300))
+            while player.isActive {
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+        } else {
+            Diag.shared.report(.turn, "[demo] no voice pack, not read: "
+                               + String(text.prefix(40)).debugDescription)
+        }
     }
 
     func preview(_ voice: SpeechVoice) {

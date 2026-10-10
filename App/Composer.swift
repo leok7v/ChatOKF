@@ -132,6 +132,7 @@ struct Composer: View {
 
     private var inVoiceExchange: Bool {
         model.listening || model.speech.engaged || model.voiceReady
+            || model.scriptedVoice
     }
 
     private var controls: some View {
@@ -146,7 +147,10 @@ struct Composer: View {
         }
     }
 
-    private var showBigMic: Bool { model.listening || model.voiceReady }
+    private var showBigMic: Bool {
+        model.listening || model.voiceReady
+            || (model.scriptedVoice && !model.speech.engaged)
+    }
 
     private var transport: some View {
         HStack(spacing: transportGap) {
@@ -180,7 +184,7 @@ struct Composer: View {
         let tint: Color
         if model.listening {
             tint = .orange
-        } else if model.voiceReady {
+        } else if model.voiceReady || model.scriptedVoice {
             tint = .green
         } else {
             tint = .accentColor
@@ -228,7 +232,7 @@ struct Composer: View {
         HStack(spacing: 8) {
             HStack(spacing: gap) {
                 AttachButton(model: model)
-                thinkingButton
+                if !model.voiceMode { thinkingButton }
                 accessButton
             }
             Spacer()

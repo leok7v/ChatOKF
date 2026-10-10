@@ -78,6 +78,30 @@ public final class Microphone: @unchecked Sendable {
         }
     }
 
+    public static func keep(_ utterances: [[Float]], rate: Double,
+                            to url: URL) {
+        try? FileManager.default.removeItem(at: url)
+        if let fmt = AVAudioFormat(commonFormat: .pcmFormatFloat32,
+                                   sampleRate: rate, channels: 1,
+                                   interleaved: false),
+           let file = try? AVAudioFile(forWriting: url,
+                                       settings: fmt.settings) {
+            for samples in utterances {
+                let n = AVAudioFrameCount(samples.count)
+                if let buf = AVAudioPCMBuffer(pcmFormat: fmt,
+                                              frameCapacity: n),
+                   let ch = buf.floatChannelData {
+                    samples.withUnsafeBufferPointer { src in
+                        ch[0].update(from: src.baseAddress!,
+                                     count: samples.count)
+                    }
+                    buf.frameLength = n
+                    try? file.write(from: buf)
+                }
+            }
+        }
+    }
+
     // The block runs SYNCHRONOUSLY inside convert() on the audio thread and is
     // never shared, which is what makes @unchecked Sendable true.
     private final class OneShot: @unchecked Sendable {

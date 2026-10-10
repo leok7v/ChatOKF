@@ -480,11 +480,14 @@ func benchIds(_ encode: (String) -> [Int32]) -> [Int32] {
                              text, onReasoning)
     } else if index == loaded.attachments.turn,
               !loaded.attachments.spans.isEmpty {
+        let parts = args.flag("--audio-first")
+            ? loaded.attachments.parts + [.text(user)]
+            : Gemma4Media.ordered(loaded.attachments.parts,
+                                  around: .text(user))
         stream = session.replySoft(
-            user,
-            parts: Gemma4Media.ordered(loaded.attachments.parts,
-                                       around: .text(user)),
-            spans: loaded.attachments.spans, onReasoning: onReasoning,
+            user, parts: parts, spans: loaded.attachments.spans,
+            labelled: !args.flag("--unlabelled"),
+            onReasoning: onReasoning,
             onToolRound: { event in err(cliToolRound(event)) })
     } else {
         stream = session.reply(

@@ -136,21 +136,23 @@ enum GemmaCLIError: Error, CustomStringConvertible {
     } else {
         backend = chat.backend()
     }
+    let media = chat.media(ctx: ctx)
     return LoadedChat(backend: backend, template: chat.chatTemplate,
                       vocabCount: chat.vocabCount,
                       presets: chat.samplingPresets,
-                      attachments: try await gemmaAttachments(chat, args, ctx))
+                      attachments: try await gemmaAttachments(chat, args,
+                                                              media),
+                      media: media)
 }
 
 // In that order, so a turn can carry several modalities at once; the markup
 // is the module's, which keeps this probe and the app on one definition.
 @MainActor private func gemmaAttachments(_ chat: GemmaChat,
                                          _ args: CommandArgs,
-                                         _ ctx: MetalContext?) async throws
+                                         _ media: Gemma4Media) async throws
     -> Attachments {
     var out = Attachments()
     out.turn = args.value("--attach-turn").flatMap { s in Int(s) } ?? 0
-    let media = chat.media(ctx: ctx)
     let clipSeconds = args.value("--seconds").flatMap { s in Double(s) }
     for file in (args.value("--image") ?? "")
         .split(separator: ",").map(String.init) {

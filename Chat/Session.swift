@@ -473,14 +473,39 @@ public enum TurnEvent: Sendable {
         public var reasoningEffortRaw: String
         public var reasoningEffortSlot: Int
         public var thinkTokenCap: Int
+        public var voice: Bool
 
         public init(thinking: Bool, reasoningEffortRaw: String,
-                    reasoningEffortSlot: Int, thinkTokenCap: Int) {
+                    reasoningEffortSlot: Int, thinkTokenCap: Int,
+                    voice: Bool = false) {
             self.thinking = thinking
             self.reasoningEffortRaw = reasoningEffortRaw
             self.reasoningEffortSlot = reasoningEffortSlot
             self.thinkTokenCap = thinkTokenCap
+            self.voice = voice
         }
+    }
+
+    public private(set) var voiceRules = false
+    public private(set) var systemText = ""
+
+    nonisolated public static func voiceRules(tools: [String]) -> String {
+        let named = tools.map { name in
+            (Session.toolGlyphs[name] ?? MemoryTools.glyphs[name])?.label
+                ?? name
+        }
+        var s = "You are a fast, conversational voice companion: the user "
+            + "hears your reply read aloud. Keep it natural and easy to "
+            + "speak. If the user's message is a single sentence, reply in "
+            + "exactly one sentence. Explain in detail only when asked to."
+        if !named.isEmpty {
+            s += " Your tools are " + named.joined(separator: ", ")
+                + ": call them at once when needed, with no deliberation "
+                + "and no narration of the steps."
+        }
+        s += " No markdown, bullet points or special characters that read "
+            + "badly aloud. Answer immediately and directly."
+        return s
     }
 
     private static let southernRegions: Set<String> = [
@@ -537,6 +562,10 @@ public enum TurnEvent: Sendable {
                 + "What the user asks you to remember is saved after your "
                 + "reply, so just confirm it."
         }
+        if voiceRules {
+            s += "\n" + Session.voiceRules(
+                tools: toolRunner?.tools.map { spec in spec.name } ?? [])
+        }
         return s
     }
 
@@ -588,13 +617,16 @@ public enum TurnEvent: Sendable {
             modelSupportsThinking = templateSupportsThinking(ggufTemplate)
             effortLevels = templateEffortLevels(ggufTemplate)
             modelSupportsReasoningEffort = effortLevels.count > 1
+            voiceRules = config.voice
             let thinkingActive = config.thinking && modelSupportsThinking
+                && !config.voice
             let wire = effortSpelling(config.reasoningEffortRaw,
                                       slot: config.reasoningEffortSlot,
                                       in: effortLevels)
+            systemText = systemStable
             session = ChatSession(
                 backend: ggufBackend, template: ggufTemplate,
-                system: systemStable, systemTail: "",
+                system: systemText, systemTail: "",
                 vocabSize: ggufVocabCount, presets: activePresets,
                 enableThinking: thinkingActive,
                 suppressReasoning: !thinkingActive,
@@ -611,7 +643,8 @@ public enum TurnEvent: Sendable {
                 + (thinkingActive ? "on" : "off, reasoning suppressed")
                 + ", asked " + (config.thinking ? "on" : "off")
                 + ", model " + (modelSupportsThinking ? "thinks" : "cannot")
-                + ", effort " + (modelSupportsReasoningEffort ? wire : "none"))
+                + ", effort " + (modelSupportsReasoningEffort ? wire : "none")
+                + (config.voice ? ", voice rules" : ""))
             hookTrace(thinkingActive: thinkingActive, onEvent: onEvent)
         }
     }
@@ -812,7 +845,8 @@ public enum TurnEvent: Sendable {
         }
     }
 
-    private static let toolGlyphs: [String: (label: String, symbol: String)] = [
+    nonisolated private static let toolGlyphs:
+        [String: (label: String, symbol: String)] = [
         "get_current_time": ("Current Time", "clock"),
         "calculator": ("Calculator", "function"),
         "web_search": ("Web Search", "magnifyingglass"),

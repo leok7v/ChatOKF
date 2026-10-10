@@ -186,6 +186,37 @@ public enum Flags {
             + "'new' leaves the conversation, 'reopen' brings it back, "
             + "'think' taps the lightbulb",
             scope: .diagnostic, defaultValue: ""),
+        Knob(name: "demo-ask-voice", takesValue: true, help:
+            "a voice that reads each scripted prompt aloud before it is "
+            + "sent; the script then waits for the spoken answer to end",
+            scope: .diagnostic, defaultValue: ""),
+        Knob(name: "demo-answer-voice", takesValue: true, help:
+            "the voice that reads each scripted answer, for this launch "
+            + "only; the saved voice and the speaker switch are untouched",
+            scope: .diagnostic, defaultValue: ""),
+        Knob(name: "demo-arm", takesValue: false, help:
+            "store the scripted demo instead of running it; the next "
+            + "launch, from the icon, runs it once with the recorder "
+            + "already watching", scope: .diagnostic, defaultValue: "0"),
+        Knob(name: "demo-system", takesValue: true, help:
+            "the system prompt a scripted demo runs under, this launch "
+            + "only; the saved one is untouched", scope: .diagnostic,
+            defaultValue: ""),
+        Knob(name: "demo-pause", takesValue: true, help:
+            "seconds between a scripted prompt being read aloud and its "
+            + "send, so a viewer can read it", scope: .diagnostic,
+            defaultValue: "0"),
+        Knob(name: "demo-capture", takesValue: false, help:
+            "record the scripted demo's screen and sound on the phone "
+            + "itself, to demo.mp4 in Caches; asks once for permission",
+            scope: .diagnostic, defaultValue: "0"),
+        Knob(name: "demo-mute", takesValue: false, help:
+            "keep the speaker silent through a scripted demo; the sound "
+            + "still goes to demo.wav, taken before the mixer",
+            scope: .diagnostic, defaultValue: "0"),
+        Knob(name: "demo-gap", takesValue: true, help:
+            "seconds of silence between one scripted turn's spoken answer "
+            + "and the next prompt", scope: .diagnostic, defaultValue: "0"),
         Knob(name: "reasoning-note", takesValue: true, help:
             "text injected before the </think> the reasoning budget forces, "
             + "so the cut reads as a decision rather than a truncation",

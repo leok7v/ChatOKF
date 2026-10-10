@@ -302,7 +302,27 @@ import UniformTypeIdentifiers
 
     var modelSupportsThinking: Bool { session.modelSupportsThinking }
 
-    var thinkingActive: Bool { benchOrUserThinking && modelSupportsThinking }
+    var voiceMode: Bool { session.voiceRules }
+
+    var thinkingActive: Bool {
+        benchOrUserThinking && modelSupportsThinking && !voiceMode
+    }
+
+    init() {
+        speech.onEnabledChanged = { [weak self] in self?.voiceChanged() }
+    }
+
+    private func voiceChanged() {
+        if ready, speech.enabled != voiceMode {
+            if messages.isEmpty, !busy {
+                newChat()
+            } else {
+                flashNote(speech.enabled
+                          ? "Voice rules from the next new chat"
+                          : "Voice rules off from the next new chat")
+            }
+        }
+    }
 
     private var benchOrUserThinking: Bool {
         Self.benchPrompt.isEmpty ? thinking : Self.benchThinking
@@ -708,7 +728,63 @@ import UniformTypeIdentifiers
     private static let readFiles = Flags.values("read-file")
     private static let readPrompt = Flags.value("read-prompt") ?? ""
     @ObservationIgnored private var readTask: Task<Void, Never>?
-    private static let script = Flags.values("prompt")
+    struct Demo {
+        let prompts: [String]
+        let ask: String
+        let answer: String
+        let delay: Double
+        let gap: Double
+        let pause: Double
+        let system: String
+        let mute: Bool
+        let capture: Bool
+        var spoken: Bool { !ask.isEmpty || !answer.isEmpty }
+    }
+
+    static let armedKey = "demo.armed"
+
+    private static func launchDemo() -> Demo? {
+        let d = UserDefaults.standard
+        let argued = Flags.values("prompt")
+        var out: Demo? = nil
+        if !argued.isEmpty {
+            out = Demo(prompts: argued,
+                       ask: Flags.value("demo-ask-voice") ?? "",
+                       answer: Flags.value("demo-answer-voice") ?? "",
+                       delay: Flags.double("prompt-delay") ?? 0,
+                       gap: Flags.double("demo-gap") ?? 0,
+                       pause: Flags.double("demo-pause") ?? 0,
+                       system: Flags.value("demo-system") ?? "",
+                       mute: Flags.on("demo-mute"),
+                       capture: Flags.on("demo-capture"))
+        } else if let armed = d.dictionary(forKey: ChatModel.armedKey),
+                  let prompts = armed["prompts"] as? [String] {
+            d.removeObject(forKey: ChatModel.armedKey)
+            out = Demo(prompts: prompts,
+                       ask: armed["ask"] as? String ?? "",
+                       answer: armed["answer"] as? String ?? "",
+                       delay: armed["delay"] as? Double ?? 0,
+                       gap: armed["gap"] as? Double ?? 0,
+                       pause: armed["pause"] as? Double ?? 0,
+                       system: armed["system"] as? String ?? "",
+                       mute: armed["mute"] as? Bool ?? false,
+                       capture: armed["capture"] as? Bool ?? false)
+        }
+        return out
+    }
+
+    private static func arm(_ demo: Demo) {
+        UserDefaults.standard.set(
+            ["prompts": demo.prompts, "ask": demo.ask, "answer": demo.answer,
+             "delay": demo.delay, "gap": demo.gap, "pause": demo.pause,
+             "system": demo.system, "mute": demo.mute,
+             "capture": demo.capture] as [String: Any],
+            forKey: ChatModel.armedKey)
+    }
+
+    private static let arming = Flags.on("demo-arm")
+    let demo: Demo? = ChatModel.launchDemo()
+    private(set) var scriptedVoice = false
     @ObservationIgnored private var scriptTask: Task<Void, Never>?
     @ObservationIgnored private var benchPieces = 0
     @ObservationIgnored private var benchMetrics: TurnMetrics?
@@ -772,7 +848,7 @@ import UniformTypeIdentifiers
             reasoningEffortRaw: reasoningEffort.rawValue.lowercased(),
             reasoningEffortSlot:
                 ReasoningEffort.allCases.firstIndex(of: reasoningEffort) ?? 0,
-            thinkTokenCap: thinkTokenCap)
+            thinkTokenCap: thinkTokenCap, voice: speech.enabled)
     }
 
     private func loadReady(name: String, path: String) async {
@@ -784,6 +860,12 @@ import UniformTypeIdentifiers
             compiling = false
             loadError = error
         } else {
+            if let demo, !demo.system.isEmpty {
+                session.systemPrompt = demo.system
+            }
+            if let demo, !Self.arming, !demo.answer.isEmpty {
+                speech.demoVoice = demo.answer
+            }
             Instrument.timed("makeSession") {
                 session.makeSession(sessionConfig()) { [weak self] e in
                     self?.recordTrace(e)
@@ -808,7 +890,11 @@ import UniformTypeIdentifiers
             if !Self.readFiles.isEmpty, readTask == nil {
                 readTask = Task { @MainActor in await self.runReadFiles() }
             }
-            if !Self.script.isEmpty, scriptTask == nil {
+            if let demo, Self.arming {
+                Self.arm(demo)
+                flashNote("Demo armed: quit, start recording, tap the icon",
+                          seconds: 30)
+            } else if demo != nil, scriptTask == nil {
                 scriptTask = Task { @MainActor in await self.runScript() }
             }
         }
@@ -822,12 +908,38 @@ import UniformTypeIdentifiers
         await ConversationStore.shared.settled()
     }
 
+    private func spokenOut() async {
+        while speech.engaged || speech.speaking {
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+    }
+
     private func runScript() async {
+        let demo = demo ?? Demo(prompts: [], ask: "", answer: "", delay: 0,
+                                gap: 0, pause: 0, system: "", mute: false,
+                                capture: false)
         await readTask?.value
         await session.awaitPrimed()
-        try? await Task.sleep(for: .seconds(Flags.double("prompt-delay") ?? 0))
+        scriptedVoice = demo.spoken
+        if demo.spoken {
+            speech.warm()
+            speech.record(to: ChatModel.cachedFile("demo.wav"),
+                          muted: demo.mute)
+        }
+        if demo.capture {
+            let began = Date()
+            DemoCapture.shared.start(to: ChatModel.cachedFile("demo.mp4")) {
+                error in
+                Diag.shared.report(.turn, "[demo] capture " + (error ?? "on"))
+            }
+            while DemoCapture.shared.waiting
+                    && Date().timeIntervalSince(began) < 90 {
+                try? await Task.sleep(for: .milliseconds(200))
+            }
+        }
+        try? await Task.sleep(for: .seconds(demo.delay))
         var step = 0
-        for line in Self.script {
+        for line in demo.prompts {
             step += 1
             let began = Date()
             if line == "new" {
@@ -842,15 +954,35 @@ import UniformTypeIdentifiers
             } else {
                 input = line
                 caret = input.utf16.count
+                if !demo.ask.isEmpty {
+                    Diag.shared.report(.turn, "[demo] ask \(step)")
+                    await speech.read(line, voice: demo.ask)
+                    try? await Task.sleep(for: .seconds(demo.pause))
+                }
                 send()
             }
             await settled()
+            if demo.spoken || demo.gap > 0 {
+                await spokenOut()
+                try? await Task.sleep(for: .seconds(demo.gap))
+            }
             Diag.shared.report(.turn, String(
                 format: "[script] %d %@ in %.1fs: ctx %@, %d message(s)",
                 step, String(line.prefix(40)).debugDescription,
                 Date().timeIntervalSince(began),
                 statsLabel.isEmpty ? "-" : statsLabel, messages.count))
         }
+        if demo.spoken { speech.endRecording() }
+        if demo.capture {
+            let ended: String = await withCheckedContinuation { k in
+                DemoCapture.shared.stop { report in
+                    k.resume(returning: report)
+                }
+            }
+            Diag.shared.report(.turn, "[demo] " + ended)
+        }
+        scriptedVoice = false
+        speech.demoVoice = nil
         Diag.shared.report(.turn, "[script] done")
         scriptTask = nil
     }
@@ -1147,16 +1279,18 @@ import UniformTypeIdentifiers
         let titled = !readOnly && generatedTitle == nil
             && messages.count >= 2 && chars > 200
         let remembers = session.memories.active && messages.count >= 2
+            && !scriptedVoice
         let extraction = remembers && !Models.isSimple(modelName)
             && !ChatModel.sampleTexts.contains(lastSaid)
             ? Session.Extraction(said: lastSaid, exchange: lastExchange,
                                  conversation: currentConversationId)
             : nil
         let conversation = remembers ? conversationNote : nil
-        if !readOnly, titled || offersFollowupHint || extraction != nil
+        let hinted = offersFollowupHint && !scriptedVoice
+        if !readOnly, titled || hinted || extraction != nil
             || conversation != nil {
             session.runMetaTurns(
-                titled: titled, wantsFollowup: offersFollowupHint,
+                titled: titled, wantsFollowup: hinted,
                 extraction: extraction, conversation: conversation,
                 onTitle: { [weak self] t in
                     self?.generatedTitle = t
@@ -1275,7 +1409,7 @@ import UniformTypeIdentifiers
     }
 
     func toggleThinking() {
-        if modelSupportsThinking {
+        if modelSupportsThinking, !voiceMode {
             thinking.toggle()
             let on = thinking
             let fresh = messages.isEmpty
@@ -1815,7 +1949,7 @@ import UniformTypeIdentifiers
                         heard.utteranceCount))
                 }
                 let quiet = Date().timeIntervalSince(heard.lastAt)
-                if listening && heard.hasSpeech
+                if listening && heard.hasSpeech && !(gate?.hearing ?? false)
                     && quiet >= ChatModel.endOfTurnSilence {
                     endListening()
                 }
@@ -1854,6 +1988,10 @@ import UniformTypeIdentifiers
         hearingSpeech = false
         speechLevel = 0
         let said = heard.take()
+        if DiagGate.voice.on, !said.isEmpty {
+            Microphone.keep(said.map { u in u.samples }, rate: rateInUse,
+                            to: ChatModel.cachedFile("heard.wav"))
+        }
         let secs = Double(heard.samples) / max(rateInUse, 1)
         Diag.shared.report(.voice, String(
             format: "[mic] stopped: %.1fs captured, %d utterance(s), "
@@ -2106,8 +2244,10 @@ import UniformTypeIdentifiers
             finishDocs(idx)
             finishTurn(outcome, metrics, idx)
         case .cancelled:
+            speech.stopSpeaking()
             if messages.count >= 2 { messages.removeLast(2) }
         case .failed(let message):
+            speech.stopSpeaking()
             if messages.indices.contains(idx) {
                 messages[idx].text = message
                 transcriptDirty = true
@@ -2298,10 +2438,10 @@ import UniformTypeIdentifiers
         _ state: ProcessInfo.ThermalState) -> String {
         let out: String
         switch state {
-        case .nominal: out = "❄️"
-        case .fair: out = "🌡️"
-        case .serious: out = "🔥"
-        case .critical: out = "🔥🔥"
+        case .nominal: out = ""
+        case .fair: out = "♨️"
+        case .serious: out = "🥵"
+        case .critical: out = "🔥"
         @unknown default: out = ""
         }
         return out

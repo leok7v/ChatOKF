@@ -22,6 +22,16 @@ final class VoicePlayer: @unchecked Sendable {
     private var speech: Speech?
     private var unsynthesized: [(text: String, tag: Int)] = []
     private var bufferedTags: [Int] = []
+    private var pending: [Scheduled] = []
+    private var nextSerial = 0
+
+    private struct Scheduled {
+        let serial: Int
+        let buffer: AVAudioPCMBuffer
+        let mark: Int
+        let voice: String
+        let speed: Float
+    }
     private var synthesizing = 0
     private var buffered = 0
     private var epoch = 0
@@ -30,6 +40,11 @@ final class VoicePlayer: @unchecked Sendable {
 
     var onActivity: (@Sendable (Bool) -> Void)?
     var onSpeaking: (@Sendable (Int?) -> Void)?
+    private var holding = false
+    private var demoFile: AVAudioFile?
+    private var demoHost: UInt64 = 0
+    private var demoWritten = 0.0
+    private var demoConverter: AVAudioConverter?
 
     static let speechFloorGB = Flags.int("speech-floor") ?? 4
 
@@ -41,8 +56,52 @@ final class VoicePlayer: @unchecked Sendable {
             format = fmt
             engine.attach(node)
             engine.connect(node, to: engine.mainMixerNode, format: fmt)
+            NotificationCenter.default.addObserver(
+                forName: .AVAudioEngineConfigurationChange, object: engine,
+                queue: nil) { [weak self] _ in self?.recover() }
         } else {
             return nil
+        }
+    }
+
+    private func recover() {
+        nodeQueue.async { [weak self] in
+            if let self {
+                self.lock.lock()
+                let lost = self.pending
+                let wasRunning = self.running
+                let paused = self.isPaused
+                self.pending = []
+                self.running = false
+                self.lock.unlock()
+                self.log("engine reconfigured, \(lost.count) buffer(s) "
+                         + "replayed")
+                self.node.stop()
+                self.node.reset()
+                if wasRunning || !lost.isEmpty {
+                    self.startEngine()
+                    for item in lost {
+                        self.scheduleKept(item.buffer, mark: item.mark,
+                                          voice: item.voice, speed: item.speed)
+                    }
+                    if !paused, self.engine.isRunning { self.node.play() }
+                }
+            }
+        }
+    }
+
+    private func scheduleKept(_ buffer: AVAudioPCMBuffer, mark: Int,
+                              voice: String, speed: Float) {
+        lock.lock()
+        nextSerial += 1
+        let serial = nextSerial
+        pending.append(Scheduled(serial: serial, buffer: buffer, mark: mark,
+                                 voice: voice, speed: speed))
+        lock.unlock()
+        node.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) {
+            [weak self] _ in
+            self?.finished(serial: serial, mark: mark, voice: voice,
+                           speed: speed)
         }
     }
 
@@ -71,6 +130,19 @@ final class VoicePlayer: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return synthesizing > 0 || buffered > 0 || !unsynthesized.isEmpty
+    }
+
+    var holdsOpen: Bool {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return holding
+        }
+        set {
+            lock.lock()
+            holding = newValue
+            lock.unlock()
+        }
     }
 
     private func log(_ what: @autoclosure () -> String) {
@@ -106,6 +178,107 @@ final class VoicePlayer: @unchecked Sendable {
         }
     }
 
+    func warm() {
+        nodeQueue.async { [weak self] in self?.startEngine() }
+    }
+
+    func endRecording() {
+        node.removeTap(onBus: 0)
+        engine.mainMixerNode.outputVolume = 1
+        lock.lock()
+        demoFile = nil
+        lock.unlock()
+    }
+
+    func record(to url: URL, muted: Bool) {
+        try? FileManager.default.removeItem(at: url)
+        nodeQueue.async { [weak self] in
+            if let self {
+                self.startEngine()
+                if muted { self.engine.mainMixerNode.outputVolume = 0 }
+                let fmt = self.node.outputFormat(forBus: 0)
+                self.lock.lock()
+                self.demoFile = try? AVAudioFile(forWriting: url,
+                                                 settings: fmt.settings)
+                self.demoHost = mach_absolute_time()
+                self.demoWritten = 0
+                self.lock.unlock()
+                Diag.shared.report(.turn, String(
+                    format: "[demo] recording %.0f Hz %d ch, engine %@, "
+                        + "speaker %@", fmt.sampleRate, fmt.channelCount,
+                    self.engine.isRunning ? "running" : "STOPPED",
+                    muted ? "muted" : "on"))
+                self.node.installTap(onBus: 0, bufferSize: 4096, format: fmt) {
+                    [weak self] buffer, when in
+                    self?.demoRendered(buffer, at: when)
+                }
+            }
+        }
+    }
+
+    private func converted(_ buffer: AVAudioPCMBuffer, to fmt: AVAudioFormat)
+        -> AVAudioPCMBuffer? {
+        var out: AVAudioPCMBuffer? = buffer
+        if buffer.format != fmt {
+            lock.lock()
+            if demoConverter?.inputFormat != buffer.format {
+                demoConverter = AVAudioConverter(from: buffer.format, to: fmt)
+            }
+            let converter = demoConverter
+            lock.unlock()
+            let ratio = fmt.sampleRate / buffer.format.sampleRate
+            let frames = AVAudioFrameCount(Double(buffer.frameLength) * ratio)
+            out = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: frames + 32)
+            var fed = false
+            if let converter, let out {
+                converter.convert(to: out, error: nil) { _, status in
+                    status.pointee = fed ? .noDataNow : .haveData
+                    let next: AVAudioBuffer? = fed ? nil : buffer
+                    fed = true
+                    return next
+                }
+            }
+        }
+        return out
+    }
+
+    private static func silence(_ seconds: Double, in fmt: AVAudioFormat)
+        -> AVAudioPCMBuffer? {
+        let frames = AVAudioFrameCount(max(0, seconds) * fmt.sampleRate)
+        let buffer = frames > 0
+            ? AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: frames) : nil
+        if let buffer, let channels = buffer.floatChannelData {
+            buffer.frameLength = frames
+            for c in 0..<Int(fmt.channelCount) {
+                channels[c].update(repeating: 0, count: Int(frames))
+            }
+        }
+        return buffer
+    }
+
+    private func demoRendered(_ buffer: AVAudioPCMBuffer,
+                              at when: AVAudioTime) {
+        lock.lock()
+        let file = demoFile
+        let began = when.isHostTimeValid
+            ? AVAudioTime.seconds(forHostTime: when.hostTime)
+                - AVAudioTime.seconds(forHostTime: demoHost)
+            : demoWritten
+        let gap = began - demoWritten
+        let seconds = Double(buffer.frameLength) / buffer.format.sampleRate
+        if file != nil { demoWritten = max(demoWritten, began) + seconds }
+        lock.unlock()
+        if let file {
+            let fmt = file.processingFormat
+            if gap > 0.02, let quiet = VoicePlayer.silence(gap, in: fmt) {
+                try? file.write(from: quiet)
+            }
+            if let out = converted(buffer, to: fmt) {
+                try? file.write(from: out)
+            }
+        }
+    }
+
     func stop() {
         lock.lock()
         unsynthesized.removeAll()
@@ -113,6 +286,7 @@ final class VoicePlayer: @unchecked Sendable {
         buffered = 0
         isPaused = false
         bufferedTags.removeAll()
+        pending.removeAll()
         lock.unlock()
         nodeQueue.async { [weak self] in
             self?.node.stop()
@@ -136,8 +310,10 @@ final class VoicePlayer: @unchecked Sendable {
         isPaused = false
         lock.unlock()
         nodeQueue.async { [weak self] in
-            self?.startEngine()
-            self?.node.play()
+            if let self {
+                self.startEngine()
+                if self.engine.isRunning { self.node.play() }
+            }
         }
         log("resume | \(counts())")
     }
@@ -206,12 +382,9 @@ final class VoicePlayer: @unchecked Sendable {
             let paused = isPaused
             lock.unlock()
             if live {
-                startEngine()
-                node.scheduleBuffer(buffer, completionCallbackType:
-                                        .dataPlayedBack) { [weak self] _ in
-                    self?.finished(mark: mark, voice: voice, speed: speed)
-                }
-                if !paused { node.play() }
+                nodeQueue.sync { startEngine() }
+                scheduleKept(buffer, mark: mark, voice: voice, speed: speed)
+                if !paused, engine.isRunning { node.play() }
             }
             notify()
             notifySpeaking()
@@ -219,11 +392,16 @@ final class VoicePlayer: @unchecked Sendable {
         pump(voice: voice, speed: speed)
     }
 
-    private func finished(mark: Int, voice: String, speed: Float) {
+    private func finished(serial: Int, mark: Int, voice: String,
+                          speed: Float) {
         lock.lock()
-        if mark == epoch && buffered > 0 { buffered -= 1 }
-        if mark == epoch && !bufferedTags.isEmpty {
-            bufferedTags.removeFirst()
+        let played = pending.firstIndex { item in item.serial == serial }
+        if let played {
+            pending.remove(at: played)
+            if mark == epoch && buffered > 0 { buffered -= 1 }
+            if mark == epoch && !bufferedTags.isEmpty {
+                bufferedTags.removeFirst()
+            }
         }
         lock.unlock()
         notify()
@@ -233,13 +411,19 @@ final class VoicePlayer: @unchecked Sendable {
 
     private func startEngine() {
         lock.lock()
-        let already = running
+        let already = running && engine.isRunning
         running = true
         lock.unlock()
         if !already {
             AudioSession.beginPlayback()
-            try? engine.start()
-            prime()
+            if (try? engine.start()) != nil {
+                prime()
+            } else {
+                lock.lock()
+                running = false
+                lock.unlock()
+                log("engine did not start | \(counts())")
+            }
         }
     }
 
@@ -262,7 +446,7 @@ final class VoicePlayer: @unchecked Sendable {
     func idle() {
         lock.lock()
         let quiet = synthesizing == 0 && buffered == 0
-            && unsynthesized.isEmpty
+            && unsynthesized.isEmpty && !holding
         let wasRunning = running
         if quiet { running = false }
         lock.unlock()
