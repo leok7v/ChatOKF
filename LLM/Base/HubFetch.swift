@@ -1,11 +1,13 @@
 import CryptoKit
 import Foundation
+import XET
 
 public enum HubError: Error {
     case http(Int, String)
     case malformed(String)
     case notFound(String)
     case digest(String)
+    case space(needed: Int64, free: Int64, freeable: Int64)
 }
 
 public struct HubFetch: Sendable {
@@ -13,6 +15,22 @@ public struct HubFetch: Sendable {
         public let file: String
         public let done: Int64
         public let total: Int64
+    }
+
+    public enum Usage: Sendable {
+        case important
+        case opportunistic
+    }
+
+    public enum Transport: Sendable {
+        case chunks
+        case bridge
+    }
+
+    public struct Room: Sendable {
+        public let free: Int64
+        public let important: Int64
+        public let opportunistic: Int64
     }
 
     struct Entry: Sendable {
@@ -30,6 +48,12 @@ public struct HubFetch: Sendable {
     static let span: Int64 = 32 << 20
     static let lanes = 4
     static let lead = 2 * lanes
+    static let spaceTries = 5
+    static let spacePause = 2
+
+    public static var transport: Transport {
+        Flags.on("xet") ? .chunks : .bridge
+    }
 
     public static func fetch(
         repo: String,
@@ -39,6 +63,8 @@ public struct HubFetch: Sendable {
         files: [String]? = nil,
         excludeFromBackup: Bool = false,
         background: Bool = false,
+        usage: Usage = .important,
+        transport: Transport = HubFetch.transport,
         report: @escaping @Sendable (Status) -> Void = { _ in }
     ) async throws -> URL {
         let fm = FileManager.default
@@ -58,7 +84,9 @@ public struct HubFetch: Sendable {
             if want.isEmpty {
                 throw HubError.notFound(files?.joined(separator: ",") ?? prefix)
             }
-            try await install(repo, sha, want, root, background, report)
+            try claim(want, root, usage)
+            try await install(repo, sha, want, root, background, transport,
+                              report)
             fm.createFile(atPath: mark.path, contents: nil)
             prune(dest, keep: sha)
         }
@@ -66,6 +94,65 @@ public struct HubFetch: Sendable {
             exclude(fromBackup: root)
         }
         return prefix.isEmpty ? root : root.appendingPathComponent(prefix)
+    }
+
+    static func claim(_ want: [Entry], _ root: URL, _ usage: Usage) throws {
+        let needed = want.reduce(Int64(0)) { sum, e in
+            sum + max(0, e.size - present(e, root))
+        }
+        let r = room(near: root)
+        let usable = usage == .important ? r.important : r.opportunistic
+        if needed > usable {
+            throw HubError.space(needed: needed, free: r.free,
+                                 freeable: r.important)
+        }
+    }
+
+    static func present(_ e: Entry, _ root: URL) -> Int64 {
+        let dst = root.appendingPathComponent(e.path)
+        return FileManager.default.fileExists(atPath: dst.path)
+            ? e.size : size(dst.appendingPathExtension("part"))
+    }
+
+    public static func room(near url: URL) -> Room {
+        let fm = FileManager.default
+        var probe = url
+        while !fm.fileExists(atPath: probe.path)
+                && probe.pathComponents.count > 1 {
+            probe = probe.deletingLastPathComponent()
+        }
+        let v = try? probe.resourceValues(forKeys: [
+            .volumeAvailableCapacityKey,
+            .volumeAvailableCapacityForImportantUsageKey,
+            .volumeAvailableCapacityForOpportunisticUsageKey])
+        let free = v?.volumeAvailableCapacity.map { n in Int64(n) }
+            ?? Int64.max
+        return Room(free: free,
+                    important: v?.volumeAvailableCapacityForImportantUsage
+                        ?? free,
+                    opportunistic:
+                        v?.volumeAvailableCapacityForOpportunisticUsage
+                        ?? free)
+    }
+
+    public static func spaceMessage(needed: Int64, free: Int64,
+                                    freeable: Int64) -> String {
+        let gb = { (n: Int64) in
+            ByteCountFormatter.string(fromByteCount: n, countStyle: .file)
+        }
+        let purgeable = max(0, freeable - free)
+        var out = "needs \(gb(needed)) of free space and \(gb(free)) is free"
+        if needed <= freeable {
+            out += "; the system can clear \(gb(purgeable)) more of caches "
+                + "and files kept in iCloud but has not yet, so try again "
+                + "in a moment"
+        } else {
+            if purgeable >= 100 << 20 {
+                out += ", with \(gb(purgeable)) more the system can clear"
+            }
+            out += "; remove downloads, videos or apps to make room"
+        }
+        return out
     }
 
     static func prune(_ dest: URL, keep sha: String) {
@@ -131,6 +218,7 @@ public struct HubFetch: Sendable {
         _ want: [Entry],
         _ root: URL,
         _ background: Bool,
+        _ transport: Transport,
         _ report: @escaping @Sendable (Status) -> Void
     ) async throws {
         let fm = FileManager.default
@@ -147,8 +235,8 @@ public struct HubFetch: Sendable {
             let kept = fm.fileExists(atPath: dst.path)
                 && (try? verify(dst, e)) != nil
             if !kept {
-                try await pull(repo, sha, e, dst, pump,
-                               background) { written in
+                try await pull(repo, sha, e, dst, pump, background,
+                               transport) { written in
                     meter.live(written)
                 }
             }
@@ -158,7 +246,7 @@ public struct HubFetch: Sendable {
 
     static func pull(
         _ repo: String, _ sha: String, _ e: Entry, _ dst: URL, _ pump: Pump,
-        _ background: Bool,
+        _ background: Bool, _ transport: Transport,
         _ onBytes: @escaping @Sendable (Int64) -> Void
     ) async throws {
         let fm = FileManager.default
@@ -173,9 +261,10 @@ public struct HubFetch: Sendable {
             do {
                 Diag.memoryDetail?("fetch start \(e.path)")
                 if background {
-                    try await carry(url, e, part, pump, onBytes)
+                    try await carry(url, e, part, pump, transport, onBytes)
                 } else {
-                    try await fill(url, e, part, pump, onBytes)
+                    try await foreground(url, e, part, pump, transport,
+                                         onBytes)
                 }
                 Diag.memoryDetail?("fetch body \(e.path)")
                 do {
@@ -191,7 +280,9 @@ public struct HubFetch: Sendable {
                 last = error
             }
             if verified == nil {
-                attempt = committed(part) > had ? 1 : attempt + 1
+                let fatal = last.map { err in HubFetch.fatal(err) } ?? false
+                attempt = fatal ? retries
+                    : committed(part) > had ? 1 : attempt + 1
                 Diag.shared.report(.net, "fetch \(e.path) attempt \(attempt) "
                     + "at \(committed(part)): "
                     + "\(last.map { err in "\(err)" } ?? "")")
@@ -208,6 +299,57 @@ public struct HubFetch: Sendable {
         Diag.memoryDetail?("fetch moved \(e.path)")
     }
 
+    static func fatal(_ error: Error) -> Bool {
+        var out = error is CancellationError
+        if case HubError.space = error { out = true }
+        return out
+    }
+
+    static func foreground(_ url: URL, _ e: Entry, _ part: URL,
+                           _ pump: Pump, _ transport: Transport,
+                           _ onBytes: @escaping @Sendable (Int64) -> Void)
+        async throws {
+        let xet = transport == .chunks
+            ? try await Hub.file(url, configuration: pump.configuration)
+            : nil
+        if let xet, xet.size == e.size {
+            try await chunks(xet, url, e, part, pump.configuration, onBytes)
+        } else {
+            if transport == .chunks {
+                Diag.shared.report(.net, "\(e.path): not xet backed, bridge")
+            }
+            try await fill(url, e, part, pump, onBytes)
+        }
+    }
+
+    static func chunks(_ file: XETFile, _ url: URL, _ e: Entry, _ part: URL,
+                       _ configuration: URLSessionConfiguration,
+                       _ onBytes: @escaping @Sendable (Int64) -> Void)
+        async throws {
+        let fm = FileManager.default
+        if !fm.fileExists(atPath: part.path) {
+            fm.createFile(atPath: part.path, contents: nil)
+        }
+        let have = try assemble(part)
+        if have < e.size {
+            try await reserve(part, e.size)
+            try commit(part, have)
+            let refresh = try need(Hub.refresh(for: url), url.absoluteString)
+            let token = try await Hub.token(refresh,
+                                            configuration: configuration)
+            let r = try await Hub.reconstruction(
+                of: file.id, token: token, range: have..<e.size,
+                configuration: configuration)
+            Diag.shared.report(.net, "chunks \(e.path) from \(have): "
+                + "\(r.terms.count) term(s) over \(r.fetches.count) xorb(s)")
+            _ = try await Downloader.download(
+                r, limit: e.size - have, into: part, at: have,
+                lead: span * Int64(lead), configuration: configuration,
+                progress: { n in onBytes(have + n) },
+                landed: { n in try commit(part, have + n) })
+        }
+    }
+
     static func fill(_ url: URL, _ e: Entry, _ part: URL, _ pump: Pump,
                      _ onBytes: @escaping @Sendable (Int64) -> Void,
                      span: Int64 = HubFetch.span)
@@ -218,7 +360,8 @@ public struct HubFetch: Sendable {
         }
         let have = try assemble(part)
         if have < e.size {
-            try reserve(part, e.size)
+            try await reserve(part, e.size)
+            try commit(part, have)
             let ledger = Ledger(part, have, e.size, span, onBytes)
             try await withThrowingTaskGroup(of: Void.self) { group in
                 for lane in 0..<lanes {
@@ -248,17 +391,31 @@ public struct HubFetch: Sendable {
         }
     }
 
-    static func reserve(_ part: URL, _ size: Int64) throws {
+    static func reserve(_ part: URL, _ size: Int64) async throws {
         let h = try FileHandle(forWritingTo: part)
         let end = Int64(try h.seekToEnd())
-        if end < size {
+        var rc: Int32 = end < size ? -1 : 0
+        var err = ENOSPC
+        var tries = 0
+        while rc < 0 && err == ENOSPC && tries < spaceTries {
+            if tries > 0 {
+                try await Task.sleep(for: .seconds(spacePause))
+            }
             var store = fstore_t(fst_flags: UInt32(F_ALLOCATEALL),
                                  fst_posmode: F_PEOFPOSMODE, fst_offset: 0,
                                  fst_length: off_t(size - end),
                                  fst_bytesalloc: 0)
-            _ = fcntl(h.fileDescriptor, F_PREALLOCATE, &store)
-            try h.truncate(atOffset: UInt64(size))
+            rc = fcntl(h.fileDescriptor, F_PREALLOCATE, &store)
+            err = rc < 0 ? errno : 0
+            tries += 1
         }
+        if rc < 0 && err == ENOSPC {
+            try h.close()
+            let r = room(near: part)
+            throw HubError.space(needed: size - end, free: r.free,
+                                 freeable: r.important)
+        }
+        if end < size { try h.truncate(atOffset: UInt64(size)) }
         try h.close()
     }
 
@@ -556,7 +713,7 @@ final class Pump: NSObject, URLSessionDataDelegate, @unchecked Sendable {
 
     static let recycle = 8
 
-    private let configuration: URLSessionConfiguration
+    let configuration: URLSessionConfiguration
     private let lock = NSLock()
     private var waiters: [Int: Waiter] = [:]
     private var live: [Int: URLSession] = [:]

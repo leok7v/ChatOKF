@@ -81,6 +81,24 @@ public final class MetalContext {
 
     private static var bundle: Bundle { Bundle(for: MetalContext.self) }
 
+    private static let families: [(MTLGPUFamily, String)] = [
+        (.apple9, "Apple9"), (.apple8, "Apple8"), (.apple7, "Apple7"),
+        (.apple6, "Apple6"), (.apple5, "Apple5"), (.apple4, "Apple4"),
+    ]
+
+    public static var deviceSummary: String {
+        var out = "no Metal device"
+        if let dev = MTLCreateSystemDefaultDevice() {
+            let family = MetalContext.families.first { pair in
+                dev.supportsFamily(pair.0)
+            }?.1 ?? "below Apple4"
+            out = dev.name + ", GPU family " + family
+                + ", simdgroup matrix "
+                + (dev.supportsFamily(.apple7) ? "yes" : "no")
+        }
+        return out
+    }
+
     // No window splits a tensor: every kernel reads a whole tensor through one
     // binding. Windows round outward to pages and may overlap by a page.
     private static func cuts(_ g: GGUF, limit: Int) -> [Range<Int>] {

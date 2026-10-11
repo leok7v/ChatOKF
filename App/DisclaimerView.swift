@@ -13,8 +13,8 @@ struct DisclaimerView: View {
                     Text("ChatOKF runs a small language model entirely on this "
                         + "device, on its GPU. Your conversations "
                         + "stay local and are never sent to any server. "
-                        + "Optional lookups (Wikipedia, web search; see "
-                        + "Settings) download public data from the web.")
+                        + "Optional lookups (web search, headlines, weather; "
+                        + "see Settings) download public data from the web.")
                     Text("Treat every response critically.").appFont(.headline)
                     Text("A language model predicts plausible text; it does not "
                         + "verify facts and has no understanding of truth. Output "

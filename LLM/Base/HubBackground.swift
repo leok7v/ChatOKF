@@ -214,6 +214,7 @@ extension HubFetch {
     }
 
     static func carry(_ url: URL, _ e: Entry, _ part: URL, _ pump: Pump,
+                      _ transport: Transport,
                       _ onBytes: @escaping @Sendable (Int64) -> Void)
         async throws {
         var have = committed(part)
@@ -222,7 +223,7 @@ extension HubFetch {
                 try await drain(url, e, part, onBytes)
             } else {
                 Diag.shared.report(.net, "foreground lanes take over")
-                try await fill(url, e, part, pump, onBytes)
+                try await foreground(url, e, part, pump, transport, onBytes)
             }
             have = try assemble(part)
         }

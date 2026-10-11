@@ -32,14 +32,11 @@ targets:
     supportedDestinations: [macOS, iOS]
     sources:
       - path: LLM/Base
-        excludes:
-          - e5-small.gguf
       - path: LLM/Gemma
       - path: LLM/Quantize
       - path: LLM/Qwen
-      - path: LLM/Slugs
-        excludes:
-          - minilm.gguf
+    dependencies:
+      - target: XET
     # Set directly, NOT via platform.xcconfig, which carries app-only
     # settings this library must not inherit.
     configFiles:
@@ -51,8 +48,8 @@ targets:
         SWIFT_STRICT_CONCURRENCY: complete
         SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
         # Swift-only, used from Swift only. Left on, xcodegen adds a "Copy
-        # Swift Objective-C Interface Header" ditto phase, and ditto's temp
-        # file beside the declared output is denied by the script sandbox.
+        # Swift Objective-C Interface Header" ditto phase whose temp file
+        # beside the declared output the script sandbox denies.
         SWIFT_INSTALL_OBJC_HEADER: "NO"
         # Binds cblas_sgemm$NEWLAPACK.
         OTHER_SWIFT_FLAGS: -Xcc -DACCELERATE_NEW_LAPACK
@@ -75,12 +72,31 @@ targets:
         SWIFT_VERSION: "6.0"
         SWIFT_STRICT_CONCURRENCY: complete
         SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
-        # As in LLM: no ditto header phase under the script sandbox.
         SWIFT_INSTALL_OBJC_HEADER: "NO"
         # Binds cblas_sgemm$NEWLAPACK.
         OTHER_SWIFT_FLAGS: -Xcc -DACCELERATE_NEW_LAPACK
       configs:
         # Unusable unoptimized: the engine is plain loops over floats.
+        Debug:
+          SWIFT_OPTIMIZATION_LEVEL: "-O"
+  # The Xet download protocol: chunk decode, reconstruction, parallel
+  # fetch. Imports Foundation and Compression and nothing of ours.
+  XET:
+    type: library.static
+    supportedDestinations: [macOS, iOS]
+    sources:
+      - path: XET
+        excludes:
+          - XETTests
+          - buildServer.json
+          - LICENSE-swift-xet
+    settings:
+      base:
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: complete
+        SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
+        SWIFT_INSTALL_OBJC_HEADER: "NO"
+      configs:
         Debug:
           SWIFT_OPTIMIZATION_LEVEL: "-O"
   # Markdown transcript rendering; a native static-library target like LLM
@@ -102,7 +118,9 @@ targets:
         SWIFT_VERSION: "6.0"
         SWIFT_STRICT_CONCURRENCY: complete
         SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
-        # As in LLM: no ditto header phase under the script sandbox.
+        # Swift-only, used from Swift only. Left on, xcodegen adds a "Copy
+        # Swift Objective-C Interface Header" ditto phase whose temp file
+        # beside the declared output the script sandbox denies.
         SWIFT_INSTALL_OBJC_HEADER: "NO"
   # The session driver: model load/switch, the ChatSession lifecycle, one
   # turn's run, and conversation persistence.
@@ -122,7 +140,9 @@ targets:
         SWIFT_VERSION: "6.0"
         SWIFT_STRICT_CONCURRENCY: complete
         SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
-        # As in LLM: no ditto header phase under the script sandbox.
+        # Swift-only, used from Swift only. Left on, xcodegen adds a "Copy
+        # Swift Objective-C Interface Header" ditto phase whose temp file
+        # beside the declared output the script sandbox denies.
         SWIFT_INSTALL_OBJC_HEADER: "NO"
       configs:
         Debug:
@@ -138,12 +158,6 @@ targets:
       # IQTables/IQKernels are #included by Kernels.metal; compiled on their
       # own they see no codebook and fail.
       - path: LLM/metal
-      # LLM's data blobs, excluded from the LLM target itself, copied in here
-      # instead so they end up inside ChatOKF.app.
-      - path: LLM/Slugs/minilm.gguf
-        buildPhase: resources
-      - path: LLM/Base/e5-small.gguf
-        buildPhase: resources
       - path: MD/Resources/highlights.ini
         buildPhase: resources
       - path: MD/Resources/STIXTwoMath.otf
@@ -153,6 +167,7 @@ targets:
       - target: LLM
       - target: MD
       - target: TTS
+      - target: XET
     configFiles:
       Debug: config/platform.xcconfig
       Release: config/platform.xcconfig
@@ -200,6 +215,7 @@ targets:
     dependencies:
       - target: LLM
       - target: TTS
+      - target: XET
     settings:
       base:
         SWIFT_VERSION: "6.0"
@@ -247,7 +263,6 @@ targets:
       - path: LLM/LLMTests
         excludes:
           - okf-data
-          - okf-reference.txt
       # The perplexity, KL and pplit scoring live with the CLI; the gated
       # tests drive the same code rather than a copy.
       - path: LLM/cli/Args.swift
@@ -258,6 +273,7 @@ targets:
       - path: LLM/metal
     dependencies:
       - target: LLM
+      - target: XET
     settings:
       base:
         SWIFT_VERSION: "6.0"
@@ -301,6 +317,24 @@ targets:
         # Ad hoc on macOS, as in ChatOKFTests.
         CODE_SIGN_STYLE: Automatic
         CODE_SIGN_IDENTITY[sdk=macosx*]: "-"
+  # UNHOSTED for the same reason as LLMTests. The live suite runs only with
+  # CHATOKF_LIVE_NETWORK set.
+  XETTests:
+    type: bundle.unit-test
+    supportedDestinations: [macOS, iOS]
+    sources:
+      - XET/XETTests
+    dependencies:
+      - target: XET
+    settings:
+      base:
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: complete
+        SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
+        GENERATE_INFOPLIST_FILE: YES
+        # Ad hoc on macOS, as in ChatOKFTests.
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY[sdk=macosx*]: "-"
 schemes:
   ChatOKF:
     build:
@@ -310,6 +344,7 @@ schemes:
         LLMTests: [test]
         MDTests: [test]
         TTSTests: [test]
+        XETTests: [test]
     test:
       config: Debug
       targets:
@@ -317,6 +352,7 @@ schemes:
         - LLMTests
         - MDTests
         - TTSTests
+        - XETTests
     run:
       config: Release
       # All DECLARED but UNCHECKED (isEnabled/value: false), so they survive a
@@ -344,6 +380,7 @@ schemes:
         LLMTests: [test]
         MDTests: [test]
         TTSTests: [test]
+        XETTests: [test]
     test:
       config: Debug
       environmentVariables:
@@ -353,3 +390,4 @@ schemes:
         - LLMTests
         - MDTests
         - TTSTests
+        - XETTests

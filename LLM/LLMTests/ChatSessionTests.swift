@@ -1315,8 +1315,7 @@ final class ChatSessionTests: XCTestCase {
         let session = ChatSession(
             backend: backend, template: template, system: "You are a bot.",
             vocabSize: 256,
-            runner: SafeToolRunner(slugsPath: nil, wikipedia: false,
-                                   network: false))
+            runner: SafeToolRunner(network: false))
         let answer = await drain(session.reply("go"))
         XCTAssertFalse(answer.contains("</tool_call>"),
                        "unmatched close reached the reader: \(answer)")
@@ -1333,8 +1332,7 @@ final class ChatSessionTests: XCTestCase {
         let session = ChatSession(
             backend: backend, template: template, system: "You are a bot.",
             vocabSize: 256,
-            runner: SafeToolRunner(slugsPath: nil, wikipedia: false,
-                                   network: false))
+            runner: SafeToolRunner(network: false))
         // Round 1 is reached only via the rewind a completed call triggers.
         let answer = await drain(session.reply("go"))
         XCTAssertTrue(answer.contains("Done."),
@@ -1343,8 +1341,7 @@ final class ChatSessionTests: XCTestCase {
 
     func testPrecookSurvivesReasoningInstructions() async throws {
         let voc = vocab([(1001, "ok")])
-        let runner = SafeToolRunner(slugsPath: nil, wikipedia: false,
-                                    network: false)
+        let runner = SafeToolRunner(network: false)
         for effort in ["low", "xhigh", "medium"] {
             let url = stateDir("precook")
             let cook = ChatSession(
@@ -1376,8 +1373,7 @@ final class ChatSessionTests: XCTestCase {
                 template: effortTemplate, system: "You are a bot.",
                 vocabSize: 256, enableThinking: think,
                 reasoningEffort: "medium",
-                runner: SafeToolRunner(slugsPath: nil, wikipedia: false,
-                                       network: tools))
+                runner: SafeToolRunner(network: tools))
             return await s.precookStamp
         }
         let onNoTools = await stamp(true, false)
@@ -1696,7 +1692,7 @@ final class ChatSessionTests: XCTestCase {
     // Tool-name resolution: exact match, a close typo snaps to the real tool,
     func testResolveToolFuzzyAndUnknown() {
         let tools = ["get_current_time", "calculator",
-                     "wikipedia_query", "web_search"]
+                     "get_news", "web_search"]
         XCTAssertEqual(ChatSession.resolveTool("calculator", tools),
                        "calculator")
         XCTAssertEqual(ChatSession.resolveTool("web_serch", tools),
@@ -1713,7 +1709,7 @@ final class ChatSessionTests: XCTestCase {
         // unknown.
         XCTAssertNil(ChatSession.resolveTool("tavily_search",
                                              ["get_current_time", "calculator"]))
-        XCTAssertNil(ChatSession.resolveTool("wikipedia-search-function", tools))
+        XCTAssertNil(ChatSession.resolveTool("news-search-function", tools))
         XCTAssertNil(ChatSession.resolveTool("send_email", tools))
     }
 
@@ -1912,8 +1908,6 @@ final class ChatSessionTests: XCTestCase {
         XCTAssertEqual(answer, "Done.")
     }
 
-    // Per-turn tool state (the wikipedia dedupe memo) is turn-scoped: the
-    // session calls the runner's beginTurn exactly once per user turn.
     func testRunnerBeginTurnPerTurn() async throws {
         let backend = MockBackend(
             scripts: [[1], [2]],

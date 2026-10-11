@@ -43,6 +43,7 @@ struct VoiceRestrictions: View {
 struct VoiceTermsView: View {
 
     let size: String
+    let landed: Bool
     let onAgree: () -> Void
     let onCancel: () -> Void
 
@@ -63,8 +64,10 @@ struct VoiceTermsView: View {
                 .foregroundStyle(.secondary)
             Text("The Reading Voice").appFont(.title2).bold()
             Text("Replies are read aloud by Supertonic 3, a speech model by "
-               + "Supertone Inc. It downloads once, \(size), and then speaks "
-               + "on this device with no network. Supertone provides it under "
+               + "Supertone Inc. "
+               + (landed ? "It is already on this device, \(size), and speaks "
+                  : "It downloads once, \(size), and then speaks ")
+               + "with no network. Supertone provides it under "
                + "the BigScience Open RAIL-M License, which restricts what "
                + "the voice may be used for. By continuing you agree to that "
                + "license and to the restrictions below.")
@@ -97,7 +100,8 @@ struct VoiceTermsView: View {
                 Button("Cancel", action: onCancel)
                     .controlSize(.large)
                     .keyboardShortcut(.cancelAction)
-                Button("Agree and Download", action: onAgree)
+                Button(landed ? "Agree" : "Agree and Download",
+                       action: onAgree)
                     .buttonStyle(.borderedProminent)
                     .controlSize(.large)
                     .keyboardShortcut(.defaultAction)

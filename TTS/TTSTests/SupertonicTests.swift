@@ -27,10 +27,12 @@ import Testing
     }
 
     @Test func everyVoiceHasANameAndAnId() {
-        #expect(Speech.voices.count == 10)
+        #expect(Speech.voices.count == 17)
         #expect(Speech.voice(named: "sarah")?.id == "F1")
         #expect(Speech.voice(named: "m5")?.name == "Daniel")
-        #expect(Speech.voice(named: "Kiki") == nil)
+        #expect(Speech.voice(named: "Kiki")?.id == "F8")
+        #expect(Speech.voice(named: "m9")?.name == "Leo")
+        #expect(Speech.voice(named: "Bella") == nil)
         #expect(Speech.defaultVoice.name == "Sarah")
     }
 

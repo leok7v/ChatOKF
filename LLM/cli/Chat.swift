@@ -216,35 +216,6 @@ func benchIds(_ encode: (String) -> [Int32]) -> [Int32] {
         print(try QwenMetalSelfTest.run(ggufPath: arg1))
         exit(0)
     }
-    // minilm.gguf is a BERT embedder + index, not a chat model.
-    if rawArgs.contains("--slugs-embed") {
-        let text = turnArgs.first ?? ""
-        if let w = WikiSlugs(ggufPath: arg1) {
-            print(w.embed(text)
-                .map { String(format: "%.7f", $0) }.joined(separator: " "))
-        } else {
-            err("slugs: \(arg1) has no index trailer\n")
-        }
-        exit(0)
-    }
-    if rawArgs.contains("--slugs") {
-        let text = turnArgs.first ?? ""
-        if let w = WikiSlugs(ggufPath: arg1) {
-            err("slugs: \(w.articleCount) articles\n")
-            for (r, h) in w.query(text, topK: 5).enumerated() {
-                let low = h.distance > 82 ? "  [low]" : ""
-                print("  \(r + 1). d=\(h.distance)  id=\(h.id)  \(h.title)\(low)")
-            }
-        } else {
-            err("slugs: \(arg1) has no index trailer\n")
-        }
-        exit(0)
-    }
-    if rawArgs.contains("--wiki") {
-        let text = turnArgs.first ?? ""
-        print(await Tools.wikipediaQuery(text, slugs: WikiIndex(path: arg1)))
-        exit(0)
-    }
     if args.flag("--tok") {
         let tok = try QwenChat(ggufPath: arg1).tokenizer
         for s in args.rest(after: "--tok") {

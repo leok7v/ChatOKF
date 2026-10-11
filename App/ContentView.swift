@@ -143,6 +143,7 @@ struct ContentView: View {
             onboarding
         } else if model.speech.asking {
             VoiceTermsView(size: VoicePack.sizeText,
+                           landed: model.speech.packLanded,
                            onAgree: model.speech.agree,
                            onCancel: model.speech.decline)
         } else if model.showSettings {
@@ -528,6 +529,7 @@ struct ContentView: View {
                 .appFont(.callout)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
+            if !model.sidecarsMissing.isEmpty { helpers }
             VStack(spacing: 14) {
                 Button("Download") { model.confirmDownload() }
                     .buttonStyle(.borderedProminent)
@@ -545,6 +547,26 @@ struct ContentView: View {
         .frame(maxWidth: 420)
     }
 
+    private var helpers: some View {
+        VStack(spacing: 6) {
+            Text((model.sidecarsMissing.count > 1
+                  ? "Two small helpers come with it, "
+                  : "A small helper comes with it, ")
+               + model.sidecarsMissing.map { pack in
+                   "the \(pack.label) (\(pack.sizeText))"
+               }.joined(separator: " and ") + ".")
+                .multilineTextAlignment(.center)
+            HStack(spacing: 16) {
+                ForEach(model.sidecarsMissing, id: \.self) { pack in
+                    Link("About the " + pack.label,
+                         destination: pack.readme)
+                }
+            }
+        }
+        .appFont(.caption)
+        .foregroundStyle(.secondary)
+    }
+
     private var downloadProgress: some View {
         VStack(spacing: 16) {
             ProgressView(value: model.downloadFraction)
@@ -554,7 +576,7 @@ struct ContentView: View {
                      ? "Downloading" : "Preparing download…")
                     .appFont(.headline)
                 if model.downloadTotal > 0 {
-                    Text(Models.display(model.modelName))
+                    Text(model.downloadStage)
                         .appFont(.subheadline)
                         .foregroundStyle(.secondary)
                     Text(model.downloadCounter)
@@ -634,9 +656,27 @@ struct ContentView: View {
                 .foregroundStyle(.secondary)
             Button("Try Again") { model.retry() }
                 .controlSize(.large)
+            if model.prepFailures > 0 { failureReport }
         }
         .padding(32)
         .frame(maxWidth: 420)
+    }
+
+    private var failureReport: some View {
+        VStack(spacing: 10) {
+            Text("It failed again. Copy the details and email them to "
+               + ChatModel.reportMail + ", or open an issue; they name "
+               + "the device, the model and the error, nothing else.")
+                .appFont(.callout)
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.secondary)
+            HStack(spacing: 16) {
+                Button("Copy Details") { model.copyPrepReport() }
+                Link("Open an issue", destination: ChatModel.issuesURL)
+            }
+            .appFont(.callout)
+        }
+        .padding(.top, 8)
     }
 
     static let stallProbeOn: Bool = {
@@ -755,8 +795,8 @@ struct ContentView: View {
             if model.accessState != .offline, model.showSample("research") {
                 sampleCard(symbol: "books.vertical",
                            title: "Dark Matter Research",
-                           subtitle: "Watch it research Wikipedia "
-                               + "and the web",
+                           subtitle: "Watch it search the web and read "
+                               + "Wikipedia",
                            thumb: nil,
                            action: model.runResearchSample)
             }

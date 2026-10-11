@@ -65,22 +65,16 @@ enum Credits {
                    + "Swift speaks them on device with no network. The "
                    + "license's use restrictions, shown below, bind every "
                    + "use of the voice."),
-        Credit(name: "all-MiniLM-L6-v2",
-               author: "Sentence-Transformers",
-               terms: "Apache-2.0",
-               source: "https://huggingface.co/sentence-transformers/"
-                   + "all-MiniLM-L6-v2",
-               changed: "Quantized to GGUF. It matches your question to a "
-                   + "Wikipedia article on this device, which is what keeps "
-                   + "the question itself off the network."),
-        Credit(name: "multilingual-e5-small",
-               author: "intfloat, Microsoft",
+        Credit(name: "bekko-embedding-v1-a25m",
+               author: "Yuichi Tateno (hotchpotch)",
                terms: "MIT",
-               source: "https://huggingface.co/intfloat/multilingual-e5-small",
-               changed: "Quantized to 8-bit GGUF by cstr. It turns your "
-                   + "questions and the assistant's memories into vectors on "
-                   + "this device, so the memory that fits a question can be "
-                   + "found without the question leaving."),
+               source: "https://huggingface.co/hotchpotch/"
+                   + "bekko-embedding-v1-a25m",
+               changed: "An 8-bit GGUF of the author's weights, downloaded "
+                   + "with the first model. It turns your questions and the "
+                   + "assistant's memories into vectors on this device, so "
+                   + "the memory that fits a question can be found without "
+                   + "the question leaving."),
         Credit(name: "Open Knowledge Format",
                author: "Google Cloud",
                terms: "Apache-2.0",
@@ -90,6 +84,15 @@ enum Credits {
                    + "per file, a short header and plain links, as the "
                    + "specification reads them. The search over them, the "
                    + "drafts and the Keep step are this app's own."),
+        Credit(name: "swift-xet",
+               author: "Hugging Face",
+               terms: "Apache-2.0",
+               source: "https://github.com/huggingface/swift-xet",
+               changed: "How a model arrives: as deduplicated chunks "
+                   + "fetched in parallel and written straight into place. "
+                   + "Rewritten over the system's networking in a module of "
+                   + "this app, keeping the chunk format and the placement "
+                   + "arithmetic of the original."),
         Credit(name: "Parallel",
                author: "Parallel Web Systems",
                terms: "Commercial service",
@@ -108,9 +111,11 @@ enum Credits {
         Credit(name: "Wikipedia",
                author: "Wikimedia Foundation and contributors",
                terms: "CC BY-SA 4.0",
-               source: "https://simple.wikipedia.org",
-               changed: "Article titles are indexed on device; article text "
-                   + "is fetched only for the article the model chose."),
+               source: "https://en.wikipedia.org",
+               changed: "Articles and today's headlines come from its own "
+                   + "API, the Simple English or the English edition as the "
+                   + "assistant chooses; the topic it looks up is sent as a "
+                   + "search."),
     ]
 
 }

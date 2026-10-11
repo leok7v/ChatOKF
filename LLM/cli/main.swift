@@ -40,10 +40,8 @@ let softReasoning = args.int("--soft-reasoning") ?? 0
 // system-block template (gemma-4) takes mid-conversation.
 let suppressReasoning = args.flag("--no-reason")
 let systemPrompt = args.text("--system") ?? "You are a helpful assistant."
-let wmVal = args.value("--wiki-model")
 let toolRunner: (any ToolRunner)? =
-    SafeToolRunner(slugsPath: wmVal, wikipedia: wmVal != nil,
-                   network: wmVal != nil)
+    SafeToolRunner(network: args.flag("--tools"))
 // One JSON line per turn; the captured stderr is the full log, this the
 // companion.
 let trVal = args.value("--trace")

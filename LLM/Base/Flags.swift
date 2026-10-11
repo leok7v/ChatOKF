@@ -252,6 +252,10 @@ public enum Flags {
         Knob(name: "voice-pack", takesValue: true, help:
             "q4 | q8: the reading voice's weights, in place of the pack the "
             + "device's memory picks", scope: .diagnostic, defaultValue: ""),
+        Knob(name: "xet", takesValue: false, help:
+            "fetch a model as Xet chunks, in parallel and written in place; "
+            + "off, the whole blob comes from the LFS bridge, which measured "
+            + "faster", scope: .engine, defaultValue: "0"),
         Knob(name: "gpu-fault-rate", takesValue: true, help:
             "the fraction of command buffers reported as failed, drawn from "
             + "the --seed generator, to drive the retry and the cancel on a "

@@ -182,13 +182,29 @@ private func clampSample(_ dice: inout Dice) -> String {
              SearchHit(title: "Two", url: "https://b", extract: "Second.")],
             "q")
         #expect(out == "1. One\n   https://a\n   First.\n"
-                + "2. Two\n   https://b\n   Second.\n")
+                + "2. Two\n   https://b\n   Second.\n" + WebSearch.readOn)
+        #expect(WebSearch.readOn.contains("fetch_url"))
     }
 
     @Test func aHitWithNoTitleStillReads() {
         let out = WebSearch.format(
             [SearchHit(title: "", url: "https://a", extract: "")], "q")
-        #expect(out == "1. (no title)\n   https://a\n")
+        #expect(out == "1. (no title)\n   https://a\n" + WebSearch.readOn)
+    }
+
+    @Test func webFetchExcerptsBecomePlainParagraphs() throws {
+        let body = "{\"results\":[{\"url\":\"https://x\",\"excerpts\":["
+            + "\"In the [Lambda-CDM model](https://w/L \\\"L\\\") of "
+            + "cosmology [[ 7 ]]() dark matter is 26.8%.\\n\\n...\\n\\n"
+            + "# History\\n![img](https://i)\\nTook root.  \\n\\n\\n\\nEnd.\","
+            + "\"\"]}]}"
+        let out = try #require(WebSearch.fetched(body))
+        #expect(out == "In the Lambda-CDM model of cosmology dark matter is "
+                + "26.8%.\n\n...\n\n# History\n\nTook root.\n\nEnd.")
+        #expect(WebSearch.fetched("{}") == nil)
+        #expect(WebSearch.fetched("{\"results\":[{\"excerpts\":[\"\"]}]}")
+                == nil)
+        #expect(WebSearch.fetched("junk") == nil)
     }
 
     @Test func anEventStreamReplyIsDecoded() {

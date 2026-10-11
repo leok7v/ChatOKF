@@ -24,9 +24,7 @@ Or with Homebrew:
 
 The middle line is Homebrew's gate on taps that are not its own; it asks for
 it by name if you skip it. The cask lives in
-[leok7v/homebrew-tap](https://github.com/leok7v/homebrew-tap), beside md.too's,
-because `brew tap` clones a whole repo and this one carries a 132 MB Git LFS
-object that brew's git cannot check out.
+[leok7v/homebrew-tap](https://github.com/leok7v/homebrew-tap), beside md.too's.
 
 The iPhone and iPad build is not published yet.
 
@@ -162,9 +160,10 @@ after a reply a separate pass keeps what you said about yourself, one
 sentence per fact, checked against your own words, and each saved
 conversation keeps one note of what you asked and what was concluded. At
 the start of every turn the question is embedded
-with multilingual-e5-small, the dense pass is fused with a verbatim pass
-by reciprocal rank, and the notes that fit are read into the context
-silently. A note that restates one already on file is refused, so the
+with [bekko-embedding-v1-a25m](https://huggingface.co/hotchpotch/bekko-embedding-v1-a25m),
+a 25M-parameter ModernBERT that reads every script, the dense pass is
+fused with a verbatim pass by reciprocal rank, and the notes that fit
+are read into the context silently. A note that restates one already on file is refused, so the
 store does not fill with duplicates. One switch governs all of it:
 Settings, Intelligence, Total Recall.
 
@@ -183,9 +182,9 @@ reader, the notes are the knowledge.
 
 ## Layout
 
-- `LLM/` - the engine: `Base`, `Qwen`, `Gemma`, `Quantize`, `Slugs`
-  (the seams, tokenizer, chat template, sampler and ChatSession in Base; a
-  lineage per directory; the weight formats; wikipedia search).
+- `LLM/` - the engine: `Base`, `Qwen`, `Gemma`, `Quantize` (the seams,
+  tokenizer, chat template, sampler, tools and ChatSession in Base; a
+  lineage per directory; the weight formats).
 - `LLM/metal/` - the Metal kernels both lineages run on.
 - `LLM/cli/` - chatokf, the macOS command-line harness for the engine.
 - `Chat/` - the session driver and conversation store, no SwiftUI.
@@ -208,19 +207,23 @@ The one cache beside the models is the precooked system prefix under
 prompt that a launch restores instead of re-prefilling. Deleting it costs one
 prefill per model.
 
-The reading voice is one more download, made the first time the speaker is
-switched on and only after its use restrictions are agreed to: Supertonic 3,
-repacked into a single file at
+Two small files ride the first model download, named on the download
+screen with links to their pages: the memory encoder, bekko-embedding-v1-a25m
+at 8 bits, 137 MB, and the reading voice, Supertonic 3 repacked into a
+single file at
 [leok7v/supertonic](https://huggingface.co/leok7v/supertonic), 79 MB at 4
-bits on an iPhone with 3 or 4 GB and 111 MB at 8 bits everywhere else.
+bits on an iPhone with 3 or 4 GB and 111 MB at 8 bits everywhere else. The
+voice speaks only after its use restrictions are agreed to, the first time
+the speaker is switched on.
 
 ## Reading voice
 
 Replies are read aloud by Supertonic 3 through the engine in `TTS/`, one
 Swift file over Accelerate, on the CPU beside the chat model. On an iPhone
 SE with 3 GB it renders a sentence about twice as fast as it speaks it,
-while the chat model is still answering. Ten voices, chosen in Settings,
-Voice.
+while the chat model is still answering. Seventeen voices, chosen in
+Settings, Voice: Supertone's ten and seven synthetic ones made by
+inverting the frozen model, no person recorded for any of them.
 
 The engine speaks 31 languages, each selected by its code:
 
@@ -258,12 +261,13 @@ The weights it downloads are not part of this repo and keep their own terms:
 |---|---|---|
 | chat models | Google DeepMind, Qwen, PrismML, see Settings, About | Apache-2.0 |
 | the reading voice | [Supertonic 3](https://huggingface.co/Supertone/supertonic-3) by Supertone Inc. | BigScience Open RAIL-M |
+| the memory encoder | [bekko-embedding-v1-a25m](https://huggingface.co/hotchpotch/bekko-embedding-v1-a25m) by Yuichi Tateno | MIT |
 | everything in this repo | this repo | MIT |
 
 The Open RAIL-M license lets the voice be used and redistributed, also
 commercially, on the condition that the use restrictions of its Attachment A
 stay binding on everyone who uses it. The app shows those restrictions and
-asks for agreement before the voice downloads, and Settings, About carries
+asks for agreement before the voice speaks, and Settings, About carries
 them with the full license text. Among other things they forbid
 impersonating a person without consent, defaming or harassing others, and
 passing generated speech off as not machine made.

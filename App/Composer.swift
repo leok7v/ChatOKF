@@ -296,7 +296,6 @@ struct Composer: View {
         let color: Color
         switch model.accessState {
         case .offline: icon = "airplane"; color = .orange
-        case .wikipedia: icon = "books.vertical"; color = .teal
         case .full: icon = "globe"; color = .accentColor
         }
         return Button(action: model.cycleAccess) {

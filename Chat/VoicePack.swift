@@ -10,12 +10,15 @@ public enum VoicePack {
     }
 
     static let repo = "leok7v/supertonic"
-    static let revision = "a77f672e021d2b2762cf6cbc5ab7a1596dbb3a76"
+    static let revision = "c8b0e4ee7181c403f4c01ed2f76e9c725128eaf6"
+
+    public static let readme = URL(string:
+        "https://huggingface.co/" + repo + "/blob/main/README.md")!
 
     public static let q4 = Pack(name: "q4", file: "supertonic-q4.safetensors",
-                                bytes: 78_691_680)
+                                bytes: 79_154_016)
     public static let q8 = Pack(name: "q8", file: "supertonic-q8.safetensors",
-                                bytes: 111_481_056)
+                                bytes: 111_959_776)
 
     public static let chosen: Pack = {
         let byMemory = isOS && installedGB <= 4 ? q4 : q8
@@ -50,6 +53,13 @@ public enum VoicePack {
 
     public static var onDisk: Bool { path != nil }
 
+    static let declinedKey = "voicePackDeclined"
+
+    public static var declined: Bool {
+        get { UserDefaults.standard.bool(forKey: declinedKey) }
+        set { UserDefaults.standard.set(newValue, forKey: declinedKey) }
+    }
+
     public static var sizeText: String {
         ByteCountFormatter.string(fromByteCount: chosen.bytes,
                                   countStyle: .file)
@@ -67,6 +77,9 @@ public enum VoicePack {
             failure = nil
         } catch HubError.digest {
             failure = "download failed verification, try again"
+        } catch HubError.space(let needed, let free, let freeable) {
+            failure = HubFetch.spaceMessage(needed: needed, free: free,
+                                            freeable: freeable)
         } catch {
             Diag.shared.report(.net, "[voice] fetch failed: \(error)")
         }

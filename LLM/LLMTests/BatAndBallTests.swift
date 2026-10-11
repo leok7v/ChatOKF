@@ -23,8 +23,7 @@ struct BatAndBallTests {
             vocabSize: chat.tokenizer.vocabCount,
             presets: chat.samplingPresets, enableThinking: true,
             maxTokens: 2048,
-            runner: tools ? SafeToolRunner(slugsPath: nil, wikipedia: false,
-                                           network: false) : nil)
+            runner: tools ? SafeToolRunner(network: false) : nil)
         var out = ""
         for await piece in session.reply(BatAndBallTests.question) {
             out += piece

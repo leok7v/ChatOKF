@@ -56,7 +56,7 @@ import TTS
             let reasoning = d.object(forKey: "speakReasoning") as? Bool ?? false
             result = spoken ? (reasoning ? .everything : .replies) : .off
         }
-        return VoicePack.onDisk ? result! : .off
+        return VoicePack.onDisk && VoiceTerms.accepted ? result! : .off
     }
 
     var enabled: Bool { mode != .off || demoVoice != nil }
@@ -94,7 +94,7 @@ import TTS
     }
 
     func choose(_ wish: Mode) {
-        if wish == .off || pack == .ready {
+        if wish == .off || (pack == .ready && VoiceTerms.accepted) {
             mode = wish
         } else {
             wanted = wish
@@ -103,13 +103,28 @@ import TTS
     }
 
     func requestPack() {
-        if pack == .missing { asking = true }
+        if pack != .fetching { asking = true }
     }
+
+    var packLanded: Bool { pack == .ready }
 
     func agree() {
         VoiceTerms.accept()
+        VoicePack.declined = false
         asking = false
-        fetch()
+        if pack == .ready {
+            if let wanted { mode = wanted }
+            wanted = nil
+        } else {
+            fetch()
+        }
+    }
+
+    func adoptPack() {
+        if pack == .missing, VoicePack.onDisk {
+            pack = .ready
+            mode = VoiceSession.startMode()
+        }
     }
 
     func decline() {
@@ -126,6 +141,7 @@ import TTS
             mode = .off
             player?.forgetPack()
             VoicePack.erase()
+            VoicePack.declined = true
             pack = .missing
         }
     }

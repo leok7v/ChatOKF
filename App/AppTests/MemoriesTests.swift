@@ -15,9 +15,9 @@ import XCTest
     }
 
     private func seeded() throws -> Memories {
-        guard let url = BertEmbedder.bundledMultilingual,
-              let embedder = BertEmbedder.load(ggufPath: url.path) else {
-            throw XCTSkip("no bundled e5-small.gguf")
+        guard let path = EncoderPack.path,
+              let embedder = ModernBertEmbedder.load(ggufPath: path) else {
+            throw XCTSkip("no encoder pack in the app container")
         }
         let root = temporaryRoot()
         let store = Store(root: root, embedder: embedder)
@@ -149,9 +149,9 @@ import XCTest
 @MainActor final class MemoryToolsTests: XCTestCase {
 
     private func opened() async throws -> Memories {
-        guard let url = BertEmbedder.bundledMultilingual,
-              let embedder = BertEmbedder.load(ggufPath: url.path) else {
-            throw XCTSkip("no bundled e5-small.gguf")
+        guard let path = EncoderPack.path,
+              let embedder = ModernBertEmbedder.load(ggufPath: path) else {
+            throw XCTSkip("no encoder pack in the app container")
         }
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("memtools-" + UUID().uuidString,
@@ -278,9 +278,9 @@ import XCTest
     private let source = UUID()
 
     private func opened() async throws -> Memories {
-        guard let url = BertEmbedder.bundledMultilingual,
-              let embedder = BertEmbedder.load(ggufPath: url.path) else {
-            throw XCTSkip("no bundled e5-small.gguf")
+        guard let path = EncoderPack.path,
+              let embedder = ModernBertEmbedder.load(ggufPath: path) else {
+            throw XCTSkip("no encoder pack in the app container")
         }
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("memtrash-" + UUID().uuidString,
@@ -487,9 +487,8 @@ import XCTest
     }
 
     func testRememberWritesNotesWithProvenance() async throws {
-        guard let url = BertEmbedder.bundledMultilingual,
-              BertEmbedder.load(ggufPath: url.path) != nil else {
-            throw XCTSkip("no bundled e5-small.gguf")
+        guard EncoderPack.onDisk else {
+            throw XCTSkip("no encoder pack in the app container")
         }
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("extract-" + UUID().uuidString,
@@ -548,9 +547,8 @@ import XCTest
     }
 
     func testAnEchoOfTheNotesOnFileIsNotRemembered() async throws {
-        guard let url = BertEmbedder.bundledMultilingual,
-              BertEmbedder.load(ggufPath: url.path) != nil else {
-            throw XCTSkip("no bundled e5-small.gguf")
+        guard EncoderPack.onDisk else {
+            throw XCTSkip("no encoder pack in the app container")
         }
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("echo-" + UUID().uuidString,
@@ -619,9 +617,8 @@ import XCTest
     }
 
     func testTheNoteIsRewrittenInPlaceAndStaysOutOfItsOwnChat() async throws {
-        guard let url = BertEmbedder.bundledMultilingual,
-              BertEmbedder.load(ggufPath: url.path) != nil else {
-            throw XCTSkip("no bundled e5-small.gguf")
+        guard EncoderPack.onDisk else {
+            throw XCTSkip("no encoder pack in the app container")
         }
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("convnote-" + UUID().uuidString,

@@ -332,40 +332,6 @@ final class ToolsTests: XCTestCase {
                      page.utf8.count >> 10, big.1, big.0.count))
     }
 
-    func testWikiIndexOpensOnce() throws {
-        guard let url = WikiSlugs.bundledModel else {
-            throw XCTSkip("no bundled minilm.gguf index")
-        }
-        var openSeconds = 0.0
-        var querySeconds = 0.0
-        for _ in 0 ..< 5 {
-            let began = Date()
-            let opened = WikiSlugs(ggufPath: url.path)
-            openSeconds += Date().timeIntervalSince(began)
-            XCTAssertNotNil(opened)
-            let asked = Date()
-            _ = opened?.query("what is dark matter", topK: 5)
-            querySeconds += Date().timeIntervalSince(asked)
-        }
-        let index = WikiIndex(path: url.path)
-        let first = seconds {
-            index.with { w in ObjectIdentifier(w).debugDescription } ?? ""
-        }
-        let second = seconds {
-            index.with { w in ObjectIdentifier(w).debugDescription } ?? ""
-        }
-        XCTAssertFalse(first.0.isEmpty)
-        XCTAssertEqual(first.0, second.0)
-        XCTAssertLessThan(second.1, first.1)
-        XCTAssertNil(WikiIndex(path: "/nonexistent.gguf").with { w in
-            w.articleCount
-        })
-        print(String(format: "[slugs] WikiSlugs init %.4fs and first query "
-                         + "%.4fs (mean of 5 fresh instances); WikiIndex "
-                         + "first %.4fs, second %.6fs", openSeconds / 5,
-                     querySeconds / 5, first.1, second.1))
-    }
-
     private func flagged(_ fn: String, _ args: [ToolArg]) -> Bool {
         Tools.sanitize(fn, args) != nil
     }
@@ -490,65 +456,28 @@ final class ToolsTests: XCTestCase {
     // The Hermes-JSON wire the 4B fell back to mid-session:
     // <arg_key>K</arg_key><arg_value>V</arg_value> folds into K=V.
     func testParseArgKeyValuePairs() {
-        let hermes: Substring = "< function=wikipedia_query>"
+        let hermes: Substring = "< function=web_search>"
             + "<arg_key>query</arg_key>"
-            + "<arg_value>Dark energy - Simple English Wikipedia</arg_value>"
+            + "<arg_value>Dark energy - Wikipedia</arg_value>"
             + "</function>"
         let tc = Tools.parse(hermes)
-        XCTAssertEqual(tc?.functionName, "wikipedia_query")
+        XCTAssertEqual(tc?.functionName, "web_search")
         XCTAssertEqual(tc?.params.count, 1)
         XCTAssertEqual(tc?.params.first?.name, "query")
-        XCTAssertEqual(tc?.params.first?.value,
-                       "Dark energy - Simple English Wikipedia")
+        XCTAssertEqual(tc?.params.first?.value, "Dark energy - Wikipedia")
     }
 
     // One stray space after '<' demoted a complete call to quoted markup
     // on-device: the opener scan skips whitespace after '<'.
     func testParseWhitespaceFunctionTag() {
-        let spaced: Substring = "\n< function=wikipedia_query>"
+        let spaced: Substring = "\n< function=web_search>"
             + "<parameter=query>Dark matter cosmology</parameter>"
             + "</function>\n"
         let tc = Tools.parse(spaced)
-        XCTAssertEqual(tc?.functionName, "wikipedia_query")
+        XCTAssertEqual(tc?.functionName, "web_search")
         XCTAssertEqual(tc?.params.first?.value, "Dark matter cosmology")
         let newlined: Substring = "<\nfunction=calculator></function>"
         XCTAssertEqual(Tools.parse(newlined)?.functionName, "calculator")
-    }
-
-    // The per-turn dedupe memo: an article notes once, reads back until
-    // reset (the turn boundary), then reads as fresh again.
-    func testTurnMemo() {
-        let memo = TurnMemo()
-        XCTAssertNil(memo.title(for: "42"))
-        memo.note("42", "Dark matter")
-        XCTAssertEqual(memo.title(for: "42"), "Dark matter")
-        XCTAssertNil(memo.title(for: "7"))
-        memo.reset()
-        XCTAssertNil(memo.title(for: "42"))
-    }
-
-    // Related links keep only titles the returned body mentions (the
-    func testRelatedLinksFilter() {
-        let body = "Dark matter was proposed by Jan Oort in 1932. "
-            + "Galaxy rotation curves also hint at it."
-        let links = ["1932", "Aardvark", "Galaxy", "Jan Oort", "Zebra"]
-        XCTAssertEqual(Tools.relatedIn(body, links: links),
-                       ["Galaxy", "Jan Oort"])
-        XCTAssertEqual(
-            Tools.relatedIn("alpha beta", links: ["Alpha", "Beta"], cap: 1),
-            ["Alpha"])
-        XCTAssertEqual(Tools.relatedIn("", links: ["Galaxy"]), [])
-    }
-
-    // The embedding pick is cross-checked against exact titles unless it is
-    func testNeedsTitleRescue() {
-        let darkroom = SlugHit(id: "1", title: "Darkroom", distance: 60)
-        XCTAssertTrue(Tools.needsTitleRescue(darkroom, "dark matter"))
-        let named = SlugHit(id: "2", title: "Dark matter", distance: 60)
-        XCTAssertFalse(Tools.needsTitleRescue(named, "what is dark matter"))
-        let weak = SlugHit(id: "3", title: "Dark matter", distance: 100)
-        XCTAssertTrue(Tools.needsTitleRescue(weak, "what is dark matter"))
-        XCTAssertTrue(Tools.needsTitleRescue(nil, "anything"))
     }
 
     func testFindToolCall() {
@@ -672,31 +601,71 @@ final class ToolsTests: XCTestCase {
             out, "error: tool read_file unavailable in this environment")
     }
 
-    // The two network tiers advertise and refuse independently: offline is
     func testAccessTiers() async {
-        let offline = SafeToolRunner(slugsPath: nil, wikipedia: false,
-                                     network: false)
+        let offline = SafeToolRunner(network: false)
         XCTAssertEqual(offline.tools.map { t in t.name },
                        ["get_current_time", "calculator"])
-        let wiki = SafeToolRunner(slugsPath: nil, wikipedia: true,
-                                  network: false)
-        let wikiNames = wiki.tools.map { t in t.name }
-        XCTAssertTrue(wikiNames.contains("get_news"))
-        XCTAssertFalse(wikiNames.contains("web_search"))
-        let refused = await wiki.execute("web_search",
-            [ToolArg(name: "query", value: "x")])
-        XCTAssertTrue(refused.hasPrefix("error:"), refused)
-        let full = SafeToolRunner(slugsPath: nil, wikipedia: true,
-                                  network: true)
+        for name in ["web_search", "wikipedia_query", "fetch_url",
+                     "get_news", "get_weather"] {
+            let refused = await offline.execute(name,
+                [ToolArg(name: "query", value: "x")])
+            XCTAssertTrue(refused.hasPrefix("error:"), refused)
+        }
+        let full = SafeToolRunner(network: true)
         let fullNames = full.tools.map { t in t.name }
         XCTAssertTrue(fullNames.contains("web_search"))
+        XCTAssertTrue(fullNames.contains("wikipedia_query"))
+        XCTAssertTrue(fullNames.contains("fetch_url"))
+        XCTAssertTrue(fullNames.contains("get_news"))
         XCTAssertTrue(fullNames.contains("get_weather"))
-        // No wikipedia_query without the on-device index, and its
-        // cross-reference must not appear in the search spec then.
-        XCTAssertFalse(fullNames.contains("wikipedia_query"))
         let search = full.tools.first { t in t.name == "web_search" }
-        XCTAssertFalse(search?.description.contains("wikipedia_query") == true,
-                       "spec references an unadvertised tool")
+        XCTAssertTrue(search?.description.contains("wikipedia_query") == true,
+                      "the search spec routes encyclopedic questions")
+        let wiki = full.tools.first { t in t.name == "wikipedia_query" }
+        XCTAssertTrue(Tools.parameterNames(wiki?.parametersJSON ?? "")
+                        .contains("simple"))
+    }
+
+    func testWikiPageParsesTheGeneratorSearchReply() throws {
+        let json = "{\"query\":{\"pages\":{\"8551\":{\"pageid\":8551,"
+            + "\"title\":\"Dark matter\",\"extract\":\"Dark matter is a type "
+            + "of matter thought to be responsible for much of the mass in "
+            + "the universe. A galaxy spins as if held by it.\","
+            + "\"links\":[{\"ns\":0,\"title\":\"1932\"},"
+            + "{\"ns\":0,\"title\":\"Galaxy\"},{\"ns\":0,\"title\":\"Zebra\"}]"
+            + "}}}}"
+        let page = try XCTUnwrap(Tools.wikiPage(Data(json.utf8)))
+        XCTAssertEqual(page.title, "Dark matter")
+        XCTAssertTrue(page.text.hasPrefix("Dark matter is a type"))
+        XCTAssertEqual(page.links, ["1932", "Galaxy", "Zebra"])
+        XCTAssertEqual(Tools.relatedIn(page.text, links: page.links),
+                       ["Galaxy"])
+        XCTAssertNil(Tools.wikiPage(Data("{\"batchcomplete\":\"\"}".utf8)))
+        let empty = "{\"query\":{\"pages\":{\"1\":"
+            + "{\"title\":\"Empty\",\"extract\":\"\"}}}}"
+        XCTAssertNil(Tools.wikiPage(Data(empty.utf8)))
+    }
+
+    func testRelatedLinksFilter() {
+        let body = "Dark matter was proposed by Jan Oort in 1932. "
+            + "Galaxy rotation curves also hint at it."
+        let links = ["1932", "Aardvark", "Galaxy", "Jan Oort", "Zebra"]
+        XCTAssertEqual(Tools.relatedIn(body, links: links),
+                       ["Galaxy", "Jan Oort"])
+        XCTAssertEqual(
+            Tools.relatedIn("alpha beta", links: ["Alpha", "Beta"], cap: 1),
+            ["Alpha"])
+        XCTAssertEqual(Tools.relatedIn("", links: ["Galaxy"]), [])
+    }
+
+    func testTurnMemoTitles() {
+        let memo = TurnMemo()
+        XCTAssertNil(memo.title(for: "simple:Dark matter"))
+        memo.note("simple:Dark matter", "Dark matter")
+        XCTAssertEqual(memo.title(for: "simple:Dark matter"), "Dark matter")
+        XCTAssertNil(memo.title(for: "en:Dark matter"))
+        memo.reset()
+        XCTAssertNil(memo.title(for: "simple:Dark matter"))
     }
 
     // Search operators empty Mwmbl's whole result set, so they are dropped
@@ -712,17 +681,6 @@ final class ToolsTests: XCTestCase {
         XCTAssertEqual(Tools.stripOperators("site:x.com"), "site:x.com")
     }
 
-    // Corpus/tool meta words drag the embedding off the subject; the strip
-    func testStripMetaWords() {
-        XCTAssertEqual(
-            Tools.stripMetaWords("Dark Matter Simple English Wikipedia"),
-            "dark matter")
-        XCTAssertEqual(
-            Tools.stripMetaWords("according to wikipedia what is a quark"),
-            "what is a quark")
-        XCTAssertEqual(Tools.stripMetaWords("wikipedia"), "wikipedia")
-    }
-
     // The re-lay filter's schema surface: advertised names parse from the
     // spec JSON, aliases canonicalize only onto advertised names.
     func testParameterNamesAndAliases() {
@@ -736,22 +694,5 @@ final class ToolsTests: XCTestCase {
         XCTAssertEqual(Tools.canonicalArgName("q", names), "query")
         XCTAssertNil(Tools.canonicalArgName("arg_value", names))
         XCTAssertNil(Tools.canonicalArgName("q", ["url"]))
-    }
-
-    // The exact-title rescue over the bundled Simple English index: a query
-    func testTitleMatchRescue() throws {
-        guard let url = WikiSlugs.bundledModel,
-              let w = WikiSlugs(ggufPath: url.path) else {
-            throw XCTSkip("no bundled minilm.gguf index")
-        }
-        let hit = w.titleMatch("tell me about albert einstein")
-        XCTAssertEqual(hit?.title.lowercased(), "albert einstein")
-        XCTAssertEqual(hit?.distance, 0)
-        XCTAssertTrue(hit?.isConfident == true)
-        // Gibberish must not rescue, and neither must a query whose only
-        // title-shaped words are function words (the corpus has "This").
-        XCTAssertNil(w.titleMatch("zzxqy qwwrgh vvbnk"))
-        XCTAssertNil(w.titleMatch("please tell me about this"))
-        XCTAssertEqual(WikiSlugs.foldWords("St. Louis"), "st louis")
     }
 }

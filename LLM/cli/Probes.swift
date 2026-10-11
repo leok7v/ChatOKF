@@ -69,6 +69,11 @@ func probeWrap(_ user: String) -> String {
         print(await Tools.websearch(q, count: 5))
         exit(0)
     }
+    if args.flag("--wiki") {
+        let q = args.value("--wiki") ?? ""
+        print(await Tools.wikipediaQuery(q, simple: !args.flag("--english")))
+        exit(0)
+    }
     if args.flag("--news") {
         let topic = args.value("--news")
         print(await Tools.news(topic))

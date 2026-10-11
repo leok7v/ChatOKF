@@ -29,7 +29,6 @@ public enum TurnEvent: Sendable {
 
     public var modelName: String
     public var systemPrompt: String
-    public var wikipedia = true
     public var webAccess = true
     public let memories = Memories()
     private var recalledIds: Set<String> = []
@@ -186,6 +185,14 @@ public enum TurnEvent: Sendable {
         turnTables = nil
     }
 
+    public private(set) var prepDetail = ""
+
+    public static var deviceReport: String {
+        let os = ProcessInfo.processInfo.operatingSystemVersionString
+        return "device: " + MetalContext.deviceSummary + "\nmemory: "
+            + "\(installedGB) GB\nos: " + os + "\napp: " + Instrument.built
+    }
+
     public func buildGguf(name: String, path: String) async -> String? {
         memories.modelName = name
         releaseSession()
@@ -194,6 +201,9 @@ public enum TurnEvent: Sendable {
         let loaded = await Session.loadHeavy(name: name, path: path)
         await memories.awaitOpen()
         var failure: String? = Session.prepFailed
+        prepDetail = loaded.failure.map { text in
+            "model: " + name + "\n" + Session.deviceReport + "\nerror: " + text
+        } ?? ""
         if let built = loaded.built {
             ggufBackend = built.backend
             ggufTemplate = built.template
@@ -223,10 +233,13 @@ public enum TurnEvent: Sendable {
     private var turnTables: (breakers: Set<Int32>, vocab: GrammarVocab?)?
 
     nonisolated private static func loadHeavy(name: String, path: String)
-        async -> (built: HeavyBuild?, media: (any MediaEncoder)?) {
+        async -> (built: HeavyBuild?, media: (any MediaEncoder)?,
+                  failure: String?) {
         Footprint.report(.load, "before \(name)")
+        Diag.shared.report(.load, "[gpu] " + MetalContext.deviceSummary)
         var built: HeavyBuild?
         var loadedMedia: (any MediaEncoder)?
+        var failure: String? = nil
         do {
             if Gemma4Model.isGemma4(path: path) {
                 let c = try GemmaChat(ggufPath: path)
@@ -254,9 +267,10 @@ public enum TurnEvent: Sendable {
         } catch {
             Diag.shared.report("model prep FAILED \(name): \(error)")
             built = nil
+            failure = "\(error)"
         }
         Footprint.report(.load, "loaded \(name)")
-        return (built, loadedMedia)
+        return (built, loadedMedia, failure)
     }
 
     nonisolated private static func built(
@@ -325,6 +339,9 @@ public enum TurnEvent: Sendable {
                 failure = nil
             } catch HubError.digest {
                 failure = "download failed verification, try again"
+            } catch HubError.space(let needed, let free, let freeable) {
+                failure = HubFetch.spaceMessage(needed: needed, free: free,
+                                                freeable: freeable)
             } catch {
             }
         }
@@ -528,20 +545,16 @@ public enum TurnEvent: Sendable {
             + "\(TimeZone.current.identifier), \(units) units. Give "
             + "temperatures and distances in these units unless asked "
             + "otherwise."
-        if !webAccess && !wikipedia {
-            s += "\nYou are offline: no web search or Wikipedia lookup is "
+        if !webAccess {
+            s += "\nYou are offline: no web search or page fetching is "
                 + "available. Answer from your own knowledge; do not call any "
                 + "search or lookup tool."
-        } else if !webAccess {
-            s += "\nYou have no web search or page fetching. You may consult "
-                + "Wikipedia (wikipedia_query) and today's headlines "
-                + "(get_news); for anything else answer from your own "
-                + "knowledge."
         } else {
             s += "\nWhen a question names a year, a product, a model or an "
                 + "event you may not know, or asks what is current, search "
-                + "the web before answering instead of guessing, and say "
-                + "when something is past what you know."
+                + "the web before answering instead of guessing, read the "
+                + "best result with fetch_url rather than answering from "
+                + "snippets, and say when something is past what you know."
         }
         if canAttachAudio {
             s += "\nThe user may speak to you. Their speech reaches you "
@@ -569,14 +582,10 @@ public enum TurnEvent: Sendable {
         return s
     }
 
-    private static let minilmPath: String? = WikiSlugs.bundledModel?.path
-
     public var toolRunnerOverride: (any ToolRunner)?
 
     private var toolRunner: (any ToolRunner)? {
-        let safe = SafeToolRunner(
-            slugsPath: wikipedia ? Session.minilmPath : nil,
-            wikipedia: wikipedia, network: webAccess)
+        let safe = SafeToolRunner(network: webAccess)
         let runner: any ToolRunner = memories.active
             ? MemoryToolRunner(inner: safe, memories: memories,
                                writes: Models.offersNoteTools)
@@ -593,8 +602,7 @@ public enum TurnEvent: Sendable {
     public func hookTrace(thinkingActive: Bool,
                           onEvent: @escaping @MainActor (TraceEvent) -> Void) {
         traceFile?.note("=== \(modelName) thinking=\(thinkingActive) "
-            + "wiki=\(wikipedia) web=\(webAccess) \(Date()) app "
-            + Instrument.build)
+            + "web=\(webAccess) \(Date()) app " + Instrument.build)
         let s = session
         let sink: @Sendable (TraceEvent) -> Void = { [weak self] e in
             Task { @MainActor in self?.recordTrace(e, onEvent: onEvent) }
@@ -857,9 +865,18 @@ public enum TurnEvent: Sendable {
     ]
 
     public static func toolLabel(_ event: ToolRoundEvent) -> String {
-        event.resolved.flatMap { name in
+        let named = event.resolved.flatMap { name in
             (Session.toolGlyphs[name] ?? MemoryTools.glyphs[name])?.label
         } ?? event.name
+        return event.resolved == "wikipedia_query" && simpleEdition(event)
+            ? "Simple " + named : named
+    }
+
+    private static func simpleEdition(_ event: ToolRoundEvent) -> Bool {
+        let flag = event.params.first { param in param.name == "simple" }
+        return flag.map { param in
+            Flags.truthy(param.value) && param.value.lowercased() != "false"
+        } ?? true
     }
 
     public static func toolSymbol(_ event: ToolRoundEvent) -> String {
@@ -869,7 +886,8 @@ public enum TurnEvent: Sendable {
     }
 
     public static func toolArgs(_ event: ToolRoundEvent) -> String {
-        event.params.map { param in "\(param.name): \"\(param.value)\"" }
+        event.params.filter { param in param.name != "simple" }
+            .map { param in "\(param.name): \"\(param.value)\"" }
             .joined(separator: "  ")
     }
 
@@ -1279,7 +1297,8 @@ public enum TurnEvent: Sendable {
         }.value
     }
 
-    nonisolated static func softDefaultPrompt(_ parts: [ContentPart]) -> String {
+    nonisolated static func softDefaultPrompt(_ parts: [ContentPart])
+        -> String {
         var images = 0, videos = 0, sounds = 0
         for part in parts {
             switch part {

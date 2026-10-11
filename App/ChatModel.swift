@@ -190,12 +190,80 @@ import UniformTypeIdentifiers
         }
     }
 
+    enum Sidecar: CaseIterable {
+        case encoder, voice
+
+        var label: String {
+            self == .encoder ? "memory encoder" : "reading voice"
+        }
+
+        var bytes: Int64 {
+            self == .encoder ? EncoderPack.bytes : VoicePack.chosen.bytes
+        }
+
+        var onDisk: Bool {
+            self == .encoder ? EncoderPack.onDisk : VoicePack.onDisk
+        }
+
+        var wanted: Bool { self == .encoder || !VoicePack.declined }
+
+        var readme: URL {
+            self == .encoder ? EncoderPack.readme : VoicePack.readme
+        }
+
+        var sizeText: String {
+            ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+        }
+
+        func fetch(_ onProgress: @escaping @Sendable (HubFetch.Status) -> Void)
+            async -> String? {
+            self == .encoder
+                ? await EncoderPack.fetch(onProgress: onProgress)
+                : await VoicePack.fetch(onProgress: onProgress)
+        }
+    }
+
+    var sidecarsMissing: [Sidecar] {
+        Sidecar.allCases.filter { pack in !pack.onDisk && pack.wanted }
+    }
+
+    var downloadStage = ""
+    @ObservationIgnored private var landedBytes: Int64 = 0
+    @ObservationIgnored private var plannedBytes: Int64 = 0
+    @ObservationIgnored private var sidecarTask: Task<Void, Never>?
+
     func observeDownload(_ s: HubFetch.Status) {
         if downloadBase < 0 {
-            downloadBase = s.done
+            downloadBase = landedBytes + s.done
         }
-        downloadDone = s.done
-        downloadTotal = s.total
+        downloadDone = landedBytes + s.done
+        downloadTotal = max(plannedBytes, landedBytes + s.total)
+    }
+
+    private func fetchSidecars(shown: Bool) async {
+        for pack in sidecarsMissing where !Task.isCancelled {
+            if shown { downloadStage = pack.label }
+            let pace = Paced(milliseconds: 100)
+            let failure = await pack.fetch { s in
+                if shown, pace.due(final: s.done >= s.total) {
+                    Task { @MainActor in self.observeDownload(s) }
+                }
+            }
+            if shown { landedBytes += pack.bytes }
+            Diag.shared.report(.net, "[sidecar] \(pack.label): "
+                + (failure ?? "landed"))
+        }
+        speech.adoptPack()
+        session.memories.open()
+    }
+
+    private func ensureSidecars() {
+        if sidecarTask == nil, !downloading, !sidecarsMissing.isEmpty {
+            sidecarTask = Task { @MainActor in
+                await fetchSidecars(shown: false)
+                sidecarTask = nil
+            }
+        }
     }
 
     var downloadFraction: Double {
@@ -302,7 +370,7 @@ import UniformTypeIdentifiers
 
     var modelSupportsThinking: Bool { session.modelSupportsThinking }
 
-    var voiceMode: Bool { session.voiceRules }
+    var voiceMode: Bool { speech.enabled }
 
     var thinkingActive: Bool {
         benchOrUserThinking && modelSupportsThinking && !voiceMode
@@ -313,10 +381,14 @@ import UniformTypeIdentifiers
     }
 
     private func voiceChanged() {
-        if ready, speech.enabled != voiceMode {
+        if ready, speech.enabled != session.voiceRules {
             if messages.isEmpty, !busy {
                 newChat()
             } else {
+                let on = thinking && !speech.enabled
+                Task { @MainActor in
+                    await session.pushThinking(on, resetIfFresh: false)
+                }
                 flashNote(speech.enabled
                           ? "Voice rules from the next new chat"
                           : "Voice rules off from the next new chat")
@@ -340,9 +412,6 @@ import UniformTypeIdentifiers
 
     var loadError: String? = nil
 
-    var wikipedia = true {
-        didSet { session.wikipedia = wikipedia }
-    }
     var webAccess = true {
         didSet { session.webAccess = webAccess }
     }
@@ -461,22 +530,12 @@ import UniformTypeIdentifiers
         Task { await session.memories.emptyTrash() }
     }
 
-    enum Access { case offline, wikipedia, full }
-    var accessState: Access {
-        webAccess ? .full : (wikipedia ? .wikipedia : .offline)
-    }
+    enum Access { case offline, full }
+    var accessState: Access { webAccess ? .full : .offline }
 
     func cycleAccess() {
-        switch accessState {
-        case .offline: setAccess(wikipedia: true, web: false)
-        case .wikipedia: setAccess(wikipedia: true, web: true)
-        case .full: setAccess(wikipedia: false, web: false)
-        }
-        switch accessState {
-        case .offline: flashHUD("Airplane Mode")
-        case .wikipedia: flashHUD("Wikipedia Only")
-        case .full: flashHUD("Web Access")
-        }
+        setAccess(web: !webAccess)
+        flashHUD(webAccess ? "Web Access" : "Airplane Mode")
     }
 
     struct Flash: Equatable {
@@ -555,8 +614,7 @@ import UniformTypeIdentifiers
         session.pushTools()
     }
 
-    func setAccess(wikipedia wiki: Bool, web: Bool) {
-        wikipedia = wiki
+    func setAccess(web: Bool) {
         webAccess = web
         session.pushTools()
     }
@@ -876,6 +934,7 @@ import UniformTypeIdentifiers
                 status = ""
             }
             session.primeSession()
+            ensureSidecars()
             await ConversationStore.shared.settled()
             session.pruneParked(
                 keeping: Set(ConversationStore.shared.list.map { c in c.id }))
@@ -1063,7 +1122,27 @@ import UniformTypeIdentifiers
         }
     }
 
+    private(set) var prepFailures = 0
+
+    var prepReport: String {
+        session.prepDetail + "\ndiag: " + diagPath
+    }
+
+    static let issuesURL = URL(string:
+        "https://github.com/leok7v/ChatOKF/issues")!
+    static let reportMail = "leo.kuznetsov@gmail.com"
+
+    func copyPrepReport() {
+        setClipboard(prepReport)
+        flashNote("Details copied")
+    }
+
     func retry() {
+        if loadError != nil {
+            prepFailures += 1
+            statusLine = true
+            for gate in DiagGate.switchable { gate.set(true) }
+        }
         loadError = nil
         load(name: modelName)
     }
@@ -1073,12 +1152,20 @@ import UniformTypeIdentifiers
             downloadFallback = Session.isOnDisk(modelName)
                 ? modelName : downloadedFallback()
             speech.cancelFetch()
+            sidecarTask?.cancel()
             commitSwitch(name)
             downloadName = nil
             downloading = true
             downloadDone = 0
             downloadTotal = 0
             downloadBase = -1
+            landedBytes = 0
+            let modelBytes = ModelCatalog.source(name)?.bytes ?? 0
+            let extra = sidecarsMissing.reduce(Int64(0)) { sum, pack in
+                sum + pack.bytes
+            }
+            plannedBytes = modelBytes + extra
+            downloadStage = Models.display(name)
             phaseStart = Date()
             status = "downloading \(name)…"
             let pace = Paced(milliseconds: 100)
@@ -1088,9 +1175,13 @@ import UniformTypeIdentifiers
                         Task { @MainActor in self.observeDownload(s) }
                     }
                 }
+                if failure == nil, !Task.isCancelled {
+                    landedBytes = modelBytes
+                    await fetchSidecars(shown: true)
+                }
                 downloading = false
-                if failure == nil {
-                    diskRevision += 1
+                if failure == nil { diskRevision += 1 }
+                if failure == nil, !Task.isCancelled {
                     Self.saveSeconds("download", name,
                         Date().timeIntervalSince(self.phaseStart))
                     if let path = ModelCatalog.ggufPath(
@@ -1100,9 +1191,9 @@ import UniformTypeIdentifiers
                         self.downloadFailure = "\(Models.display(name)): "
                             + "download failed, check your connection"
                     }
-                } else if !Task.isCancelled {
+                } else if let failure, !Task.isCancelled {
                     self.downloadFailure = "\(Models.display(name)): "
-                        + failure!
+                        + failure
                 }
             }
         }
@@ -2041,6 +2132,7 @@ import UniformTypeIdentifiers
         try? fm.removeItem(at: SoftFile.dir)
         try? fm.removeItem(at: Bundle.modelStore())
         VoicePack.erase()
+        EncoderPack.erase()
         Session.eraseParked()
         Memories.erase()
         Diag.eraseCaches()

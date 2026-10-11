@@ -179,6 +179,9 @@ final class GGUF {
         case .iq1_m: return n / 256 * 56
         case .q1_0: return n / 128 * 18
         case .q4_0: return n / 32 * 18
+        case .q4_1: return n / 32 * 20
+        case .q5_0: return n / 32 * 22
+        case .q5_1: return n / 32 * 24
         case .q8_0: return n / 32 * 34
         default:    return n
         }

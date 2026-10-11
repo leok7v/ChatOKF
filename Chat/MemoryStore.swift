@@ -50,7 +50,7 @@ actor MemoryStore {
 
     let root: URL
     nonisolated let searches = Supersedable()
-    private var embedder: BertEmbedder?
+    private var embedder: Embedder?
     private(set) var store: Store?
 
     init(root: URL) {
@@ -59,8 +59,12 @@ actor MemoryStore {
 
     func open(excludedFromBackup: Bool) -> Opened? {
         var out: Opened? = nil
-        if embedder == nil, let url = BertEmbedder.bundledMultilingual {
-            embedder = BertEmbedder.load(ggufPath: url.path)
+        if embedder == nil, let path = EncoderPack.path {
+            embedder = ModernBertEmbedder.load(ggufPath: path)
+        }
+        if embedder == nil {
+            Diag.shared.report(.load, "[memories] not open: no encoder on "
+                               + "disk yet")
         }
         if let embedder {
             try? FileManager.default.createDirectory(

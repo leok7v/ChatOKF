@@ -21,9 +21,11 @@ public enum SearchProvider: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .parallel:
             out = "A commercial search service, tried first because it "
-                + "finds a great deal more. What you searched for and your "
-                + "network address reach it, and its policy does not say "
-                + "how long a search is kept."
+                + "finds a great deal more, and it reads pages for the "
+                + "assistant. What you searched for, the address of a page "
+                + "read and what is wanted from it, and your network "
+                + "address reach it, and its policy does not say how long "
+                + "a search is kept."
         case .mwmbl:
             out = "A non-profit open search index, used when Parallel is "
                 + "off or comes back empty. It keeps no record of a search "
@@ -76,6 +78,9 @@ enum WebSearch {
 
     static let excerptLimit = 400
     static let proseLine = 40
+    static let readOn = "These are search snippets, not the pages. Before "
+        + "answering, read the best one or two pages with "
+        + "fetch_url(url, objective)."
 
     static func run(_ query: String, count: Int) async -> String {
         var hits: [SearchHit] = []
@@ -104,7 +109,7 @@ enum WebSearch {
                 }
                 lines.append(block)
             }
-            result = lines.joined()
+            result = lines.joined() + readOn
         }
         return result
     }
@@ -127,6 +132,42 @@ enum WebSearch {
     static func squeezed(_ s: String) -> String {
         s.split(whereSeparator: { c in c.isWhitespace })
             .joined(separator: " ")
+    }
+
+    static func fetched(_ text: String) -> String? {
+        var out: String? = nil
+        let obj = try? JSONSerialization.jsonObject(with: Data(text.utf8))
+        if let root = obj as? [String: Any],
+           let first = (root["results"] as? [[String: Any]])?.first {
+            let parts = (first["excerpts"] as? [String] ?? [])
+                .map { excerpt in plain(excerpt) }
+                .filter { excerpt in !excerpt.isEmpty }
+            if !parts.isEmpty { out = parts.joined(separator: "\n\n") }
+        }
+        return out
+    }
+
+    private static let markdownNoise: [(NSRegularExpression, String)] = [
+        ("\\[\\[\\s*\\d+\\s*\\]\\]\\([^)]*\\)", ""),
+        ("!\\[[^\\]]*\\]\\([^)]*\\)", ""),
+        ("\\[([^\\]]*)\\]\\([^)]*\\)", "$1"),
+        ("[ \\t]{2,}", " "),
+        ("[ \\t]+\\n", "\n"),
+        ("\\n{3,}", "\n\n"),
+    ].compactMap { pattern, template in
+        (try? NSRegularExpression(pattern: pattern)).map { re in
+            (re, template)
+        }
+    }
+
+    static func plain(_ markdown: String) -> String {
+        var s = markdown
+        for (re, template) in markdownNoise {
+            s = re.stringByReplacingMatches(
+                in: s, range: NSRange(s.startIndex..., in: s),
+                withTemplate: template)
+        }
+        return s.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     static func parallelHits(_ text: String, _ topk: Int) -> [SearchHit] {
@@ -255,6 +296,26 @@ actor ParallelSearch {
             session = ""
             spec = nil
             Tools.diag("web_search parallel \"\(query)\" failed: "
+                + error.localizedDescription)
+        }
+        return out
+    }
+
+    func fetch(_ url: String, objective: String) async -> String? {
+        var out: String? = nil
+        do {
+            _ = try await ready()
+            let answer = try await rpc("tools/call", [
+                "name": "web_fetch",
+                "arguments": ["urls": [url], "objective": objective]])
+            out = WebSearch.fetched(ParallelSearch.text(answer))
+            if out == nil {
+                Tools.diag("fetch_url parallel \(url) -> nothing")
+            }
+        } catch {
+            session = ""
+            spec = nil
+            Tools.diag("fetch_url parallel \(url) failed: "
                 + error.localizedDescription)
         }
         return out

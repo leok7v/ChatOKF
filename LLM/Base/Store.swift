@@ -6,6 +6,11 @@ public protocol Embedder: AnyObject {
     var queryPrefix: String { get }
     var passagePrefix: String { get }
     var relevanceFloor: Float { get }
+    var reranks: Bool { get }
+    var duplicateAt: Float { get }
+    var mergeAt: Float { get }
+    var relateAt: Float { get }
+    var clusterAt: Float { get }
     func embed(_ text: String) -> [Float]
     func states(_ text: String) -> [Float]
     func pooled(_ states: [Float]) -> [Float]
@@ -20,50 +25,6 @@ public extension Embedder {
     func embedPassage(_ text: String) -> [Float] {
         embed(passagePrefix + text)
     }
-}
-
-public final class BertEmbedder: Embedder {
-
-    private let gguf: GGUF
-    private let model: MiniLM
-    private let multilingual: Bool
-    public let name: String
-
-    public var dim: Int { model.dim }
-    public var queryPrefix: String { multilingual ? "query: " : "" }
-    public var passagePrefix: String { multilingual ? "passage: " : "" }
-    public var relevanceFloor: Float { multilingual ? 0.806 : 0.5 }
-
-    public static var bundledMultilingual: URL? {
-        MiniLM.bundledMultilingual
-    }
-
-    public static func load(ggufPath: String) -> BertEmbedder? {
-        var result: BertEmbedder? = nil
-        if let gguf = try? GGUF(path: ggufPath) {
-            result = BertEmbedder(gguf: gguf)
-        }
-        return result
-    }
-
-    private init(gguf: GGUF) {
-        self.gguf = gguf
-        model = MiniLM(gguf: gguf)
-        multilingual = gguf.string("tokenizer.ggml.model") == "llama"
-        name = multilingual ? "multilingual-e5-small" : "all-MiniLM-L6-v2"
-    }
-
-    public func embed(_ text: String) -> [Float] { model.embed(text) }
-
-    public func states(_ text: String) -> [Float] { model.encode(text) }
-
-    public func pooled(_ states: [Float]) -> [Float] {
-        var out = [Float](repeating: 0, count: model.dim)
-        MiniLM.pooled(states, width: model.dim, into: &out)
-        return out
-    }
-
-    public func tokens(_ text: String) -> [Int32] { model.tokenize(text) }
 }
 
 public enum Trust: String, Sendable {
@@ -1012,14 +973,21 @@ public final class Store {
     }
 
     private func rerank(_ asked: [[Float]], _ hits: [Hit]) -> [Hit] {
-        let scored = hits.enumerated().map { rank, hit in
-            (rank, Hit(concept: hit.concept, score: hit.score,
-                       relevance: relevance(hit.concept, asked),
-                       terms: hit.terms))
+        var out = hits.map { hit in
+            Hit(concept: hit.concept, score: hit.score,
+                relevance: hit.score, terms: hit.terms)
         }
-        return scored.sorted { left, right in
-            (-left.1.relevance, left.0) < (-right.1.relevance, right.0)
-        }.map { entry in entry.1 }
+        if embedder.reranks {
+            let scored = hits.enumerated().map { rank, hit in
+                (rank, Hit(concept: hit.concept, score: hit.score,
+                           relevance: relevance(hit.concept, asked),
+                           terms: hit.terms))
+            }
+            out = scored.sorted { left, right in
+                (-left.1.relevance, left.0) < (-right.1.relevance, right.0)
+            }.map { entry in entry.1 }
+        }
+        return out
     }
 
     public func relevant(_ hit: Hit) -> Bool {
@@ -1149,10 +1117,6 @@ public final class Store {
         return out
     }
 
-    static let mergeAt: Float = 0.85
-    static let relateAt: Float = 0.60
-    static let clusterAt: Float = 0.55
-
     private func similarity(_ left: Int, _ right: Int) -> Float {
         var total: Float = 0
         let a = concepts[left].vector
@@ -1173,7 +1137,7 @@ public final class Store {
         for i in concepts.indices {
             for j in concepts.indices where j > i {
                 let score = similarity(i, j)
-                if score >= Store.relateAt {
+                if score >= embedder.relateAt {
                     out.append((i, j, score))
                 }
             }
@@ -1189,7 +1153,7 @@ public final class Store {
         var neighbours: [(index: Int, score: Float)] = []
         for other in concepts.indices where other != seed {
             let score = similarity(seed, other)
-            if score >= Store.clusterAt && !spoken.contains(
+            if score >= embedder.clusterAt && !spoken.contains(
                 concepts[other].id) {
                 neighbours.append((other, score))
             }
@@ -1237,7 +1201,7 @@ public final class Store {
             let ids = [concepts[pair.left].id, concepts[pair.right].id]
             let fresh = !spoken.contains(ids[0])
                 && !spoken.contains(ids[1])
-            let duplicate = pair.score >= Store.mergeAt
+            let duplicate = pair.score >= embedder.mergeAt
             let wanted = kind == .merge
                 ? duplicate
                 : !duplicate && !linked(pair.left, pair.right)
@@ -1356,7 +1320,6 @@ public final class Store {
         }
     }
 
-    static let duplicateAt: Float = 0.90
     static let duplicateWords = 6
 
     public func duplicate(title: String, description: String, tags: [String],
@@ -1365,7 +1328,7 @@ public final class Store {
         let top = nearest(title: title, description: description,
                           tags: tags, type: type, limit: 1).first
         let words = literalRanking(title + " " + description).first
-        if let top, let words, top.score >= Store.duplicateAt,
+        if let top, let words, top.score >= embedder.duplicateAt,
            words.weight >= Store.duplicateWords,
            concepts[words.index].id == top.id {
             out = top

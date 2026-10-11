@@ -54,6 +54,7 @@ public final class TurnMemo: @unchecked Sendable {
     private var titles: [String: String] = [:]
     private var pages: [(url: String, text: String)] = []
     private var slices: Set<String> = []
+    private var query = ""
 
     public init() {}
 
@@ -62,19 +63,32 @@ public final class TurnMemo: @unchecked Sendable {
         titles.removeAll()
         pages.removeAll()
         slices.removeAll()
+        query = ""
         lock.unlock()
     }
 
-    func title(for id: String) -> String? {
+    func title(for key: String) -> String? {
         lock.lock()
         defer { lock.unlock() }
-        return titles[id]
+        return titles[key]
     }
 
-    func note(_ id: String, _ title: String) {
+    func note(_ key: String, _ title: String) {
         lock.lock()
-        titles[id] = title
+        titles[key] = title
         lock.unlock()
+    }
+
+    func noteQuery(_ q: String) {
+        lock.lock()
+        query = q
+        lock.unlock()
+    }
+
+    var lastQuery: String {
+        lock.lock()
+        defer { lock.unlock() }
+        return query
     }
 
     func page(for url: String) -> String? {
@@ -111,85 +125,40 @@ public final class TurnMemo: @unchecked Sendable {
     }
 }
 
-public final class WikiIndex: @unchecked Sendable {
-    private enum State {
-        case unopened
-        case missing
-        case open(WikiSlugs)
-    }
-
-    private let lock = NSLock()
-    private let path: String
-    private var state = State.unopened
-
-    public init(path: String) {
-        self.path = path
-    }
-
-    func with<T>(_ body: (WikiSlugs) -> T) -> T? {
-        lock.lock()
-        defer { lock.unlock() }
-        if case .unopened = state {
-            state = WikiSlugs(ggufPath: path).map { w in State.open(w) }
-                ?? .missing
-        }
-        var result: T? = nil
-        if case .open(let w) = state { result = body(w) }
-        return result
-    }
-}
-
 public struct SafeToolRunner: ToolRunner {
-    let slugs: WikiIndex?
-    let wikipedia: Bool
     let network: Bool
     let calculator = Calculator()
     let memo = TurnMemo()
 
-    public init(slugsPath: String? = nil, wikipedia: Bool = true,
-                network: Bool = true) {
-        self.slugs = slugsPath.map { path in WikiIndex(path: path) }
-        self.wikipedia = wikipedia
+    public init(network: Bool = true) {
         self.network = network
     }
 
     public var tools: [ToolSpec] {
         var t = [Tools.getCurrentTimeSpec, Tools.calculatorSpec]
         if network {
-            if SearchProvider.any {
-                t.append(Tools.webSearchSpec(
-                    wikiAdvertised: wikipedia && slugs != nil))
-            }
+            if SearchProvider.any { t.append(Tools.webSearchSpec) }
+            t.append(Tools.wikipediaSpec)
             t.append(Tools.fetchUrlSpec)
-            t.append(Tools.getWeatherSpec)
-        }
-        if wikipedia {
             t.append(Tools.getNewsSpec)
-            if slugs != nil { t.append(Tools.wikipediaSpec) }
+            t.append(Tools.getWeatherSpec)
         }
         return t
     }
 
     public func execute(_ name: String,
                         _ args: [ToolArg]) async -> String {
-        let webOff = !network && (name == "web_search"
-            || name == "fetch_url" || name == "get_weather")
+        let webOff = !network && Tools.networkTools.contains(name)
         let searchOff = name == "web_search" && !SearchProvider.any
-        let wikiOff = !wikipedia && (name == "wikipedia_query"
-            || name == "get_news")
         let result: String
         if webOff {
             result = "error: \(name) is disabled; web access is off"
         } else if searchOff {
             result = "error: web_search is disabled; no search provider "
                 + "is switched on"
-        } else if wikiOff {
-            result = "error: \(name) is disabled; Wikipedia access is off"
         } else if name == "calculator" {
             let expr = args.first { arg in arg.name == "expression" }?.value
             result = await calculator.evaluate(expr ?? "")
-        } else if name == "wikipedia_query", let slugs {
-            result = await Tools.runWikipedia(args, slugs: slugs, memo: memo)
         } else {
             result = await Tools.executeSafe(name, args, memo: memo)
         }
@@ -280,52 +249,58 @@ public enum Tools {
             + "signs.\"}},"
             + "\"required\":[\"expression\"]}")
 
-    static func webSearchSpec(wikiAdvertised: Bool) -> ToolSpec {
-        let routing = wikiAdvertised
-            ? "For encyclopedic facts (people, places, science, history, "
-                + "definitions) use wikipedia_query FIRST; use web_search "
-                + "for current events, news, prices, or when wikipedia_query "
-                + "finds no match."
-            : "Use it for current events, prices, or facts you are unsure "
-                + "of."
-        return ToolSpec(
-            name: "web_search",
-            description: "Search the web; returns ranked results with "
-                + "snippets. To read a result page, pass its URL to "
-                + "fetch_url. " + routing,
-            parametersJSON: "{\"type\":\"object\",\"properties\":{"
-                + "\"query\":{\"type\":\"string\"}},"
-                + "\"required\":[\"query\"]}")
-    }
+    static let networkTools: Set<String> = [
+        "web_search", "wikipedia_query", "fetch_url", "get_news",
+        "get_weather",
+    ]
+
+    static let webSearchSpec = ToolSpec(
+        name: "web_search",
+        description: "Search the web; returns ranked results with short "
+            + "snippets. Snippets are not enough to answer from: after a "
+            + "search, pass the URL of the best one or two results to "
+            + "fetch_url and answer from the page text. Use it for current "
+            + "events, prices, and facts you are unsure of; for an "
+            + "encyclopedic question (people, places, science, history, "
+            + "definitions) use wikipedia_query first.",
+        parametersJSON: "{\"type\":\"object\",\"properties\":{"
+            + "\"query\":{\"type\":\"string\"}},"
+            + "\"required\":[\"query\"]}")
 
     static let wikipediaSpec = ToolSpec(
         name: "wikipedia_query",
-        description: "Look a topic up in Wikipedia (people, places, science, "
-            + "history, definitions). Use this FIRST for any 'what does "
-            + "Wikipedia say about X' or factual/encyclopedic question, BEFORE "
-            + "web_search: it runs a LOCAL semantic search (your query is NOT "
-            + "sent to any search engine; only the matched article id is "
-            + "fetched, so it is private) and returns the best article's text, "
-            + "ending with a 'Related articles' list you can look up with "
-            + "further wikipedia_query calls. Ask a FULL question or "
-            + "descriptive phrase, not a bare keyword -- e.g. 'What is a red "
-            + "dwarf star?'. Only if it reports no confident match, fall back "
-            + "to web_search or your own knowledge.",
+        description: "Look a topic up in Wikipedia and get the article's "
+            + "text (people, places, science, history, definitions). Use "
+            + "it FIRST for an encyclopedic question, before web_search. "
+            + "`simple` true (the default) reads Simple English Wikipedia: "
+            + "a short article in plain words, enough for a definition or "
+            + "an overview and quick to read; false reads the English "
+            + "Wikipedia: the full article, for detail or a topic Simple "
+            + "English does not cover. Name the topic as a short phrase, "
+            + "e.g. 'dark matter'. The text ends with a Related articles "
+            + "list you can look up next.",
         parametersJSON: "{\"type\":\"object\",\"properties\":{"
-            + "\"query\":{\"type\":\"string\",\"description\":\"A full "
-            + "question or descriptive phrase.\"}},"
+            + "\"query\":{\"type\":\"string\",\"description\":\"The topic, "
+            + "a short phrase.\"},"
+            + "\"simple\":{\"type\":\"boolean\",\"description\":\"true for "
+            + "Simple English Wikipedia (short, plain, fast), false for "
+            + "the full English article. Default true.\"}},"
             + "\"required\":[\"query\"]}")
 
     static let fetchUrlSpec = ToolSpec(
         name: "fetch_url",
-        description: "Fetch the readable text content of a web page at an "
-            + "http(s):// URL (a bare domain like example.com also works); "
-            + "HTML markup, scripts, and styles are removed. Capped to "
-            + "`limit` bytes (default 16384; -1 = no cap); use `offset` to "
-            + "page through long content.",
+        description: "Read a web page at an http(s):// URL (a bare domain "
+            + "like example.com also works). Give an `objective`, one line "
+            + "saying what you want from the page, and you get the parts "
+            + "about it; without one you get the page's readable text from "
+            + "the top, markup removed. Capped to `limit` bytes (default "
+            + "16384; -1 = no cap); use `offset` to page through long "
+            + "content.",
         parametersJSON: "{\"type\":\"object\",\"properties\":{"
             + "\"url\":{\"type\":\"string\",\"description\":\"Full "
             + "http(s):// URL or a bare domain.\"},"
+            + "\"objective\":{\"type\":\"string\",\"description\":\"What "
+            + "you want from the page, in one line.\"},"
             + "\"limit\":{\"type\":\"integer\",\"description\":\"Max "
             + "bytes to return (default 16384; -1 = no cap)\"},"
             + "\"offset\":{\"type\":\"integer\",\"description\":\"Byte "
@@ -934,7 +909,9 @@ public enum Tools {
         case "get_current_time", "get_datetime":
             result = await getCurrentTime()
         case "web_search":
-            result = await runWebsearch(args)
+            result = await runWebsearch(args, memo: memo)
+        case "wikipedia_query":
+            result = await runWikipedia(args, memo: memo)
         case "fetch_url":
             result = await runFetch(args, memo: memo)
         case "get_news":
@@ -954,9 +931,11 @@ public enum Tools {
         return fmt.string(from: Date())
     }
 
-    private static func runWebsearch(_ args: [ToolArg]) async -> String {
+    private static func runWebsearch(_ args: [ToolArg],
+                                     memo: TurnMemo? = nil) async -> String {
         var result = "error: missing 'query' argument"
         if let query = findArg(args, "query"), !query.isEmpty {
+            memo?.noteQuery(query)
             result = await websearch(query, count: 5)
         }
         return result
@@ -970,8 +949,10 @@ public enum Tools {
             let limit = limStr.flatMap { s in Int(s) } ?? 16_384
             let offset = findArg(args, "offset")
                 .flatMap { s in Int(s) } ?? 0
+            let objective = firstValue(args, "objective")
+                ?? memo?.lastQuery ?? ""
             result = await fetch(url, limit: limit, offset: offset,
-                                 memo: memo)
+                                 memo: memo, objective: objective)
         }
         return result
     }
@@ -1010,14 +991,15 @@ public enum Tools {
     }
 
     public static func fetch(_ url: String, limit: Int, offset: Int,
-                             memo: TurnMemo? = nil) async -> String {
+                             memo: TurnMemo? = nil,
+                             objective: String = "") async -> String {
         var result = "error: missing 'url' argument"
         if !url.isEmpty {
             var lim = limit
             if lim == 0 { lim = 16_384 }
             switch resolveSource(url) {
             case .url(let href):
-                result = await fetchURL(href, lim, offset, memo)
+                result = await fetchURL(href, lim, offset, memo, objective)
             case .file, .unknown:
                 result = "error: '\(url)' is not a recognizable URL"
             }
@@ -1026,8 +1008,8 @@ public enum Tools {
     }
 
     private static func fetchURL(_ href: String, _ limit: Int,
-                                 _ offset: Int,
-                                 _ memo: TurnMemo?) async -> String {
+                                 _ offset: Int, _ memo: TurnMemo?,
+                                 _ objective: String) async -> String {
         var result = "error: fetch failed (network error)"
         if memo?.sliceDelivered(href, offset) == true {
             // Slices note only on successful delivery, so a failed fetch stays
@@ -1041,17 +1023,33 @@ public enum Tools {
             memo?.noteSlice(href, offset)
             result = deliverText(cached, limit, offset)
         } else if let url = URL(string: href) {
-            var req = URLRequest(url: url)
-            req.setValue("Mozilla/5.0 (compatible; chatokf-agent/1.0)",
-                         forHTTPHeaderField: "User-Agent")
-            if let page = await body(req) {
-                let text = htmlToText(page)
+            var text = await distilled(href, objective)
+            if text == nil {
+                var req = URLRequest(url: url)
+                req.setValue("Mozilla/5.0 (compatible; chatokf-agent/1.0)",
+                             forHTTPHeaderField: "User-Agent")
+                text = await body(req).map { page in htmlToText(page) }
+            }
+            if let text {
                 memo?.notePage(href, text)
                 memo?.noteSlice(href, offset)
                 result = deliverText(text, limit, offset)
             }
         }
         return result
+    }
+
+    private static func distilled(_ href: String,
+                                  _ objective: String) async -> String? {
+        var out: String? = nil
+        if !objective.isEmpty && SearchProvider.parallel.on {
+            out = await ParallelSearch.shared.fetch(href, objective: objective)
+            if let out {
+                diag("fetch_url parallel \(href) -> \(out.utf8.count) chars "
+                    + "for \"\(objective)\"")
+            }
+        }
+        return out
     }
 
     static let maxBodyBytes = 4 << 20
@@ -1109,6 +1107,124 @@ public enum Tools {
             result = out
         }
         return result
+    }
+
+    private static func runWikipedia(_ args: [ToolArg],
+                                     memo: TurnMemo? = nil) async -> String {
+        var result = "error: missing 'query' argument"
+        if let query = findArg(args, "query"), !query.isEmpty {
+            let simple = firstValue(args, "simple")
+                .map { s in Flags.truthy(s) && s.lowercased() != "false" }
+                ?? true
+            result = await wikipediaQuery(query, simple: simple, memo: memo)
+        }
+        return result
+    }
+
+    struct WikiPage {
+        let title: String
+        let text: String
+        let links: [String]
+    }
+
+    public static func wikipediaQuery(_ query: String, simple: Bool,
+                                      limit: Int = 4000,
+                                      memo: TurnMemo? = nil) async -> String {
+        let wiki = simple ? "Simple English Wikipedia" : "Wikipedia"
+        var result = "error: Wikipedia lookup failed (network error)"
+        do {
+            if let page = try await wikipediaPage(query, simple: simple) {
+                let key = (simple ? "simple:" : "en:") + page.title
+                if let dup = memo?.title(for: key) {
+                    diag("wikipedia_query dedupe \"\(dup)\"")
+                    result = "Article \"\(dup)\" was already retrieved in "
+                        + "this turn; its full text is above. Do not request "
+                        + "it again: use it and its Related articles list, "
+                        + "query a DIFFERENT topic, or give your final "
+                        + "answer now."
+                } else {
+                    let body = clampText(page.text, limit)
+                    let related = relatedIn(body, links: page.links)
+                    memo?.note(key, page.title)
+                    diag("wikipedia_query \(simple ? "simple" : "en") "
+                        + "\"\(query)\" -> \"\(page.title)\" "
+                        + "\(page.text.count) chars, \(body.count) kept")
+                    result = "\(wiki) -- article \"\(page.title)\":\n\(body)"
+                    if !related.isEmpty {
+                        result += "\n\nRelated articles: "
+                            + related.joined(separator: "; ")
+                    }
+                }
+            } else {
+                diag("wikipedia_query \(simple ? "simple" : "en") "
+                    + "\"\(query)\": no article")
+                result = "No \(wiki) article matches \"\(query)\". "
+                    + (simple ? "Try again with simple set to false, or "
+                              : "Try a shorter topic name, or ")
+                    + "web_search, or answer from your own knowledge."
+            }
+        } catch {
+            diag("wikipedia_query \"\(query)\" transport error: "
+                + error.localizedDescription)
+        }
+        return result
+    }
+
+    static func wikipediaPage(_ query: String,
+                              simple: Bool) async throws -> WikiPage? {
+        var comps = URLComponents(string: "https://"
+            + (simple ? "simple" : "en") + ".wikipedia.org/w/api.php")
+        comps?.queryItems = [
+            URLQueryItem(name: "action", value: "query"),
+            URLQueryItem(name: "generator", value: "search"),
+            URLQueryItem(name: "gsrsearch", value: query),
+            URLQueryItem(name: "gsrlimit", value: "1"),
+            URLQueryItem(name: "prop", value: "extracts|links"),
+            URLQueryItem(name: "explaintext", value: "1"),
+            URLQueryItem(name: "redirects", value: "1"),
+            URLQueryItem(name: "plnamespace", value: "0"),
+            URLQueryItem(name: "pllimit", value: "max"),
+            URLQueryItem(name: "format", value: "json"),
+        ]
+        var out: WikiPage? = nil
+        if let url = comps?.url {
+            var req = URLRequest(url: url)
+            req.setValue("Mozilla/5.0 (compatible; chatokf-agent/1.0)",
+                         forHTTPHeaderField: "User-Agent")
+            let (data, _) = try await URLSession.shared.data(for: req)
+            out = wikiPage(data)
+        }
+        return out
+    }
+
+    static func wikiPage(_ data: Data) -> WikiPage? {
+        var out: WikiPage? = nil
+        let obj = try? JSONSerialization.jsonObject(with: data)
+        if let root = obj as? [String: Any],
+           let query = root["query"] as? [String: Any],
+           let pages = query["pages"] as? [String: Any],
+           let page = pages.values.first as? [String: Any],
+           let title = page["title"] as? String,
+           let extract = page["extract"] as? String, !extract.isEmpty {
+            let links = (page["links"] as? [[String: Any]] ?? [])
+                .compactMap { link in link["title"] as? String }
+            out = WikiPage(title: title, text: extract, links: links)
+        }
+        return out
+    }
+
+    static func relatedIn(_ body: String, links: [String],
+                          cap: Int = 25) -> [String] {
+        let hay = body.lowercased()
+        var out: [String] = []
+        for title in links where out.count < cap {
+            let numeric = title.allSatisfy { c in c.isNumber }
+            if title.count >= 3, !numeric,
+               hay.contains(title.lowercased()) {
+                out.append(title)
+            }
+        }
+        return out
     }
 
     private static func runNews(_ args: [ToolArg]) async -> String {
@@ -1376,160 +1492,6 @@ public enum Tools {
     ]
     private static func wmoText(_ code: Int) -> String {
         wmoCodes[code] ?? "code \(code)"
-    }
-
-    static func runWikipedia(_ args: [ToolArg], slugs: WikiIndex,
-                             memo: TurnMemo? = nil) async -> String {
-        var result = "error: missing 'query' argument"
-        if let query = findArg(args, "query"), !query.isEmpty {
-            result = await wikipediaQuery(query, slugs: slugs, memo: memo)
-        }
-        return result
-    }
-
-    static func stripMetaWords(_ query: String) -> String {
-        var s = " " + query.lowercased() + " "
-        for phrase in ["simple english wikipedia", "simple english",
-                       "wikipedia article", "wikipedia articles",
-                       "wikipedia", "encyclopedia", "according to"] {
-            s = s.replacingOccurrences(of: " " + phrase + " ", with: " ")
-        }
-        let cleaned = s.trimmingCharacters(in: .whitespaces)
-        return cleaned.count >= 3 ? cleaned : query
-    }
-
-    static func needsTitleRescue(_ best: SlugHit?,
-                                 _ query: String) -> Bool {
-        var rescue = true
-        if let best, best.isConfident {
-            let hay = " " + WikiSlugs.foldWords(query) + " "
-            rescue = !hay.contains(
-                " " + WikiSlugs.foldWords(best.title) + " ")
-        }
-        return rescue
-    }
-
-    private static func pick(_ w: WikiSlugs, _ cleaned: String,
-                             _ topK: Int) -> SlugHit? {
-        var best = w.query(cleaned, topK: max(1, topK)).first
-        if Tools.needsTitleRescue(best, cleaned),
-           let hit = w.titleMatch(cleaned) {
-            diag("wikipedia_query title match \"\(hit.title)\""
-                + (best.map { b in
-                    " (embedding picked \"\(b.title)\" d=\(b.distance))"
-                } ?? ""))
-            best = hit
-        }
-        return best
-    }
-
-    public static func wikipediaQuery(_ query: String, slugs: WikiIndex,
-                                      topK: Int = 5, limit: Int = 4000,
-                                      memo: TurnMemo? = nil) async -> String {
-        var result = "error: wikipedia index unavailable"
-        let cleaned = Tools.stripMetaWords(query)
-        if let best = slugs.with({ w in pick(w, cleaned, topK) }) {
-            if cleaned != query.lowercased()
-                .trimmingCharacters(in: .whitespaces) {
-                diag("wikipedia_query embedding \"\(cleaned)\" "
-                    + "(meta words stripped)")
-            }
-            let dup = best.flatMap { b in
-                b.isConfident ? memo?.title(for: b.id) : nil
-            }
-            var body = ""
-            var related: [String] = []
-            if let best, best.isConfident, dup == nil {
-                let page = await wikipediaExtract(best.id)
-                body = clampText(page?.text ?? "", limit)
-                related = relatedIn(body, links: page?.links ?? [])
-            }
-            if let dup, let best {
-                diag("wikipedia_query dedupe \"\(dup)\" id=\(best.id)")
-                result = "Article \"\(dup)\" was already retrieved in this "
-                    + "turn; its full text is above. Do not request it "
-                    + "again: use it and its Related articles list, query a "
-                    + "DIFFERENT topic, or give your final answer now."
-            } else if let best, best.isConfident, !body.isEmpty {
-                memo?.note(best.id, best.title)
-                result = "Simple English Wikipedia -- article "
-                    + "\"\(best.title)\":\n\(body)"
-                if !related.isEmpty {
-                    result += "\n\nRelated articles: "
-                        + related.joined(separator: "; ")
-                }
-            } else {
-                let near = best.map { " (nearest \"\($0.title)\" is weak)" }
-                    ?? ""
-                if let best {
-                    diag("wikipedia_query \"\(query)\": nearest "
-                        + "\"\(best.title)\" id=\(best.id) "
-                        + "d=\(best.distance) (cutoff "
-                        + "\(SlugHit.lowConfidenceDistance))"
-                        + (best.isConfident ? ", extract EMPTY" : ""))
-                }
-                result = "No confident Simple English Wikipedia match for "
-                    + "\"\(query)\"\(near). Answer from your own knowledge."
-            }
-        }
-        return result
-    }
-
-    static func wikipediaExtract(_ id: String) async
-        -> (text: String, links: [String])? {
-        var result: (text: String, links: [String])? = nil
-        var comps = URLComponents(
-            string: "https://simple.wikipedia.org/w/api.php")
-        comps?.queryItems = [
-            URLQueryItem(name: "action", value: "query"),
-            URLQueryItem(name: "prop", value: "extracts|links"),
-            URLQueryItem(name: "explaintext", value: "1"),
-            URLQueryItem(name: "plnamespace", value: "0"),
-            URLQueryItem(name: "pllimit", value: "max"),
-            URLQueryItem(name: "format", value: "json"),
-            URLQueryItem(name: "pageids", value: id),
-        ]
-        if let url = comps?.url {
-            var req = URLRequest(url: url)
-            req.setValue("Mozilla/5.0 (compatible; chatokf-agent/1.0)",
-                         forHTTPHeaderField: "User-Agent")
-            do {
-                let (data, resp) = try await URLSession.shared.data(for: req)
-                if let obj = try? JSONSerialization.jsonObject(with: data)
-                       as? [String: Any],
-                   let query = obj["query"] as? [String: Any],
-                   let pages = query["pages"] as? [String: Any],
-                   let page = pages.values.first as? [String: Any],
-                   let extract = page["extract"] as? String {
-                    let links = (page["links"] as? [[String: Any]] ?? [])
-                        .compactMap { link in link["title"] as? String }
-                    result = (extract, links)
-                } else {
-                    let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
-                    diag("wikipedia extract id=\(id) -> HTTP \(code), "
-                        + "\(data.count) bytes: "
-                        + String(decoding: data.prefix(300), as: UTF8.self))
-                }
-            } catch {
-                diag("wikipedia extract id=\(id) transport error: "
-                    + error.localizedDescription)
-            }
-        }
-        return result
-    }
-
-    static func relatedIn(_ body: String, links: [String],
-                          cap: Int = 25) -> [String] {
-        let hay = body.lowercased()
-        var out: [String] = []
-        for title in links where out.count < cap {
-            let numeric = title.allSatisfy { c in c.isNumber }
-            if title.count >= 3, !numeric,
-               hay.contains(title.lowercased()) {
-                out.append(title)
-            }
-        }
-        return out
     }
 
     private static let paragraphBreak = Array("\n\n".utf8)

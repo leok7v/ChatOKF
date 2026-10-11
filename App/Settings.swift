@@ -443,9 +443,9 @@ struct SettingsView: View {
 
     private var voicePackRow: some View {
         row("Voice model",
-            "Supertonic 3 by Supertone, \(VoicePack.sizeText). It downloads "
-            + "once, after you agree to its use restrictions, and stays on "
-            + "this device.") {
+            "Supertonic 3 by Supertone, \(VoicePack.sizeText). It arrives "
+            + "with the first model, stays on this device, and speaks only "
+            + "after you agree to its use restrictions.") {
             switch model.speech.pack {
             case .ready:
                 Button { model.speech.deletePack() } label: {
@@ -485,18 +485,18 @@ struct SettingsView: View {
             HStack(spacing: 8) {
                 Image(systemName: picked ? "checkmark.circle.fill" : "circle")
                     .foregroundStyle(picked ? Color.accentColor : .secondary)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(v.name)
-                    Text(v.detail)
-                        .appFont(.caption)
-                        .foregroundStyle(.secondary)
-                }
+                Text(v.name)
+                    .frame(minWidth: 64, alignment: .leading)
+                Text(v.detail)
+                    .appFont(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
                 Spacer()
                 Image(systemName: "play.circle")
                     .foregroundStyle(.secondary)
             }
             .padding(.horizontal, 14)
-            .padding(.vertical, 11)
+            .padding(.vertical, 6)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -769,26 +769,15 @@ struct SettingsView: View {
                               $model.suggestFollowups)
                     hairline
                 }
-                switchRow("Wikipedia",
-                          "Let the assistant look things up in Wikipedia. "
-                          + "The lookup runs locally on your device, so what "
-                          + "you type stays here. Only the matching article "
-                          + "is downloaded.", Binding(
-                    get: { model.wikipedia },
-                    set: { on in
-                        model.setAccess(wikipedia: on, web: model.webAccess)
-                    }
-                ))
-                hairline
                 switchRow("Web Access",
                           "Let the assistant search, fetch and read the "
-                          + "Internet. Your search terms leave the device, "
-                          + "and the weather uses your rough location.",
+                          + "Internet, including Wikipedia, the headlines "
+                          + "and the weather. Your search terms leave the "
+                          + "device, and the weather uses your rough "
+                          + "location.",
                           Binding(
                     get: { model.webAccess },
-                    set: { on in
-                        model.setAccess(wikipedia: model.wikipedia, web: on)
-                    }
+                    set: { on in model.setAccess(web: on) }
                 ))
             }
             heading("Attachments")
@@ -875,9 +864,9 @@ struct SettingsView: View {
             heading("Also reached")
             card {
                 destination("Wikipedia",
-                    "The number of the article the model picked. Your "
-                        + "question is matched on this device and never "
-                        + "sent.",
+                    "The topic the assistant looks up, as a search on "
+                        + "Wikipedia's own site, and the date for today's "
+                        + "headlines.",
                     "https://foundation.wikimedia.org/wiki/"
                         + "Policy:Privacy_policy")
                 hairline
