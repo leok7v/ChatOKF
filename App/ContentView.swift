@@ -327,7 +327,9 @@ struct ContentView: View {
 
     private var onboarding: some View {
         Group {
-            if !model.eulaAccepted {
+            if !Models.supported {
+                unsupportedView
+            } else if !model.eulaAccepted {
                 EULAView(onAgree: model.acceptEULA)
             } else if let name = model.downloadName {
                 if GemmaTerms.applies(to: name), !model.gemmaTermsAccepted {
@@ -507,13 +509,12 @@ struct ContentView: View {
 
     private func downloadConsent(_ name: String) -> some View {
         VStack(spacing: 16) {
-            VStack(spacing: 4) {
+            VStack(spacing: 12) {
                 Text("Download").appFont(.title2).bold()
-                Text(Models.display(name, among: pickable))
-                    .appFont(.title3)
-                    .foregroundStyle(.secondary)
+                detailed(Models.display(name, among: pickable) + "  "
+                         + model.downloadSizeText, .title3,
+                         model.downloadPage)
             }
-            Text("This model is about \(model.downloadSizeText).")
             if let est = model.estimatedMinutes(name) {
                 Text(est.optimize > 0
                      ? "Estimated ~\(est.download) min download\n"
@@ -523,12 +524,6 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
             }
-            Text("Stored on this device, excluded from iCloud and backup.\n"
-               + "It downloads once.\n"
-               + "Later launches need no network.")
-                .appFont(.callout)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
             if !model.sidecarsMissing.isEmpty { helpers }
             VStack(spacing: 14) {
                 Button("Download") { model.confirmDownload() }
@@ -541,30 +536,32 @@ struct ContentView: View {
                         .keyboardShortcut(.cancelAction)
                 }
             }
-            .padding(.top, 8)
+            .padding(.top, 24)
         }
         .padding(32)
+        .padding(.bottom, 96)
         .frame(maxWidth: 420)
     }
 
     private var helpers: some View {
-        VStack(spacing: 6) {
-            Text((model.sidecarsMissing.count > 1
-                  ? "Two small helpers come with it, "
-                  : "A small helper comes with it, ")
-               + model.sidecarsMissing.map { pack in
-                   "the \(pack.label) (\(pack.sizeText))"
-               }.joined(separator: " and ") + ".")
-                .multilineTextAlignment(.center)
-            HStack(spacing: 16) {
-                ForEach(model.sidecarsMissing, id: \.self) { pack in
-                    Link("About the " + pack.label,
-                         destination: pack.readme)
-                }
+        VStack(spacing: 4) {
+            ForEach(model.sidecarsMissing, id: \.self) { pack in
+                detailed(pack.label + ": " + pack.sizeText, .callout,
+                         pack.page)
             }
         }
-        .appFont(.caption)
-        .foregroundStyle(.secondary)
+    }
+
+    private func detailed(_ text: String, _ style: Font.TextStyle,
+                          _ page: URL?) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Text(text)
+                .appFont(style)
+                .foregroundStyle(.secondary)
+            if let page {
+                Link("details", destination: page).appFont(.caption)
+            }
+        }
     }
 
     private var downloadProgress: some View {
@@ -644,6 +641,28 @@ struct ContentView: View {
                     model.load(name: model.modelName)
                 }
             }
+    }
+
+    private var unsupportedView: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "cpu")
+                .appFont(.largeTitle)
+                .foregroundStyle(.secondary)
+            Text("This device cannot run ChatOKF.")
+                .appFont(.title3)
+                .bold()
+            Text("The models need the SIMD-group operations Apple's graphics "
+               + "chips gained with the A13. ChatOKF runs on an iPhone or "
+               + "iPad with an A13 chip or later, and on any Apple silicon "
+               + "Mac.")
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.secondary)
+            Text(MetalContext.deviceSummary)
+                .appFont(.caption)
+                .foregroundStyle(.tertiary)
+        }
+        .padding(32)
+        .frame(maxWidth: 420)
     }
 
     private func failureView(_ message: String) -> some View {

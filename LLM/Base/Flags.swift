@@ -256,6 +256,9 @@ public enum Flags {
             "fetch a model as Xet chunks, in parallel and written in place; "
             + "off, the whole blob comes from the LFS bridge, which measured "
             + "faster", scope: .engine, defaultValue: "0"),
+        Knob(name: "unsupported-gpu", takesValue: false, help:
+            "treat this GPU as below Apple family 6, to see the screen an "
+            + "A12 device gets", scope: .diagnostic, defaultValue: "0"),
         Knob(name: "gpu-fault-rate", takesValue: true, help:
             "the fraction of command buffers reported as failed, drawn from "
             + "the --seed generator, to drive the retry and the cancel on a "

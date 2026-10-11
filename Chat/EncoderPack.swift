@@ -9,8 +9,7 @@ public enum EncoderPack {
     public static let bytes: Int64 = 137_000_480
     public static let name = "bekko-embedding-v1-a25m"
 
-    public static let readme = URL(string:
-        "https://huggingface.co/" + repo + "/blob/main/README.md")!
+    public static let page = URL(string: "https://huggingface.co/" + repo)!
 
     public static let root: URL = {
         let fm = FileManager.default

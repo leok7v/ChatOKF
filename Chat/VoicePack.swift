@@ -12,8 +12,7 @@ public enum VoicePack {
     static let repo = "leok7v/supertonic"
     static let revision = "c8b0e4ee7181c403f4c01ed2f76e9c725128eaf6"
 
-    public static let readme = URL(string:
-        "https://huggingface.co/" + repo + "/blob/main/README.md")!
+    public static let page = URL(string: "https://huggingface.co/" + repo)!
 
     public static let q4 = Pack(name: "q4", file: "supertonic-q4.safetensors",
                                 bytes: 79_154_016)

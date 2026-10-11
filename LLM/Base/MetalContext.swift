@@ -86,6 +86,16 @@ public final class MetalContext {
         (.apple6, "Apple6"), (.apple5, "Apple5"), (.apple4, "Apple4"),
     ]
 
+    static let familyFloor = MTLGPUFamily.apple6
+
+    private static func above(_ dev: MTLDevice) -> Bool {
+        dev.supportsFamily(familyFloor) && !Flags.on("unsupported-gpu")
+    }
+
+    public static var supported: Bool {
+        MTLCreateSystemDefaultDevice().map { dev in above(dev) } ?? false
+    }
+
     public static var deviceSummary: String {
         var out = "no Metal device"
         if let dev = MTLCreateSystemDefaultDevice() {
@@ -149,6 +159,8 @@ public final class MetalContext {
         var out: MetalErr? = nil
         if dev == nil {
             out = .noDevice
+        } else if !above(dev!) {
+            out = .gpuFamily
         } else if queue == nil {
             out = .noQueue
         } else if widest > limit {
@@ -243,7 +255,7 @@ public final class MetalContext {
 }
 
 enum MetalErr: Error, CustomStringConvertible {
-    case noDevice, noQueue, noBuffer
+    case noDevice, noQueue, noBuffer, gpuFamily
     case tooBig(Int, Int)
     case noFunction(String)
 
@@ -251,6 +263,9 @@ enum MetalErr: Error, CustomStringConvertible {
         let out: String
         switch self {
         case .noDevice: out = "no Metal device"
+        case .gpuFamily:
+            out = "this GPU is below Apple family 6 and lacks the SIMD-group "
+                + "operations the kernels use"
         case .noQueue: out = "no Metal command queue"
         case .noBuffer: out = "Metal buffer allocation failed"
         case let .tooBig(want, cap):

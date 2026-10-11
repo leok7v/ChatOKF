@@ -107,7 +107,9 @@ public enum Models {
         unlocked ? every : all
     }
 
-    public static var supported: Bool { !all.isEmpty }
+    public static var supported: Bool {
+        !all.isEmpty && MetalContext.supported
+    }
 
     public static let fallback = "Ternary-Bonsai-1.7B"
 

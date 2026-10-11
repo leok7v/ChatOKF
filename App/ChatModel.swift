@@ -194,7 +194,7 @@ import UniformTypeIdentifiers
         case encoder, voice
 
         var label: String {
-            self == .encoder ? "memory encoder" : "reading voice"
+            self == .encoder ? "memory encoder" : "text to speech"
         }
 
         var bytes: Int64 {
@@ -207,8 +207,8 @@ import UniformTypeIdentifiers
 
         var wanted: Bool { self == .encoder || !VoicePack.declined }
 
-        var readme: URL {
-            self == .encoder ? EncoderPack.readme : VoicePack.readme
+        var page: URL {
+            self == .encoder ? EncoderPack.page : VoicePack.page
         }
 
         var sizeText: String {
@@ -406,6 +406,13 @@ import UniformTypeIdentifiers
         } ?? 0
         return ByteCountFormatter.string(fromByteCount: bytes,
                                          countStyle: .file)
+    }
+
+    var downloadPage: URL? {
+        downloadName.flatMap { name in ModelCatalog.source(name) }
+            .flatMap { src in
+                URL(string: "https://huggingface.co/" + src.repo)
+            }
     }
 
     var compiling = false
