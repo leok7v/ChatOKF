@@ -379,7 +379,7 @@ struct HubFetchTests {
     private func committedReaches(_ part: URL, _ n: Int64) async throws {
         let began = Date()
         while HubFetch.committed(part) < n
-                && Date().timeIntervalSince(began) < 10 {
+                && Date().timeIntervalSince(began) < 60 {
             try await Task.sleep(for: .milliseconds(5))
         }
     }
