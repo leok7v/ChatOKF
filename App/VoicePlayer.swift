@@ -120,12 +120,6 @@ final class VoicePlayer: @unchecked Sendable {
         return result
     }
 
-    func forgetPack() {
-        lock.lock()
-        speech = nil
-        lock.unlock()
-    }
-
     var isActive: Bool {
         lock.lock()
         defer { lock.unlock() }

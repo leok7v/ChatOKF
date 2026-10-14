@@ -11,6 +11,7 @@ struct TranscriptActions: View {
     @Binding var renderMarkdown: Bool
     @Binding var exporting: Bool
     let onFind: () -> Void
+    let onShare: (SharedFile) -> Void
     let onDebug: (() -> Void)?
     @State private var exportFile: ExportFile?
     @State private var exportType: UTType = .pdf
@@ -34,19 +35,14 @@ struct TranscriptActions: View {
             }
             .help("Copy transcript")
             Menu {
-                ShareLink(item: TranscriptPDF(messages: messages, title: title),
-                          preview: SharePreview(title)) {
-                    Label("Share as PDF", systemImage: "square.and.arrow.up")
-                }
-                ShareLink(item: TranscriptHTML(messages: messages,
-                                               title: title),
-                          preview: SharePreview(title)) {
-                    Label("Share as HTML", systemImage: "square.and.arrow.up")
-                }
+                Button("Share as PDF") { beginShare(.pdf) }
+                Button("Share as HTML") { beginShare(.html) }
             } label: {
-                Image(systemName: "square.and.arrow.up")
+                Image(systemName: rendering ? "hourglass"
+                                            : "square.and.arrow.up")
             }
             .menuIndicator(.hidden)
+            .disabled(rendering)
             .help("Share as PDF or HTML")
             if !isOS {
                 Menu {
@@ -73,6 +69,16 @@ struct TranscriptActions: View {
     }
 
     private var exportName: String { ConversationExport.filename(title) }
+
+    private func beginShare(_ type: UTType) {
+        rendering = true
+        Task { @MainActor in
+            let url = try? await ConversationExport.file(
+                messages: messages, title: title, as: type)
+            rendering = false
+            if let url { onShare(SharedFile(url: url)) }
+        }
+    }
 
     private func beginSave(_ type: UTType) {
         rendering = true

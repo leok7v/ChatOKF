@@ -63,6 +63,7 @@ struct Sidebar: View {
     @State private var exportFile: ExportFile?
     @State private var showExporter = false
     @State private var exportName = "Conversation"
+    @State private var shared: SharedFile?
     @State private var built: (key: SectionKey, items: [SidebarSection])?
 
     private struct SectionKey: Equatable {
@@ -433,6 +434,7 @@ struct Sidebar: View {
         .listStyle(.plain)
         .scrollContentBackground(.hidden)
         .modifier(TightSections())
+        .shareSheet($shared)
     }
 
     private func listed(_ row: SidebarRow) -> some View {
@@ -549,9 +551,7 @@ struct Sidebar: View {
                 Button { onRename(convo) } label: {
                     Label("Rename\u{2026}", systemImage: "pencil")
                 }
-                ShareLink(item: ConversationPDF(id: convo.id,
-                                                title: convo.title),
-                          preview: SharePreview(convo.title)) {
+                Button { share(convo) } label: {
                     Label("Share PDF", systemImage: "square.and.arrow.up")
                 }
                 if !isOS {
@@ -611,6 +611,15 @@ struct Sidebar: View {
             out = source
         }
         return out
+    }
+
+    private func share(_ convo: ConversationStore.Convo) {
+        if convo.id == model.currentConversationId { model.commitCurrent() }
+        Task { @MainActor in
+            await ConversationStore.shared.settled()
+            let url = try? await ConversationExport.pdfFile(convo.id)
+            if let url { shared = SharedFile(url: url) }
+        }
     }
 
     private func save(_ convo: ConversationStore.Convo) {

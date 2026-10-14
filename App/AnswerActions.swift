@@ -12,6 +12,7 @@ struct AnswerActions: View {
     @State private var exportFile: ExportFile?
     @State private var exporting = false
     @State private var rendering = false
+    @State private var shared: SharedFile?
     @ScaledMetric(relativeTo: .body) private var slot: CGFloat = 26
 
     var body: some View {
@@ -20,10 +21,10 @@ struct AnswerActions: View {
                 glyph(copied ? "checkmark" : "doc.on.doc")
             }
             .help("Copy this answer")
-            ShareLink(item: AnswerPDF(text: text, title: title),
-                      preview: SharePreview(title)) {
-                glyph("square.and.arrow.up")
+            Button(action: share) {
+                glyph(rendering ? "hourglass" : "square.and.arrow.up")
             }
+            .disabled(rendering)
             .help("Share this answer as a PDF")
             if !isOS {
                 Button(action: save) {
@@ -37,10 +38,21 @@ struct AnswerActions: View {
         .appFont(.caption)
         .foregroundStyle(.secondary)
         .padding(.leading, 2)
+        .shareSheet($shared)
         .fileExporter(isPresented: $exporting, document: exportFile,
                       contentType: .pdf,
                       defaultFilename: ConversationExport.filename(title)) {
             _ in
+        }
+    }
+
+    private func share() {
+        rendering = true
+        Task { @MainActor in
+            let url = try? await ConversationExport.pdfFile(text: text,
+                                                            title: title)
+            rendering = false
+            if let url { shared = SharedFile(url: url) }
         }
     }
 

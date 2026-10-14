@@ -19,20 +19,6 @@ import TTS
             case .everything: return "Everything"
             }
         }
-
-        var detail: String {
-            switch self {
-            case .off:
-                return "Replies are shown, never spoken."
-            case .replies:
-                return "The answer is read aloud. Thinking stays silent, so "
-                    + "a long think is a pause."
-            case .everything:
-                return "The thinking is read as it happens, then the "
-                    + "answer, so a long think is something to listen to "
-                    + "rather than a silence."
-            }
-        }
     }
 
     var mode: Mode = VoiceSession.startMode() {
@@ -110,7 +96,6 @@ import TTS
 
     func agree() {
         VoiceTerms.accept()
-        VoicePack.declined = false
         asking = false
         if pack == .ready {
             if let wanted { mode = wanted }
@@ -134,16 +119,6 @@ import TTS
 
     func cancelFetch() {
         fetchTask?.cancel()
-    }
-
-    func deletePack() {
-        if pack == .ready {
-            mode = .off
-            player?.forgetPack()
-            VoicePack.erase()
-            VoicePack.declined = true
-            pack = .missing
-        }
     }
 
     private func fetch() {

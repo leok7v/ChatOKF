@@ -82,6 +82,7 @@ struct ContentView: View {
     @State private var actionsExpanded = false
     @State private var actionsHovering = false
     @State private var actionsExporting = false
+    @State private var sharedFile: SharedFile?
     @State private var shellWidth: CGFloat = 0
     @State private var warmed: (conversation: UUID?, ids: Set<UUID>) =
         (nil, [])
@@ -163,6 +164,7 @@ struct ContentView: View {
             chat
                 .overlay { hudOverlay }
                 .animation(.easeInOut(duration: 0.4), value: model.hud)
+                .shareSheet($sharedFile)
                 .navigationTitle("")
                 .disabled(sidebarOpen)
                 .modifier(ChatChrome(
@@ -245,7 +247,9 @@ struct ContentView: View {
                         title: model.transcriptTitle,
                         renderMarkdown: $model.renderMarkdown,
                         exporting: $actionsExporting,
-                        onFind: openFind, onDebug: debugAction)
+                        onFind: openFind,
+                        onShare: { file in sharedFile = file },
+                        onDebug: debugAction)
                 } else {
                     Button { actionsExpanded = true } label: {
                         Image(systemName: "chevron.left.2")
@@ -271,6 +275,7 @@ struct ContentView: View {
 
     private var actionsIdle: Bool {
         !isOS && actionsExpanded && !actionsHovering && !actionsExporting
+            && sharedFile == nil
     }
 
     private func collapseActionsAfterIdle() async {

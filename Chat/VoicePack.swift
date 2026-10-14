@@ -52,13 +52,6 @@ public enum VoicePack {
 
     public static var onDisk: Bool { path != nil }
 
-    static let declinedKey = "voicePackDeclined"
-
-    public static var declined: Bool {
-        get { UserDefaults.standard.bool(forKey: declinedKey) }
-        set { UserDefaults.standard.set(newValue, forKey: declinedKey) }
-    }
-
     public static var sizeText: String {
         ByteCountFormatter.string(fromByteCount: chosen.bytes,
                                   countStyle: .file)

@@ -32,7 +32,7 @@ struct SettingsView: View {
     }
 
     enum Category: String, CaseIterable, Identifiable {
-        case system = "System"
+        case system = "Assistant"
         case models = "Models"
         case voice = "Voice"
         case view = "View"
@@ -155,6 +155,9 @@ struct SettingsView: View {
             if model.settingsCategory != .system {
                 path = [model.settingsCategory]
             }
+        }
+        .onChange(of: path) { _, now in
+            model.settingsCategory = now.last ?? .system
         }
     }
 
@@ -399,15 +402,18 @@ struct SettingsView: View {
         .padding(.vertical, 11)
     }
 
+    @State private var voiceGroup = "F"
+
+    private var shownVoices: [SpeechVoice] {
+        Speech.voices.filter { v in v.id.hasPrefix(voiceGroup) }
+    }
+
     private var voicePane: some View {
         @Bindable var speech = model.speech
         return VStack(alignment: .leading, spacing: 18) {
             title("Voice")
-            note("Replies are read aloud on this device; nothing is sent "
-                + "anywhere. Tap a voice to hear it. Opening the microphone "
-                + "stops the reading, so you can interrupt at any time.")
             card {
-                wideRow("Speak", speech.mode.detail) {
+                wideRow("Speak") {
                     Picker("Speak", selection: Binding(
                         get: { speech.mode },
                         set: { wish in speech.choose(wish) }
@@ -430,46 +436,21 @@ struct SettingsView: View {
                     }
                 }
             }
-            card { voicePackRow }
             heading("Voices")
+            Picker("Voices", selection: $voiceGroup) {
+                Text("Female").tag("F")
+                Text("Male").tag("M")
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
             card {
-                ForEach(Speech.voices) { v in
-                    if v.id != Speech.voices.first?.id { hairline }
+                ForEach(shownVoices) { v in
+                    if v.id != shownVoices.first?.id { hairline }
                     voiceRow(v)
                 }
             }
         }
-    }
-
-    private var voicePackRow: some View {
-        row("Voice model",
-            "Supertonic 3 by Supertone, \(VoicePack.sizeText). It arrives "
-            + "with the first model, stays on this device, and speaks only "
-            + "after you agree to its use restrictions.") {
-            switch model.speech.pack {
-            case .ready:
-                Button { model.speech.deletePack() } label: {
-                    Image(systemName: "trash").frame(width: 22, height: 22)
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(.red)
-                .help("Delete from this device")
-            case .fetching:
-                HStack(spacing: 10) {
-                    ProgressView(value: model.speech.fetchFraction)
-                        .frame(width: 90)
-                    Button("Cancel") { model.speech.cancelFetch() }
-                }
-            case .missing:
-                Button { model.speech.requestPack() } label: {
-                    Image(systemName: "arrow.down.circle")
-                        .frame(width: 22, height: 22)
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(Color.accentColor)
-                .help("Download the voice")
-            }
-        }
+        .onAppear { voiceGroup = String(pickedVoice.id.prefix(1)) }
     }
 
     private var pickedVoice: SpeechVoice {
@@ -516,36 +497,29 @@ struct SettingsView: View {
     private var aboutYouCard: some View {
         @Bindable var you = AboutYou.shared
         return card {
-            aboutRow("Name", "your name", $you.name)
+            aboutRow("Name", "What the assistant calls you", $you.name)
         }
     }
 
     private var systemPane: some View {
         VStack(alignment: .leading, spacing: 18) {
-            title("System")
-            if !Models.isSimple(model.modelName) {
-                heading("Name")
-                note("What the assistant should call you. It is optional "
-                    + "and stays on this device.")
-                aboutYouCard
-            }
+            title("Assistant")
+            if !Models.isSimple(model.modelName) { aboutYouCard }
             heading("System Prompt")
-            note("Instructions the assistant reads before every "
-                + "conversation, for tone and behaviour. Applies from the "
-                + "next new chat.")
             TextEditor(text: $model.systemPrompt)
                 .appFont(.body)
-                .frame(minHeight: 160)
+                .frame(minHeight: 96)
                 .padding(6)
                 .background(cardFill, in: RoundedRectangle(cornerRadius: 10))
                 .overlay {
                     RoundedRectangle(cornerRadius: 10)
                         .stroke(.separator.opacity(0.6), lineWidth: 0.5)
                 }
-            Button("Reset to default") {
-                model.systemPrompt = ChatModel.defaultSystemPrompt
+            if model.systemPrompt != ChatModel.defaultSystemPrompt {
+                Button("Reset to default") {
+                    model.systemPrompt = ChatModel.defaultSystemPrompt
+                }
             }
-            .disabled(model.systemPrompt == ChatModel.defaultSystemPrompt)
         }
     }
 
@@ -561,10 +535,6 @@ struct SettingsView: View {
     private var modelsPane: some View {
         VStack(alignment: .leading, spacing: 18) {
             title("Models")
-            note("Each model downloads once and stays on this device. "
-                + "Deleting one frees the space, and it can be downloaded "
-                + "again. The model in use cannot be deleted. To delete it, "
-                + "switch to another model first.")
             card {
                 ForEach(listed, id: \.self) { name in
                     if name != listed.first { hairline }
@@ -572,6 +542,9 @@ struct SettingsView: View {
                 }
             }
             .id(model.diskRevision)
+            if model.downloadedModels > 1 {
+                note("Switch to another model to delete the one in use.")
+            }
             if unlocked {
                 note("Every model this Mac can run, shown while Option is "
                     + "held with Debug on. Normally only the ones its memory "
@@ -597,49 +570,52 @@ struct SettingsView: View {
         let downloaded = model.isDownloaded(name)
         let active = name == model.modelName
         let bytes = ModelCatalog.source(name)?.bytes ?? 0
-        return HStack(spacing: 8) {
-            Text(Models.display(name, among: listed))
-            if active {
-                Image(systemName: "checkmark.circle.fill")
-                    .appFont(.caption)
-                    .foregroundStyle(Color.accentColor)
+        let idle = !model.busy && !model.downloading && !model.compiling
+        return Button {
+            if downloaded {
+                model.switchModel(name)
+            } else {
+                model.requestDownload(name)
             }
-            Spacer()
-            Text(ByteCountFormatter.string(fromByteCount: bytes,
-                                           countStyle: .file))
-                .appFont(.caption)
-                .foregroundStyle(.secondary)
-            rowButton(name, downloaded: downloaded, active: active)
+        } label: {
+            HStack(spacing: 8) {
+                Text(Models.display(name, among: listed))
+                Spacer()
+                Text(ByteCountFormatter.string(fromByteCount: bytes,
+                                               countStyle: .file))
+                    .appFont(.caption)
+                    .foregroundStyle(.secondary)
+                rowMark(name, downloaded: downloaded, active: active,
+                        idle: idle)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 9)
+            .contentShape(Rectangle())
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 9)
+        .buttonStyle(.plain)
+        .disabled(!idle)
+        .help(active ? "" : downloaded ? "Switch to this model"
+                                       : "Download and switch to this model")
     }
 
-    private func rowButton(_ name: String, downloaded: Bool,
-                           active: Bool) -> some View {
-        let idle = !model.busy && !model.downloading
-        return Group {
-            if downloaded {
-                Button { deleteName = name } label: {
-                    Image(systemName: "trash")
-                        .frame(width: 22, height: 22)
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(idle && !active
-                                 ? Color.red : Color.secondary.opacity(0.4))
-                .disabled(active || !idle)
-                .help(active ? "Switch to another model first"
-                             : "Delete from this device")
-            } else {
-                Button { model.requestDownload(name) } label: {
-                    Image(systemName: "arrow.down.circle")
-                        .frame(width: 22, height: 22)
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(idle ? Color.accentColor : Color.secondary)
-                .disabled(!idle)
-                .help("Download and switch to this model")
+    @ViewBuilder
+    private func rowMark(_ name: String, downloaded: Bool, active: Bool,
+                         idle: Bool) -> some View {
+        if active {
+            Image(systemName: model.compiling ? "hourglass" : "checkmark")
+                .foregroundStyle(Color.accentColor)
+                .frame(width: 22, height: 22)
+        } else if downloaded {
+            Button { deleteName = name } label: {
+                Image(systemName: "trash").frame(width: 22, height: 22)
             }
+            .buttonStyle(.plain)
+            .foregroundStyle(idle ? Color.red : Color.secondary.opacity(0.4))
+            .help("Delete from this device")
+        } else {
+            Image(systemName: "arrow.down.circle")
+                .foregroundStyle(idle ? Color.accentColor : Color.secondary)
+                .frame(width: 22, height: 22)
         }
     }
 

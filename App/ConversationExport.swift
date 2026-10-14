@@ -1,5 +1,4 @@
 import Chat
-import CoreTransferable
 import Foundation
 import LLM
 import MD
@@ -229,74 +228,6 @@ enum ExportFailure: Error { case render }
                     html: Markdown.html(document, title: title))
         }.value
         setClipboard(rendered.plain, html: rendered.html)
-    }
-
-}
-
-struct AnswerPDF: Transferable {
-
-    let text: String
-    let title: String
-
-    static var transferRepresentation: some TransferRepresentation {
-        FileRepresentation(exportedContentType: .pdf) { item in
-            SentTransferredFile(try await ConversationExport
-                .pdfFile(text: item.text, title: item.title))
-        }
-        .suggestedFileName { item in
-            ConversationExport.filename(item.title) + ".pdf"
-        }
-    }
-
-}
-
-struct ConversationPDF: Transferable {
-
-    let id: UUID
-    let title: String
-
-    static var transferRepresentation: some TransferRepresentation {
-        FileRepresentation(exportedContentType: .pdf) { item in
-            SentTransferredFile(try await ConversationExport
-                .pdfFile(item.id))
-        }
-        .suggestedFileName { item in
-            ConversationExport.filename(item.title) + ".pdf"
-        }
-    }
-
-}
-
-struct TranscriptPDF: Transferable {
-
-    let messages: [Message]
-    let title: String
-
-    static var transferRepresentation: some TransferRepresentation {
-        FileRepresentation(exportedContentType: .pdf) { item in
-            SentTransferredFile(try await ConversationExport.file(
-                messages: item.messages, title: item.title, as: .pdf))
-        }
-        .suggestedFileName { item in
-            ConversationExport.filename(item.title) + ".pdf"
-        }
-    }
-
-}
-
-struct TranscriptHTML: Transferable {
-
-    let messages: [Message]
-    let title: String
-
-    static var transferRepresentation: some TransferRepresentation {
-        FileRepresentation(exportedContentType: .html) { item in
-            SentTransferredFile(try await ConversationExport.file(
-                messages: item.messages, title: item.title, as: .html))
-        }
-        .suggestedFileName { item in
-            ConversationExport.filename(item.title) + ".html"
-        }
     }
 
 }

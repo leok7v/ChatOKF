@@ -205,8 +205,6 @@ import UniformTypeIdentifiers
             self == .encoder ? EncoderPack.onDisk : VoicePack.onDisk
         }
 
-        var wanted: Bool { self == .encoder || !VoicePack.declined }
-
         var page: URL {
             self == .encoder ? EncoderPack.page : VoicePack.page
         }
@@ -224,7 +222,7 @@ import UniformTypeIdentifiers
     }
 
     var sidecarsMissing: [Sidecar] {
-        Sidecar.allCases.filter { pack in !pack.onDisk && pack.wanted }
+        Sidecar.allCases.filter { pack in !pack.onDisk }
     }
 
     var downloadStage = ""
