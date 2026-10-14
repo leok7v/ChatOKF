@@ -57,20 +57,24 @@ struct VoiceTermsView: View {
         .safeAreaInset(edge: .bottom, spacing: 0) { answers }
     }
 
+    private var preface: String {
+        let presence = landed
+            ? "It is already on this device, \(size), and speaks "
+            : "It downloads once, \(size), and then speaks "
+        return "Replies are read aloud by Supertonic 3, a speech model by "
+            + "Supertone Inc. " + presence + "with no network. Supertone "
+            + "provides it under the BigScience Open RAIL-M License, which "
+            + "restricts what the voice may be used for. By continuing you "
+            + "agree to that license and to the restrictions below."
+    }
+
     private var terms: some View {
         VStack(spacing: 14) {
             Image(systemName: "waveform")
                 .appFont(.largeTitle)
                 .foregroundStyle(.secondary)
             Text("The Reading Voice").appFont(.title2).bold()
-            Text("Replies are read aloud by Supertonic 3, a speech model by "
-               + "Supertone Inc. "
-               + (landed ? "It is already on this device, \(size), and speaks "
-                  : "It downloads once, \(size), and then speaks ")
-               + "with no network. Supertone provides it under "
-               + "the BigScience Open RAIL-M License, which restricts what "
-               + "the voice may be used for. By continuing you agree to that "
-               + "license and to the restrictions below.")
+            Text(preface)
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

@@ -223,12 +223,11 @@ final class VoicePlayer: @unchecked Sendable {
             let ratio = fmt.sampleRate / buffer.format.sampleRate
             let frames = AVAudioFrameCount(Double(buffer.frameLength) * ratio)
             out = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: frames + 32)
-            var fed = false
+            let feed = Feed(buffer)
             if let converter, let out {
                 converter.convert(to: out, error: nil) { _, status in
-                    status.pointee = fed ? .noDataNow : .haveData
-                    let next: AVAudioBuffer? = fed ? nil : buffer
-                    fed = true
+                    let next = feed.take()
+                    status.pointee = next == nil ? .noDataNow : .haveData
                     return next
                 }
             }
@@ -461,6 +460,20 @@ final class VoicePlayer: @unchecked Sendable {
         let audible = bufferedTags.first
         lock.unlock()
         onSpeaking?(audible)
+    }
+
+}
+
+private final class Feed: @unchecked Sendable {
+
+    private var buffer: AVAudioPCMBuffer?
+
+    init(_ buffer: AVAudioPCMBuffer) { self.buffer = buffer }
+
+    func take() -> AVAudioPCMBuffer? {
+        let out = buffer
+        buffer = nil
+        return out
     }
 
 }
