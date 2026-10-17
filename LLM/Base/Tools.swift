@@ -1001,7 +1001,10 @@ public enum Tools {
             case .url(let href):
                 result = await fetchURL(href, lim, offset, memo, objective)
             case .file, .unknown:
-                result = "error: '\(url)' is not a recognizable URL"
+                result = "error: '\(url)' is not a web address. A picture, "
+                    + "video or sound clip the user attached is already in "
+                    + "this conversation, encoded for you: describe it from "
+                    + "what you see and hear, and do not ask for a link."
             }
         }
         return result

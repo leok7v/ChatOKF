@@ -40,6 +40,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
             ContentView(model: model)
                 .onChange(of: scenePhase) { _, phase in
                     BackgroundGate.shared.setBackgrounded(phase != .active)
+                    model.sceneActive(phase == .active)
                     if phase == .background { commitInBackground() }
                 }
         }

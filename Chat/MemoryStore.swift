@@ -70,6 +70,7 @@ actor MemoryStore {
             try? FileManager.default.createDirectory(
                 at: root, withIntermediateDirectories: true)
             Memories.exclude(root, excludedFromBackup)
+            sweepSidecars(keeping: Store.sidecarName(for: embedder.name))
             let t0 = Date()
             let loaded = Store(root: root, embedder: embedder)
             loaded.load()
@@ -79,6 +80,16 @@ actor MemoryStore {
                          seconds: Date().timeIntervalSince(t0))
         }
         return out
+    }
+
+    private func sweepSidecars(keeping name: String) {
+        let fm = FileManager.default
+        let found = (try? fm.contentsOfDirectory(atPath: root.path)) ?? []
+        for file in found
+        where file.hasPrefix(Store.sidecarPrefix) && file != name {
+            try? fm.removeItem(at: root.appendingPathComponent(file))
+            Diag.shared.report(.load, "[memories] removed " + file)
+        }
     }
 
     func erase() {

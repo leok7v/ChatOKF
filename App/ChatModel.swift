@@ -172,13 +172,29 @@ import UniformTypeIdentifiers
     }
     var modelName: String = ChatModel.startModel()
     var downloadName: String? = nil
-    var downloading = false
+    var downloading = false {
+        didSet { KeepAwake.hold(downloading) }
+    }
     var downloadDone: Int64 = 0
     var downloadTotal: Int64 = 0
     @ObservationIgnored private var downloadBase: Int64 = -1
     var downloadFailure: String? = nil
     @ObservationIgnored private var downloadFallback: String? = nil
     @ObservationIgnored private var fetchTask: Task<Void, Never>?
+    @ObservationIgnored private var downloadBegan = Date()
+    @ObservationIgnored private var parkedAt: Date?
+    @ObservationIgnored private var parkedSeconds = 0.0
+
+    func sceneActive(_ active: Bool) {
+        if downloading, !active, parkedAt == nil {
+            parkedAt = Date()
+        } else if downloading, active, let since = parkedAt {
+            parkedSeconds += Date().timeIntervalSince(since)
+            parkedAt = nil
+            phaseStart = Date()
+            downloadBase = downloadDone
+        }
+    }
 
     var downloadFailed: Bool {
         get { downloadFailure != nil }
@@ -1010,6 +1026,10 @@ import UniformTypeIdentifiers
                 newChat()
             } else if line == "think" {
                 toggleThinking()
+            } else if line == "video" {
+                runVideoSample()
+            } else if line == "picture" {
+                runPictureSample()
             } else if line == "reopen" {
                 if let id = ConversationStore.shared.list.first?.id {
                     openConversation(id)
@@ -1172,6 +1192,9 @@ import UniformTypeIdentifiers
             plannedBytes = modelBytes + extra
             downloadStage = Models.display(name)
             phaseStart = Date()
+            downloadBegan = phaseStart
+            parkedAt = nil
+            parkedSeconds = 0
             status = "downloading \(name)…"
             let pace = Paced(milliseconds: 100)
             fetchTask = Task { @MainActor in
@@ -1188,7 +1211,8 @@ import UniformTypeIdentifiers
                 if failure == nil { diskRevision += 1 }
                 if failure == nil, !Task.isCancelled {
                     Self.saveSeconds("download", name,
-                        Date().timeIntervalSince(self.phaseStart))
+                        Date().timeIntervalSince(self.downloadBegan)
+                            - self.parkedSeconds)
                     if let path = ModelCatalog.ggufPath(
                         name, in: Bundle.modelStore()) {
                         await self.loadReady(name: name, path: path)

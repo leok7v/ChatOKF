@@ -533,6 +533,7 @@ public enum TurnEvent: Sendable {
 
     private var canAttachAudio: Bool { modalities.audio }
     private var canAttachImages: Bool { modalities.images }
+    private var canAttachVideo: Bool { modalities.video }
 
     private var systemStable: String {
         let loc = Locale.current
@@ -568,6 +569,12 @@ public enum TurnEvent: Sendable {
             s += "\nThe user may attach images. Each is encoded by your "
                 + "vision tower and fully visible to you: describe what you "
                 + "actually see, and never claim you cannot view images."
+        }
+        if canAttachVideo {
+            s += "\nThe user may attach a video. Its frames, each stamped "
+                + "mm:ss, and its sound reach you already encoded, so "
+                + "describe what you see and hear in it; never ask for a "
+                + "link or a file."
         }
         if memories.active {
             s += "\nThe user keeps their own notes. The ones that fit a "

@@ -397,11 +397,17 @@ public final class Store {
     private var anyPostings: [String: [Int]] = [:]
     private var headPostings: [String: Set<Int>] = [:]
 
+    public static let sidecarPrefix = ".okf-vectors-"
+
+    public static func sidecarName(for embedder: String) -> String {
+        Store.sidecarPrefix + embedder + ".bin"
+    }
+
     public init(root: URL, embedder: Embedder) {
         self.root = root
         self.embedder = embedder
         sidecar = root.appendingPathComponent(
-            ".okf-vectors-" + embedder.name + ".bin")
+            Store.sidecarName(for: embedder.name))
     }
 
     public var owner: Concept? {
