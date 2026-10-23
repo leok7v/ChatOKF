@@ -11,6 +11,7 @@ struct ThinkingMarquee: View {
     @State private var viewport: CGFloat = 0
     @State private var measured = 0
     @State private var scrolling = false
+    @State private var landed = false
     @State private var origin: CGFloat?
     private static let charsPerSecond: CGFloat = 14
     private static let gap = "    "
@@ -58,10 +59,20 @@ struct ThinkingMarquee: View {
                 startPoint: .leading, endPoint: .trailing))
             .padding(.trailing, 8)
             .allowsHitTesting(false)
-            .onAppear { take(Sentences.split(text)) }
             .onChange(of: text) { _, now in take(Sentences.split(now)) }
-            .task(id: measured) { if !scrolling { run() } }
-            .task(id: viewport) { if !scrolling { run() } }
+            .task(id: measured) {
+                if !landed && width > 0 && viewport > 0 {
+                    landed = true
+                    travel = max(0, width - viewport)
+                }
+                if !scrolling { run() }
+            }
+            .task(id: viewport) {
+                if viewport > 0 && stream.isEmpty {
+                    take(Sentences.split(text))
+                }
+                if !scrolling { run() }
+            }
     }
 
     private func take(_ parts: [String]) {
@@ -91,7 +102,7 @@ struct ThinkingMarquee: View {
     private func run() {
         let end = max(0, width - viewport)
         let speed = Self.charsPerSecond * pxPerChar
-        if viewport > 0 && end - travel >= viewport {
+        if viewport > 0 && end - travel >= viewport / 4 {
             scrolling = true
             withAnimation(.linear(duration: (end - travel) / speed),
                           completionCriteria: .logicallyComplete) {
