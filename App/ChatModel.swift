@@ -158,7 +158,6 @@ import UniformTypeIdentifiers
     var speechLevel = 0.0
     var prefilling = false
     var consulting = false
-    var thinkStatus = "Thinking"
     var thinkLabel = "Thinking"
     var footStatus = "Thinking"
     var eulaAccepted = UserDefaults.standard.bool(forKey: ChatModel.eulaKey)
@@ -597,9 +596,11 @@ import UniformTypeIdentifiers
     }
 
     var waiting: Bool {
-        recalling || prefilling
+        recalling || prefilling || reasoningLive
             || (genTask == nil && session.metaTaskRunning)
     }
+
+    private(set) var reasoningLive = false
 
     var working: Bool { waiting || replaying || converting > 0 }
 
@@ -2304,6 +2305,7 @@ import UniformTypeIdentifiers
             self.releaseWhenSettled()
             if self.genSerial == serial { self.genTask = nil }
             self.prefilling = false
+            self.reasoningLive = false
             self.prefillProgress = nil
             self.consulting = false
             self.watching = false
@@ -2325,6 +2327,7 @@ import UniformTypeIdentifiers
             benchPiece()
             if prefilling { prefilling = false }
             if consulting { consulting = false }
+            reasoningLive = true
             speech.reasoningArrived(piece)
             if messages.indices.contains(idx) {
                 liveReason += piece
@@ -2335,6 +2338,7 @@ import UniformTypeIdentifiers
             benchPiece()
             if prefilling { prefilling = false }
             if consulting { consulting = false }
+            reasoningLive = false
             speech.answerArrived(piece)
             if messages.indices.contains(idx) {
                 liveAnswer += piece
@@ -2344,6 +2348,7 @@ import UniformTypeIdentifiers
         case .toolStarting:
             consulting = true
             prefilling = true
+            reasoningLive = false
         case .toolRound(let round):
             applyToolRound(round, at: idx)
         case .looking(let peek):
@@ -2722,10 +2727,9 @@ import UniformTypeIdentifiers
     private func phraseCycler() -> Task<Void, Never> {
         Task { @MainActor in
             while (busy || listening) && !Task.isCancelled {
-                let p = Whimsical.trio(whimsicalStage)
-                thinkStatus = p.first
-                thinkLabel = p.second
-                footStatus = p.third
+                let p = Whimsical.pair(whimsicalStage)
+                thinkLabel = p.first
+                footStatus = p.second
                 try? await Task.sleep(for: .seconds(listening ? 2 : 5))
             }
         }

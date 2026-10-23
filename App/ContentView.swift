@@ -1231,7 +1231,8 @@ struct ContentView: View {
                                   markdown: model.renderMarkdown,
                                   active: isThinking(m),
                                   label: isThinking(m)
-                                         ? model.thinkLabel : "Thoughts",
+                                         ? model.thinkLabel
+                                         : ReasoningView.title,
                                   maxHeight: chatHeight / 3,
                                   first: m.id == firstReasoning)
                 }
@@ -1239,8 +1240,6 @@ struct ContentView: View {
                     ToolCallStrip(messageId: m.id, rounds: m.toolRounds,
                                   peek: peek, live: isLive(m))
                 }
-                // Answer text on screen outranks the status line: a tool
-                // round raises `prefilling` again and would blink it away.
                 if let answer = answerText(m) {
                     answerBubble(m, answer, cold: cold)
                     if m.fromUser {
@@ -1248,8 +1247,6 @@ struct ContentView: View {
                     } else if !isLive(m) {
                         AnswerActions(text: answer, title: title)
                     }
-                } else if !m.fromUser, isPrefilling(m) {
-                    prefillWhimsical
                 } else if m.loopStopped {
                     loopStopNote
                 } else if isAnswerless(m) {
@@ -1348,15 +1345,6 @@ struct ContentView: View {
         .clipShape(RoundedRectangle(cornerRadius: 12))
     }
 
-    private var prefillWhimsical: some View {
-        Text(model.thinkStatus)
-            .appFont(.caption)
-            .foregroundStyle(.secondary)
-            .contentTransition(.opacity)
-            .animation(.easeInOut(duration: 0.45), value: model.thinkStatus)
-            .modifier(Whimsy())
-    }
-
     private func answerText(_ m: Message) -> String? {
         m.text.isEmpty ? nil : m.text
     }
@@ -1386,12 +1374,8 @@ struct ContentView: View {
             .foregroundStyle(.secondary)
     }
 
-    private func isPrefilling(_ m: Message) -> Bool {
-        isLive(m) && model.prefilling
-    }
-
     private func isThinking(_ m: Message) -> Bool {
-        isLive(m) && m.text.isEmpty
+        isLive(m) && (m.text.isEmpty || model.reasoningLive)
     }
 
     private var firstReasoningId: UUID? {
@@ -1523,6 +1507,8 @@ private struct SampleCardStyle: ButtonStyle {
 
 private struct ReasoningView: View {
 
+    static let title = "Thoughts"
+
     let text: String
     let doc: Markdown.Document
     let style: MarkdownStyle
@@ -1575,7 +1561,7 @@ private struct ReasoningView: View {
                 if marqueeing {
                     ThinkingMarquee(text: text)
                 } else {
-                    Text(label)
+                    Text(expanded ? ReasoningView.title : label)
                         .appFont(.caption)
                         .foregroundStyle(.secondary)
                     Spacer(minLength: 0)

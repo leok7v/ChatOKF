@@ -1886,8 +1886,9 @@ public actor ChatSession {
                     tg: ChatSession.steadyRate(steps, steady),
                     readFraction: readFraction, readStop: readStop)
             }
-            let softOver = softReasoningCap > 0 && think >= softReasoningCap &&
-                bytes.last == 0x0A
+            let thought = tally.think + think
+            let softOver = softReasoningCap > 0 && thought >= softReasoningCap
+                && bytes.last == 0x0A
             let looping = Continuation.isLooping(ids,
                 tokenBytes: { [backend] id in backend.tokenBytes(id) })
             let loopRescue = looping && inThinkRegion && closeAt == nil
@@ -1896,7 +1897,7 @@ public actor ChatSession {
             // </think> must not land inside its markup.
             let overflow = inThink && toolAt == nil && (forceEndThink ||
                 suppressReasoning || softOver || loopRescue
-                || (maxReasoning > 0 && think >= maxReasoning))
+                || (maxReasoning > 0 && thought >= maxReasoning))
             if toolsActive && pending == nil, let open = toolAt {
                 if toolCloseSearch < open + openTag.count {
                     toolCloseSearch = open + openTag.count
