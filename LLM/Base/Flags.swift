@@ -154,6 +154,11 @@ public enum Flags {
             "the folder under Application Support the notes live in, so a "
             + "scripted run leaves the user's own notes alone",
             scope: .diagnostic, defaultValue: "memories.noindex"),
+        Knob(name: "encoder-folder", takesValue: true, help:
+            "the folder the memory encoder lives in, in place of encoder "
+            + "under Application Support; a tool outside the app's "
+            + "container names the container's",
+            scope: .diagnostic, defaultValue: ""),
         Knob(name: "read-file", takesValue: true, help:
             "a file in the app's Caches folder the app attaches under UL "
             + "and sends at launch; repeatable, each in its own chat",

@@ -123,8 +123,7 @@ import LLM
         }
     }
 
-    nonisolated public static let trashRetention: TimeInterval =
-        30 * 24 * 3600
+    nonisolated public static let trashRetention = Memories.retention
 
     public static let defaultRoot: URL = FileManager.default
         .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]

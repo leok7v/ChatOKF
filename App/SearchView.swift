@@ -1,5 +1,6 @@
 import Chat
 import Foundation
+import LLM
 
 enum ConversationSearch {
 

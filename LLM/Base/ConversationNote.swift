@@ -1,5 +1,4 @@
 import Foundation
-import LLM
 
 public struct ConversationNote: Sendable {
 
@@ -42,7 +41,7 @@ public struct ConversationNote: Sendable {
         return Array(kept.suffix(promptCount))
     }
 
-    var instruction: String {
+    public var instruction: String {
         "In one plain sentence, state the answer your last reply gave to "
             + "the user's last message. Start with the fact itself, no "
             + "preamble, no question. Reply with the sentence only."

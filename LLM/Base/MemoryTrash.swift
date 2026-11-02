@@ -1,5 +1,4 @@
 import Foundation
-import LLM
 
 public struct MemoryRow: Identifiable, Sendable {
 
@@ -46,7 +45,7 @@ struct TrashedMemory: Codable, Sendable {
 extension Memories {
 
     nonisolated public static let trashFolder = ".trash"
-    nonisolated public static let retention = ConversationStore.trashRetention
+    nonisolated public static let retention: TimeInterval = 30 * 24 * 3600
 
     public func notes(from conversation: UUID) -> [MemoryRow] {
         list.filter { row in row.source == conversation }

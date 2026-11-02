@@ -231,7 +231,8 @@ import UniformTypeIdentifiers
         func fetch(_ onProgress: @escaping @Sendable (HubFetch.Status) -> Void)
             async -> String? {
             self == .encoder
-                ? await EncoderPack.fetch(onProgress: onProgress)
+                ? await EncoderPack.fetch(background: isOS,
+                                          onProgress: onProgress)
                 : await VoicePack.fetch(onProgress: onProgress)
         }
     }

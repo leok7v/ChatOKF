@@ -1,5 +1,4 @@
 import Foundation
-import LLM
 
 public struct MemoryToolRunner: ToolRunner {
     let inner: SafeToolRunner
@@ -116,7 +115,7 @@ public enum MemoryTools {
                 + "\"id\":{\"type\":\"string\"}},\"required\":[\"id\"]}"),
     ]
 
-    static let glyphs: [String: (label: String, symbol: String)] = [
+    public static let glyphs: [String: (label: String, symbol: String)] = [
         "memory_search": ("Memory Search", "brain"),
         "memory_read": ("Memory Read", "text.book.closed"),
         "memory_create": ("Remember", "square.and.pencil"),

@@ -1,5 +1,4 @@
 import Foundation
-import LLM
 import Observation
 
 @MainActor @Observable public final class Memories {
@@ -228,9 +227,9 @@ import Observation
         + "chats (in these notes \"the user\" is me, the person "
         + "writing to you); use what bears on my message:\n"
 
-    static func recall(of notes: [Concept], standout: Float = 0,
-                       searched: Double = 0, pp: Double,
-                       block given: String = "") -> Recall {
+    public static func recall(of notes: [Concept], standout: Float = 0,
+                              searched: Double = 0, pp: Double,
+                              block given: String = "") -> Recall {
         var block = given
         if block.isEmpty {
             block = Memories.heading
@@ -250,11 +249,11 @@ import Observation
             })
     }
 
-    static let aboutFrame = "Read the message below. Is the person asking "
+    public static let aboutFrame = "Read the message below. Is the person asking "
         + "what you remember or know about them, or about your earlier "
         + "conversations with them? Answer with one word, yes or no."
         + "\n\nMessage:\n{item}"
-    static let helpsFrame = "Below are a note saved from an earlier chat "
+    public static let helpsFrame = "Below are a note saved from an earlier chat "
         + "with a person, and a new message from that person. Would knowing "
         + "the note help you give a better answer to the message? Answer "
         + "with one word, yes or no.\n\n{item}"
@@ -406,7 +405,8 @@ import Observation
         return out
     }
 
-    static func parseDrafts(_ raw: String, name: String = "") -> [Draft] {
+    public static func parseDrafts(_ raw: String,
+                                   name: String = "") -> [Draft] {
         var out: [Draft] = []
         for line in raw.components(separatedBy: "\n")
         where out.count < Memories.draftLimit {
@@ -439,7 +439,7 @@ import Observation
         "nous",
     ]
 
-    nonisolated static func speaksOfSelf(_ said: String) -> Bool {
+    nonisolated public static func speaksOfSelf(_ said: String) -> Bool {
         let lower = said.lowercased()
         let tokens = lower.split(whereSeparator: { c in !c.isLetter })
         let foreign = lower.unicodeScalars.contains { s in

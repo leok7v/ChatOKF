@@ -28,6 +28,7 @@ args.consume("--seed", hasValue: true)
 args.consume("--verbosity", hasValue: true)
 args.consume("--diagnostics", hasValue: true)
 args.consume("--reasoning-note", hasValue: true)
+args.consume("--encoder-folder", hasValue: true)
 let seedVal = Flags.uint64("seed") ?? 0
 // Biases the curated branch-opening tokens down while thinking (arxiv
 // 2606.00206).
@@ -40,8 +41,21 @@ let softReasoning = args.int("--soft-reasoning") ?? 0
 // system-block template (gemma-4) takes mid-conversation.
 let suppressReasoning = args.flag("--no-reason")
 let systemPrompt = args.text("--system") ?? "You are a helpful assistant."
-let toolRunner: (any ToolRunner)? =
-    SafeToolRunner(network: args.flag("--tools"))
+let toolRunner: (any ToolRunner)? = args.value("--notes").map { root in
+    NotesToolRunner(root: root,
+                    encoder: args.value("--notes-encoder")
+                        ?? NotesToolRunner.defaultEncoder,
+                    ingest: args.value("--notes-ingest"),
+                    network: args.flag("--tools"),
+                    names: args.value("--notes-names") ?? "memory")
+} ?? SafeToolRunner(network: args.flag("--tools"))
+let recallDrill: RecallDrill? =
+    args.value("--recall").map { root in RecallDrill(root: root) }
+if let words = args.value("--notes-find"),
+   let runner = toolRunner as? NotesToolRunner {
+    NotesToolRunner.debugFind(runner, words)
+    exit(0)
+}
 // One JSON line per turn; the captured stderr is the full log, this the
 // companion.
 let trVal = args.value("--trace")

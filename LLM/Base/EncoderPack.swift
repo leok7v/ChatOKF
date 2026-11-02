@@ -1,5 +1,4 @@
 import Foundation
-import LLM
 
 public enum EncoderPack {
 
@@ -16,7 +15,10 @@ public enum EncoderPack {
         let support = (try? fm.url(for: .applicationSupportDirectory,
                                    in: .userDomainMask, appropriateFor: nil,
                                    create: true)) ?? fm.temporaryDirectory
-        return support.appendingPathComponent("encoder", isDirectory: true)
+        let named = Flags.value("encoder-folder") ?? ""
+        return named.isEmpty
+            ? support.appendingPathComponent("encoder", isDirectory: true)
+            : URL(fileURLWithPath: named, isDirectory: true)
     }()
 
     private static var home: URL {
@@ -41,6 +43,7 @@ public enum EncoderPack {
     }
 
     public static func fetch(
+        background: Bool,
         onProgress: @escaping @Sendable (HubFetch.Status) -> Void
     ) async -> String? {
         var failure: String? = "download failed, check your connection"
@@ -48,7 +51,7 @@ public enum EncoderPack {
             _ = try await HubFetch.fetch(
                 repo: repo, into: home, revision: revision,
                 files: [file], excludeFromBackup: true,
-                background: isOS, report: onProgress)
+                background: background, report: onProgress)
             failure = nil
         } catch HubError.digest {
             failure = "download failed verification, try again"

@@ -1,4 +1,5 @@
 import Chat
+import LLM
 import SwiftUI
 
 struct FocusRequest: Equatable {

@@ -1,5 +1,4 @@
 import Foundation
-import LLM
 
 public final class Supersedable: @unchecked Sendable {
     private let lock = NSLock()
