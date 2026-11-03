@@ -395,13 +395,12 @@ public enum TurnEvent: Sendable {
                 excluding: recalledIds.union(own ?? []))
             if let found {
                 Diag.shared.report(.turn, String(
-                    format: "[recall] %@ %d note(s), standout %.1f, ~%d tok "
+                    format: "[recall] %d note(s), standout %.1f, ~%d tok "
                         + "%.1fs of %.0fs, searched %.2fs: %@",
-                    found.silent ? "silent" : "offered", found.ids.count,
-                    found.standout, found.tokens, found.seconds,
-                    Memories.budgetSeconds, found.searchSeconds,
-                    found.ids.joined(separator: " ")))
-                if found.silent { recalledIds.formUnion(found.ids) }
+                    found.ids.count, found.standout, found.tokens,
+                    found.seconds, Memories.budgetSeconds,
+                    found.searchSeconds, found.ids.joined(separator: " ")))
+                recalledIds.formUnion(found.ids)
                 out = found
             } else if Models.judges(modelName), let session {
                 out = await judged(question, session,
@@ -465,7 +464,6 @@ public enum TurnEvent: Sendable {
             }
             if !kept.isEmpty {
                 out = Memories.recall(of: kept, pp: measuredPP)
-                out?.judged = true
             }
             Diag.shared.report(.turn, String(
                 format: "[judge] %d of %d near notes kept in %.1fs",
@@ -473,12 +471,6 @@ public enum TurnEvent: Sendable {
         }
         if let out { recalledIds.formUnion(out.ids) }
         return out
-    }
-
-    public func noteToUse(_ id: String) -> Memories.Note? {
-        let note = memories.note(id)
-        if note != nil { recalledIds.insert(id) }
-        return note
     }
 
     nonisolated public static func rate(_ v: Double) -> String {
@@ -546,6 +538,8 @@ public enum TurnEvent: Sendable {
             + "\(TimeZone.current.identifier), \(units) units. Give "
             + "temperatures and distances in these units unless asked "
             + "otherwise."
+        s += "\nNever write an en dash or an em dash. Use a comma, a "
+            + "colon, a period or parentheses instead."
         if !webAccess {
             s += "\nYou are offline: no web search or page fetching is "
                 + "available. Answer from your own knowledge; do not call any "
@@ -577,10 +571,13 @@ public enum TurnEvent: Sendable {
                 + "link or a file."
         }
         if memories.active {
-            s += "\nThe user keeps their own notes. The ones that fit a "
-                + "message arrive with it; memory_search finds the rest. "
-                + "What the user asks you to remember is saved after your "
-                + "reply, so just confirm it."
+            s += "\nThe user keeps their own notes, among them the pages, "
+                + "documents and pictures they showed you. The ones that fit "
+                + "a message arrive with it; " + MemoryTools.search
+                + " finds the rest by meaning and " + MemoryTools.grep
+                + " finds the lines that hold given words. What the user "
+                + "asks you to remember is saved after your reply, so just "
+                + "confirm it."
         }
         if voiceRules {
             s += "\n" + Session.voiceRules(
@@ -1180,15 +1177,28 @@ public enum TurnEvent: Sendable {
         }
     }
 
+    public struct PictureNote: Sendable {
+        public let names: [String]
+        public let stamp: String
+        public let answer: String
+
+        public init(names: [String], stamp: String, answer: String) {
+            self.names = names
+            self.stamp = stamp
+            self.answer = answer
+        }
+    }
+
     public func runMetaTurns(
         titled: Bool, wantsFollowup: Bool, extraction: Extraction?,
         conversation: ConversationNote? = nil,
+        pictures: PictureNote? = nil,
         onTitle: @escaping @MainActor (String) -> Void,
         onFollowup: @escaping @MainActor (String) -> Void,
         onRemembered: @escaping @MainActor ([Memories.Remembered]) -> Void
     ) {
         if let session, titled || wantsFollowup || extraction != nil
-            || conversation != nil {
+            || conversation != nil || pictures != nil {
             let running = metaTask
             beginWork()
             metaTask = Task { @MainActor in
@@ -1203,6 +1213,9 @@ public enum TurnEvent: Sendable {
                     let hint = await session.makeFollowup()
                     if !Task.isCancelled { onFollowup(hint) }
                 }
+                if let pictures, !Task.isCancelled {
+                    await caption(pictures, session)
+                }
                 if let extraction, !Task.isCancelled {
                     let got = await extract(extraction)
                     if !got.isEmpty, !Task.isCancelled { onRemembered(got) }
@@ -1212,6 +1225,36 @@ public enum TurnEvent: Sendable {
                                title: made.isEmpty ? conversation.title : made)
                 }
                 self.metaTask = nil
+            }
+        }
+    }
+
+    private func caption(_ pictures: PictureNote,
+                         _ session: ChatSession) async {
+        if memories.active, memories.isOpen {
+            let began = Date()
+            let caption = NoteFind.cut(
+                await session.conclude(Memories.captionInstruction),
+                limit: 400)
+            if !Task.isCancelled {
+                await memories.keepPicture(names: pictures.names,
+                                           stamp: pictures.stamp,
+                                           caption: caption,
+                                           answer: pictures.answer)
+                Diag.shared.report(.turn, String(
+                    format: "[picture] %@ captioned in %.1fs: %@",
+                    pictures.names.joined(separator: ", "),
+                    Date().timeIntervalSince(began), caption))
+            }
+        }
+    }
+
+    public func keepDocuments(_ docs: [Doc]) {
+        if memories.active {
+            for doc in docs where !doc.content.isEmpty {
+                let name = doc.name
+                let text = doc.content
+                Task { await memories.keepDocument(name: name, text: text) }
             }
         }
     }

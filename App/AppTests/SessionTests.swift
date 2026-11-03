@@ -363,9 +363,9 @@ private final class TestRunner: ToolRunner, @unchecked Sendable {
     func testVoiceRulesNameEveryToolOnceAndNoToolsWhenThereAreNone() {
         let rules = Session.voiceRules(tools: [
             "web_search", "fetch_url", "calculator", "get_current_time",
-            "get_news", "get_weather", "wikipedia_query", "memory_search"])
+            "get_news", "get_weather", "wikipedia_query", MemoryTools.search])
         for label in ["Web Search", "URL Fetch", "Calculator", "Current Time",
-                      "News", "Weather", "Wikipedia", "Memory Search"] {
+                      "News", "Weather", "Wikipedia", "Note Search"] {
             XCTAssertEqual(rules.components(separatedBy: label).count, 2,
                            label)
         }

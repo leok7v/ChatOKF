@@ -114,7 +114,6 @@ import XCTest
         XCTAssertTrue(listed?.block.contains("Biscuit") == true)
         XCTAssertTrue(listed?.block.contains("Our earlier conversations:\n"
                                             + "- Greeting") == true)
-        XCTAssertTrue(listed?.silent == true)
         let near = await memories.candidates("hello", excluding: [], limit: 9)
         XCTAssertEqual(near.count, 4)
         XCTAssertFalse(near.contains { note in
@@ -172,29 +171,29 @@ import XCTest
         let m = try await opened()
         let runner = MemoryToolRunner(inner: SafeToolRunner(), memories: m)
         XCTAssertTrue(runner.tools.contains { spec in
-            spec.name == "memory_search"
+            spec.name == MemoryTools.search
         })
         let found = await runner.execute(
-            "memory_search", [ToolArg(name: "query", value: "Deco X55")])
+            MemoryTools.search, [ToolArg(name: "query", value: "Deco X55")])
         XCTAssertTrue(found.contains("tech/wifi-mesh"), found)
         XCTAssertFalse(found.contains("[unrelated]"), found)
         XCTAssertFalse(found.contains("none is about"), found)
-        let foreign = await runner.execute("memory_search", [
+        let foreign = await runner.execute(MemoryTools.search, [
             ToolArg(name: "query",
                     value: "explain dark matter and dark energy")])
         XCTAssertTrue(foreign.hasPrefix("none of the user's notes"), foreign)
         XCTAssertFalse(foreign.contains("wifi"), foreign)
         let read = await runner.execute(
-            "memory_read", [ToolArg(name: "id", value: "tech/wifi-mesh")])
+            MemoryTools.read, [ToolArg(name: "id", value: "tech/wifi-mesh")])
         XCTAssertTrue(read.contains("One per floor."), read)
-        let dup = await runner.execute("memory_create", [
+        let dup = await runner.execute(MemoryTools.create, [
             ToolArg(name: "id", value: "tech/wifi-mesh"),
             ToolArg(name: "type", value: "Note"),
             ToolArg(name: "title", value: "x"),
             ToolArg(name: "description", value: "y"),
             ToolArg(name: "body", value: "z")])
         XCTAssertTrue(dup.contains("already exists"), dup)
-        let made = await runner.execute("memory_create", [
+        let made = await runner.execute(MemoryTools.create, [
             ToolArg(name: "id", value: "garden/basil"),
             ToolArg(name: "type", value: "Note"),
             ToolArg(name: "title", value: "Growing basil"),
@@ -211,7 +210,7 @@ import XCTest
         XCTAssertEqual(m.takeNoted().map { note in note.id },
                        ["garden/basil"])
         XCTAssertTrue(m.takeNoted().isEmpty)
-        let restated = await runner.execute("memory_create", [
+        let restated = await runner.execute(MemoryTools.create, [
             ToolArg(name: "id", value: "tech/mesh-network"),
             ToolArg(name: "type", value: "Note"),
             ToolArg(name: "title", value: "Home mesh network"),
@@ -221,9 +220,9 @@ import XCTest
         XCTAssertTrue(restated.contains("restates tech/wifi-mesh"), restated)
         XCTAssertNil(m.note("tech/mesh-network"))
         let gone = await runner.execute(
-            "memory_forget", [ToolArg(name: "id", value: "garden/basil")])
+            MemoryTools.forget, [ToolArg(name: "id", value: "garden/basil")])
         XCTAssertTrue(gone.contains("retired garden/basil"), gone)
-        let missing = await runner.execute("memory_update", [
+        let missing = await runner.execute(MemoryTools.update, [
             ToolArg(name: "id", value: "nope/never"),
             ToolArg(name: "type", value: "Note"),
             ToolArg(name: "title", value: "x"),
@@ -237,11 +236,12 @@ import XCTest
         let m = try await opened()
         func memory(_ runner: MemoryToolRunner) -> [String] {
             runner.tools.map { spec in spec.name }
-                .filter { name in name.hasPrefix("memory_") }
+                .filter { name in MemoryTools.names.contains(name) }
         }
         let reads = MemoryToolRunner(inner: SafeToolRunner(), memories: m,
                                      writes: false)
-        XCTAssertEqual(memory(reads), ["memory_search", "memory_read"])
+        XCTAssertEqual(memory(reads), [MemoryTools.search, MemoryTools.grep,
+                                       MemoryTools.read])
         let all = MemoryToolRunner(inner: SafeToolRunner(), memories: m)
         XCTAssertEqual(memory(all), MemoryTools.names)
         XCTAssertFalse(Models.offersNoteTools)
@@ -252,7 +252,7 @@ import XCTest
         let m = try await opened()
         let path = m.root.appendingPathComponent("tech/wifi-mesh.md")
         let runner = MemoryToolRunner(inner: SafeToolRunner(), memories: m)
-        let updated = await runner.execute("memory_update", [
+        let updated = await runner.execute(MemoryTools.update, [
             ToolArg(name: "id", value: "tech/wifi-mesh"),
             ToolArg(name: "type", value: "Note"),
             ToolArg(name: "title", value: "The mesh wifi setup"),

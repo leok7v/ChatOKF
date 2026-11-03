@@ -262,13 +262,15 @@ actor MemoryStore {
         var out = ToolReply(text: "error: memories are not open")
         if let store {
             switch name {
-            case "memory_search":
+            case MemoryTools.search:
                 out = searchTool(store, args, ticket: ticket)
-            case "memory_read":
+            case MemoryTools.grep:
+                out = grepTool(store, args)
+            case MemoryTools.read:
                 out = readTool(store, args)
-            case "memory_create", "memory_update":
-                out = save(store, name == "memory_update", args, by: model)
-            case "memory_forget":
+            case MemoryTools.create, MemoryTools.update:
+                out = save(store, name == MemoryTools.update, args, by: model)
+            case MemoryTools.forget:
                 out = retire(store, MemoryTools.arg(args, "id") ?? "")
             default:
                 out = ToolReply(text: "error: no tool named " + name)
@@ -277,18 +279,30 @@ actor MemoryStore {
         return out
     }
 
+    static let searchLines = 8
+
     private func searchTool(_ store: Store, _ args: [ToolArg],
                             ticket: Int) -> ToolReply {
         let queries = [MemoryTools.arg(args, "query") ?? ""]
             + MemoryTools.list(MemoryTools.arg(args, "also"), ";")
         let filter = Filter(area: MemoryTools.arg(args, "area") ?? "")
         let limit = Int(MemoryTools.arg(args, "limit") ?? "") ?? 8
-        var out = ToolReply(text: "error: memory_search needs a query")
+        var out = ToolReply(text: "error: " + MemoryTools.search
+                            + " needs a query")
         if !queries[0].isEmpty {
             if let found = search(ticket, queries, filter: filter,
                                   limit: max(1, limit)) {
                 let shown = found.hits.filter { hit in store.relevant(hit) }
-                out = ToolReply(text: Memories.searchText(store, found, shown),
+                var text = Memories.searchText(store, found, shown)
+                let terms = NoteFind.contentTerms(queries[0])
+                if !terms.isEmpty {
+                    text += "lines anywhere in the notes that hold the words "
+                        + "of the question:\n"
+                        + NoteFind.lines(terms, asked: queries[0],
+                                         limit: MemoryStore.searchLines,
+                                         in: store.concepts)
+                }
+                out = ToolReply(text: text,
                                 seen: shown.map { hit in hit.concept.id })
             } else {
                 out.text = "error: the search was superseded"
@@ -297,16 +311,201 @@ actor MemoryStore {
         return out
     }
 
+    private func grepTool(_ store: Store, _ args: [ToolArg]) -> ToolReply {
+        let asked = MemoryTools.arg(args, "words") ?? ""
+        let limit = Int(MemoryTools.arg(args, "limit") ?? "")
+            ?? NoteFind.lineLimit
+        let terms = NoteFind.terms(asked)
+        var out = ToolReply(text: "error: " + MemoryTools.grep
+                            + " needs one or more words")
+        if !terms.isEmpty {
+            out = ToolReply(text: NoteFind.lines(terms, asked: asked,
+                                                 limit: limit,
+                                                 in: store.concepts))
+        }
+        return out
+    }
+
+    private var readEnds: [String: Int] = [:]
+
+    func beginTurn() {
+        readEnds = [:]
+    }
+
+    private func resolve(_ store: Store, _ asked: String)
+        -> (id: String, line: Int?) {
+        var id = asked
+        var glued: Int? = nil
+        if store.concept(id) == nil, let colon = id.lastIndex(of: ":"),
+           let n = Int(id[id.index(after: colon)...]) {
+            glued = n
+            id = String(id[..<colon])
+        }
+        if store.concept(id) == nil {
+            let leaf = (id as NSString).lastPathComponent.lowercased()
+            let same = store.concepts.filter { concept in
+                (concept.id as NSString).lastPathComponent.lowercased()
+                    == leaf
+            }
+            if same.count == 1 { id = same[0].id }
+        }
+        return (id, glued)
+    }
+
     private func readTool(_ store: Store, _ args: [ToolArg]) -> ToolReply {
-        let id = MemoryTools.arg(args, "id") ?? ""
-        var out = ToolReply(text: "error: no such note: " + id)
-        if let concept = store.concept(id) {
-            out = ToolReply(
-                text: StoreText.read(
-                    store, concept, about: MemoryTools.arg(args, "about"),
-                    limit: Int(MemoryTools.arg(args, "limit") ?? "") ?? 2048,
-                    offset: Int(MemoryTools.arg(args, "offset") ?? "") ?? 0),
-                seen: [id])
+        let found = resolve(store, MemoryTools.arg(args, "id") ?? "")
+        var out = ToolReply(text: "error: no such note: " + found.id
+                            + "; ids are exactly as " + MemoryTools.grep
+                            + " and " + MemoryTools.search + " print them")
+        if let concept = store.concept(found.id) {
+            let count = Int(MemoryTools.arg(args, "lines") ?? "")
+                ?? NoteFind.readLines
+            let about = MemoryTools.arg(args, "about") ?? ""
+            var start = found.line
+                ?? Int(MemoryTools.arg(args, "line") ?? "") ?? 1
+            if !about.isEmpty, found.line == nil,
+               MemoryTools.arg(args, "line") == nil {
+                let span = store.window(concept, about: about, limit: 1)
+                start = NoteFind.lineOf(concept, byteOffset: span.from)
+            }
+            let key = concept.id + "#" + about + "#" + String(start)
+            if let last = readEnds[key] { start = last + 1 }
+            let read = NoteFind.read(concept, from: start, count: count,
+                                     more: MemoryTools.read)
+            readEnds[key] = read.end
+            out = ToolReply(text: read.text, seen: [concept.id])
+        }
+        return out
+    }
+
+    static let pageType = "Page"
+    static let pictureType = "Picture"
+    static let documentType = "Document"
+    static let fetchedKey = "fetched:"
+    static let freshDays = 7.0
+    static let descriptionLimit = 200
+
+    static func fetchedAt(_ concept: Concept) -> Date? {
+        var out: Date? = nil
+        for line in concept.extraFrontmatter
+        where line.hasPrefix(MemoryStore.fetchedKey) {
+            out = Store.iso.date(from: String(line.dropFirst(
+                MemoryStore.fetchedKey.count))
+                .trimmingCharacters(in: .whitespaces))
+        }
+        return out
+    }
+
+    func page(_ name: String, _ args: [ToolArg]) -> String? {
+        var out: String? = nil
+        if let store, let id = MemoryTools.pageId(name, args),
+           let concept = store.concept(id),
+           let at = MemoryStore.fetchedAt(concept),
+           Date().timeIntervalSince(at) < MemoryStore.freshDays * 86400 {
+            let day = String(Store.iso.string(from: at).prefix(10))
+            out = "From the user's notes, fetched on \(day) (note \(id)):"
+                + "\n" + concept.body + "\n"
+        }
+        return out
+    }
+
+    private func stamped(_ source: String) -> [String] {
+        [MemoryStore.fetchedKey + " " + Store.iso.string(from: Date()),
+         "sources:", "  - resource: " + source]
+    }
+
+    func keepPage(_ name: String, _ args: [ToolArg], text: String)
+        -> MemorySnapshot? {
+        var out: MemorySnapshot? = nil
+        if let store, !MemoryTools.pageFailed(text),
+           let id = MemoryTools.pageId(name, args) {
+            let lines = text.components(separatedBy: "\n")
+            let source = MemoryTools.arg(args, "url")
+                ?? "wikipedia:" + (MemoryTools.arg(args, "query") ?? "")
+            let wrote = try? store.write(
+                id: id, type: MemoryStore.pageType,
+                title: MemoryTools.pageTitle(name, args, text),
+                description: NoteFind.cut(
+                    lines.dropFirst().joined(separator: "\n"),
+                    limit: MemoryStore.descriptionLimit),
+                tags: ["pages"], body: text, adding: stamped(source))
+            if wrote != nil {
+                store.reload(id: id)
+                out = snapshot()
+                Diag.shared.report(.turn, "[notes] kept page " + id)
+            }
+        }
+        return out
+    }
+
+    func keepPicture(names: [String], stamp: String, caption: String,
+                     answer: String) -> MemorySnapshot? {
+        var out: MemorySnapshot? = nil
+        if let store, !caption.isEmpty, let first = names.first {
+            let id = "pictures/" + NoteFind.slug(first) + "-" + stamp
+            let body = "Picture " + names.joined(separator: ", ") + "\n\n"
+                + caption + "\n\nWhat was said about it:\n" + answer
+            let wrote = try? store.write(
+                id: id, type: MemoryStore.pictureType, title: first,
+                description: NoteFind.cut(
+                    caption, limit: MemoryStore.descriptionLimit),
+                tags: ["pictures"], body: body,
+                adding: stamped("picture:" + first))
+            if wrote != nil {
+                store.reload(id: id)
+                out = snapshot()
+                Diag.shared.report(.turn, "[notes] kept picture " + id)
+            }
+        }
+        return out
+    }
+
+    func importMarkdown(from dir: String) -> (count: Int,
+                                               snapshot: MemorySnapshot?) {
+        let fm = FileManager.default
+        let names = ((try? fm.contentsOfDirectory(atPath: dir)) ?? [])
+            .filter { name in name.hasSuffix(".md") }.sorted()
+        var count = 0
+        for name in names {
+            let path = dir + "/" + name
+            if let text = try? String(contentsOfFile: path, encoding: .utf8),
+               keepDocument(name: String(name.dropLast(3)),
+                            text: NoteFind.shaped(text)) != nil {
+                count += 1
+            }
+        }
+        return (count, count > 0 ? snapshot() : nil)
+    }
+
+    func keepDocument(name: String, text: String) -> MemorySnapshot? {
+        var out: MemorySnapshot? = nil
+        if let store, !text.isEmpty {
+            let id = "docs/" + NoteFind.slug(name)
+            var lines = text.components(separatedBy: "\n")
+            if lines.first?.trimmingCharacters(in: .whitespaces) == "---",
+               let end = lines.dropFirst().firstIndex(where: { line in
+                   line.trimmingCharacters(in: .whitespaces) == "---"
+               }) {
+                lines = Array(lines[(end + 1)...])
+            }
+            let first = lines.first { line in
+                let t = line.trimmingCharacters(in: .whitespaces)
+                return !t.isEmpty && !t.hasPrefix("#") && !t.hasPrefix("<!--")
+                    && !t.hasPrefix(">") && !t.hasPrefix("*")
+                    && !t.hasPrefix("|")
+            } ?? ""
+            let wrote = try? store.write(
+                id: id, type: MemoryStore.documentType, title: name,
+                description: NoteFind.cut(
+                    first, limit: MemoryStore.descriptionLimit),
+                tags: ["docs"], body: text,
+                adding: stamped("document:" + name))
+            if wrote != nil {
+                store.reload(id: id)
+                out = snapshot()
+                Diag.shared.report(.turn, "[notes] kept document " + id
+                    + " (\(text.utf8.count) bytes)")
+            }
         }
         return out
     }
@@ -321,9 +520,11 @@ actor MemoryStore {
                 + "short dashed name. If the user did not ask you to remember "
                 + "this, do not save it: answer the user instead."
         } else if found && !existing {
-            out.text = id + " already exists; use memory_update to replace it"
+            out.text = id + " already exists; use " + MemoryTools.update
+                + " to replace it"
         } else if !found && existing {
-            out.text = "no such note: " + id + "; use memory_create to add it"
+            out.text = "no such note: " + id + "; use " + MemoryTools.create
+                + " to add it"
         } else {
             let type = MemoryTools.arg(args, "type") ?? "Note"
             let title = MemoryTools.arg(args, "title") ?? id
@@ -335,8 +536,8 @@ actor MemoryStore {
             if let same {
                 out.text = id + " restates " + same.id + " ("
                     + (store.concept(same.id)?.title ?? "") + "); "
-                    + "memory_read it, and memory_update it only if this "
-                    + "adds something new\n"
+                    + MemoryTools.read + " it, and " + MemoryTools.update
+                    + " it only if this adds something new\n"
             } else {
                 do {
                     _ = try store.write(

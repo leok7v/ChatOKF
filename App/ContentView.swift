@@ -870,7 +870,7 @@ struct ContentView: View {
                            title: "Document Understanding",
                            subtitle: "It reads the table inside a PDF",
                            thumb: nil,
-                           action: model.runDocumentSample)
+                           action: { model.runDocumentSample() })
             }
         }
         .padding(24)

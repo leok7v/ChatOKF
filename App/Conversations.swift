@@ -59,7 +59,6 @@ extension ChatModel {
         currentConversationId = id
         generatedTitle = nil
         followupHint = offersFollowupHint ? opened.followup : ""
-        heldSend = nil
         remembered = []
         extractedAt = nil
         readOnly = true

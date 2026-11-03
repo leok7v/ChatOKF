@@ -189,8 +189,8 @@ public enum Flags {
         Knob(name: "prompt", takesValue: true, help:
             "a turn the app sends at launch, repeatable and in order; "
             + "'new' leaves the conversation, 'reopen' brings it back, "
-            + "'think' taps the lightbulb, 'video' and 'picture' tap "
-            + "those sample cards",
+            + "'think' taps the lightbulb, 'video', 'picture' and "
+            + "'document' tap those sample cards",
             scope: .diagnostic, defaultValue: ""),
         Knob(name: "demo-ask-voice", takesValue: true, help:
             "a voice that reads each scripted prompt aloud before it is "

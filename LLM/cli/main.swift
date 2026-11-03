@@ -41,21 +41,12 @@ let softReasoning = args.int("--soft-reasoning") ?? 0
 // system-block template (gemma-4) takes mid-conversation.
 let suppressReasoning = args.flag("--no-reason")
 let systemPrompt = args.text("--system") ?? "You are a helpful assistant."
-let toolRunner: (any ToolRunner)? = args.value("--notes").map { root in
-    NotesToolRunner(root: root,
-                    encoder: args.value("--notes-encoder")
-                        ?? NotesToolRunner.defaultEncoder,
-                    ingest: args.value("--notes-ingest"),
-                    network: args.flag("--tools"),
-                    names: args.value("--notes-names") ?? "memory")
-} ?? SafeToolRunner(network: args.flag("--tools"))
-let recallDrill: RecallDrill? =
-    args.value("--recall").map { root in RecallDrill(root: root) }
-if let words = args.value("--notes-find"),
-   let runner = toolRunner as? NotesToolRunner {
-    NotesToolRunner.debugFind(runner, words)
-    exit(0)
+let memoryDrill: MemoryDrill? = args.value("--memories").map { root in
+    MemoryDrill(root: root, network: args.flag("--tools"))
 }
+args.consume("--import", hasValue: true)
+let toolRunner: (any ToolRunner)? = memoryDrill?.runner
+    ?? SafeToolRunner(network: args.flag("--tools"))
 // One JSON line per turn; the captured stderr is the full log, this the
 // companion.
 let trVal = args.value("--trace")

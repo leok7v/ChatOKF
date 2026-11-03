@@ -8,6 +8,12 @@ have towers for them.
 Pure Swift only: no C, no Python, no FFI. Metal and the system frameworks
 are the whole dependency list; nothing runs on the Neural Engine.
 
+- Site: [leok7v.github.io/ChatOKF](https://leok7v.github.io/ChatOKF/)
+- iPhone and iPad: [App Store](https://apps.apple.com/us/app/chatokf/id6811258150),
+  or the beta on [TestFlight](https://testflight.apple.com/join/Qsvxk5Mh)
+- Mac: [the latest release](https://github.com/leok7v/ChatOKF/releases/latest)
+  or Homebrew, see below
+
 ## Install
 
 macOS 15 or newer on Apple silicon. Every release carries a disk image,
@@ -26,7 +32,9 @@ The middle line is Homebrew's gate on taps that are not its own; it asks for
 it by name if you skip it. The cask lives in
 [leok7v/homebrew-tap](https://github.com/leok7v/homebrew-tap), beside md.too's.
 
-The iPhone and iPad build is not published yet.
+On iPhone and iPad the app is on the
+[App Store](https://apps.apple.com/us/app/chatokf/id6811258150), and the
+beta ahead of it on [TestFlight](https://testflight.apple.com/join/Qsvxk5Mh).
 
 ## Build
 
@@ -154,12 +162,15 @@ it is written, and the transcript shows one line naming it, `Remembered:
 delete, grouped by area, and a delete erases the note and collapses every
 link that named it down to the words it carried, so the store is never
 left with a dangling reference; a deleted note waits thirty days in its
-own trash. The model sees two tools, `memory_search` and `memory_read`,
-and each call shows in the transcript. It does not write notes itself:
+own trash. The model sees three tools, `search_notes` by meaning,
+`grep_notes` for the lines that hold given words, and `read_note`, and
+each call shows in the transcript. It does not write notes itself:
 after a reply a separate pass keeps what you said about yourself, one
 sentence per fact, checked against your own words, and each saved
-conversation keeps one note of what you asked and what was concluded. At
-the start of every turn the question is embedded
+conversation keeps one note of what you asked and what was concluded.
+A page the model fetched, a picture you showed it and a document you
+attached become notes too, so a later chat can ask what you read or
+showed. At the start of every turn the question is embedded
 with [bekko-embedding-v1-a25m](https://huggingface.co/hotchpotch/bekko-embedding-v1-a25m),
 a 25M-parameter ModernBERT that reads every script, the dense pass is
 fused with a verbatim pass by reciprocal rank, and the notes that fit
@@ -175,9 +186,8 @@ chat model, so a memory belongs to the store, not to the model that wrote
 it. Measured on 2026-09-13: gemma-4-12B-MTP read a 53-page paper and, on
 request, split it into six notes. A new conversation on
 Qwen3.5-9B was asked what we remember about the Levin research program;
-it recalled three of those notes silently, then called `memory_search`
-and `memory_read` on `science/levin_research_program` and answered from
-it. Switching models keeps everything the app has learned: a model is a
+it recalled three of those notes silently, then searched the notes and
+read `science/levin_research_program` and answered from it. Switching models keeps everything the app has learned: a model is a
 reader, the notes are the knowledge.
 
 ## Layout

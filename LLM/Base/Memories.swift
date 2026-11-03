@@ -4,18 +4,12 @@ import Observation
 @MainActor @Observable public final class Memories {
 
     public struct Recall {
-        public let titles: [String]
         public let ids: [String]
         public let block: String
         public let standout: Float
         public let tokens: Int
         public let seconds: Double
         public let searchSeconds: Double
-        public let readSeconds: [Double]
-        public var judged = false
-        public var silent: Bool {
-            judged || seconds <= Memories.budgetSeconds
-        }
     }
 
     public struct Note {
@@ -204,11 +198,18 @@ import Observation
             + result.literalSeconds
         let fresh = result.hits.filter { hit in
             !read.contains(hit.concept.id) && relevant(hit)
+                && Memories.recalls(hit.concept)
         }.prefix(Memories.recallLimit)
         if !fresh.isEmpty {
-            out = Memories.recall(of: fresh.map { hit in hit.concept },
-                                  standout: result.standout,
-                                  searched: searched, pp: pp)
+            var notes = fresh.map { hit in hit.concept }
+            var made = Memories.recall(of: notes, standout: result.standout,
+                                       searched: searched, pp: pp)
+            while made.seconds > Memories.budgetSeconds, notes.count > 1 {
+                notes.removeLast()
+                made = Memories.recall(of: notes, standout: result.standout,
+                                       searched: searched, pp: pp)
+            }
+            out = made
         } else {
             let unread = result.hits.first { hit in
                 !read.contains(hit.concept.id)
@@ -221,6 +222,10 @@ import Observation
                 concepts.count, searched))
         }
         return out
+    }
+
+    static func recalls(_ concept: Concept) -> Bool {
+        concept.type != MemoryStore.documentType
     }
 
     static let heading = "What you remember about me from our earlier "
@@ -238,25 +243,20 @@ import Observation
         }
         let tokens = Int(Double(block.utf8.count) / Memories.bytesPerToken)
         return Recall(
-            titles: notes.map { note in note.title },
             ids: notes.map { note in note.id }, block: block,
             standout: standout, tokens: tokens,
             seconds: pp > 0 ? Double(tokens) / pp : 0,
-            searchSeconds: searched,
-            readSeconds: notes.map { note in
-                Memories.seconds(bytes: note.passage.utf8.count
-                                     + note.body.utf8.count, pp)
-            })
+            searchSeconds: searched)
     }
 
-    public static let aboutFrame = "Read the message below. Is the person asking "
-        + "what you remember or know about them, or about your earlier "
-        + "conversations with them? Answer with one word, yes or no."
+    public static let aboutFrame = "Read the message below. Is the person "
+        + "asking what you remember or know about them, or about your "
+        + "earlier conversations with them? Answer with one word, yes or no."
         + "\n\nMessage:\n{item}"
-    public static let helpsFrame = "Below are a note saved from an earlier chat "
-        + "with a person, and a new message from that person. Would knowing "
-        + "the note help you give a better answer to the message? Answer "
-        + "with one word, yes or no.\n\n{item}"
+    public static let helpsFrame = "Below are a note saved from an earlier "
+        + "chat with a person, and a new message from that person. Would "
+        + "knowing the note help you give a better answer to the message? "
+        + "Answer with one word, yes or no.\n\n{item}"
     static let listedFacts = 10
     static let listedChats = 6
 
@@ -285,7 +285,6 @@ import Observation
         var out: Recall? = nil
         if !shown.isEmpty {
             out = Memories.recall(of: shown, pp: pp, block: block + "\n")
-            out?.judged = true
         }
         return out
     }
@@ -301,13 +300,10 @@ import Observation
                 .filter { note in
                     !read.contains(note.id)
                         && note.type != ConversationNote.type
+                        && Memories.recalls(note)
                 }.prefix(limit))
         }
         return out
-    }
-
-    static func seconds(bytes: Int, _ pp: Double) -> Double {
-        pp > 0 ? Double(bytes) / bytesPerToken / pp : 0
     }
 
     public func note(_ id: String) -> Note? {
@@ -608,8 +604,60 @@ import Observation
 
     public var modelName = "model"
 
+    nonisolated func beginTurn() {
+        let owner = self.owner
+        Task { await owner.beginTurn() }
+    }
+
+    func page(_ name: String, _ args: [ToolArg]) async -> String? {
+        var out: String? = nil
+        if isOpen { out = await owner.page(name, args) }
+        return out
+    }
+
+    func keepPage(_ name: String, _ args: [ToolArg],
+                  text: String) async -> String {
+        var out = text
+        if isOpen, let kept = await owner.keepPage(name, args, text: text) {
+            adopt(kept)
+            if let id = MemoryTools.pageId(name, args) {
+                out += "\n[kept as note " + id + "]"
+            }
+        }
+        return out
+    }
+
+    public func keepPicture(names: [String], stamp: String,
+                            caption: String, answer: String) async {
+        if isOpen {
+            adopt(await owner.keepPicture(names: names, stamp: stamp,
+                                          caption: caption, answer: answer))
+        }
+    }
+
+    public func importMarkdown(from dir: String) async -> Int {
+        var count = 0
+        if isOpen {
+            let got = await owner.importMarkdown(from: dir)
+            adopt(got.snapshot)
+            count = got.count
+        }
+        return count
+    }
+
+    public func keepDocument(name: String, text: String) async {
+        if isOpen {
+            adopt(await owner.keepDocument(name: name, text: text))
+        }
+    }
+
+    public static let captionInstruction = "Describe the picture in this "
+        + "conversation in one sentence of about 25 words: what it shows, "
+        + "any text in it, and what it seems to be for. Write only that "
+        + "sentence."
+
     func tool(_ name: String, _ args: [ToolArg]) async -> String {
-        let ticket = name == "memory_search" ? owner.searches.take() : 0
+        let ticket = name == MemoryTools.search ? owner.searches.take() : 0
         let reply = await owner.tool(name, args, ticket: ticket,
                                      by: modelName)
         seenIds.formUnion(reply.seen)

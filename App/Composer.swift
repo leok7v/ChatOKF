@@ -61,7 +61,6 @@ struct Composer: View {
             ForEach(model.convertingNames, id: \.self) { name in
                 convertingChip(name)
             }
-            if model.heldSend != nil { heldNotes }
             if !model.remembered.isEmpty { rememberedNotes }
             if let warning = model.attachmentWarning { warningBanner(warning) }
             PromptEditor(text: $model.input, editing: $editing,
@@ -401,32 +400,6 @@ struct Composer: View {
         .foregroundStyle(.secondary)
     }
 
-    private var heldNotes: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 6) {
-                Image(systemName: "brain").frame(width: 24, height: 24)
-                Text("Memories that may fit. Choose the ones to use, then "
-                    + "Answer.")
-                    .lineLimit(2)
-                Spacer()
-            }
-            .foregroundStyle(.tertiary)
-            ForEach(model.heldNotes) { note in heldNote(note) }
-            HStack(spacing: 10) {
-                Button(action: model.answerHeldSend) {
-                    Text(answerLabel)
-                }
-                .keyboardShortcut(.defaultAction)
-                Button("Edit message", action: model.dropHeldSend)
-                Spacer()
-            }
-            .padding(.leading, 30)
-            .padding(.top, 2)
-        }
-        .appFont(.caption)
-        .foregroundStyle(.secondary)
-    }
-
     private var rememberedNotes: some View {
         HStack(spacing: 6) {
             Image(systemName: "brain").frame(width: 24, height: 24)
@@ -438,40 +411,6 @@ struct Composer: View {
         }
         .appFont(.caption)
         .foregroundStyle(.secondary)
-    }
-
-    private var answerLabel: String {
-        let chosen = model.heldNotes.filter { note in note.chosen }.count
-        var out = "Answer without memories"
-        if chosen > 0 {
-            out = "Answer with \(chosen) "
-                + (chosen == 1 ? "memory" : "memories") + ", "
-                + Composer.readCost(model.heldSeconds)
-        }
-        return out
-    }
-
-    private func heldNote(_ note: ChatModel.OfferedNote) -> some View {
-        Button { model.toggleHeldNote(note.id) } label: {
-            HStack(spacing: 6) {
-                Image(systemName: note.chosen ? "checkmark.square.fill"
-                                              : "square")
-                    .foregroundStyle(note.chosen ? Color.accentColor
-                                                 : Color.secondary)
-                    .frame(width: 24, height: 24)
-                Text(note.title).lineLimit(1).truncationMode(.middle)
-                Text(Composer.readCost(note.seconds))
-                    .foregroundStyle(.tertiary)
-                Spacer()
-            }
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-    }
-
-    private static func readCost(_ seconds: Double) -> String {
-        seconds < 1.5 ? "about a second"
-                      : "about \(Int(seconds.rounded())) seconds"
     }
 
     private func convertingChip(_ name: String) -> some View {

@@ -295,7 +295,7 @@ import UniformTypeIdentifiers
             in: .whitespacesAndNewlines)
         let has = !text.isEmpty || !attachedImages.isEmpty
             || !attachedDocs.isEmpty || !attachedClips.isEmpty
-        return ready && !busy && has && heldSend == nil
+        return ready && !busy && has
     }
 
     var typing: Bool { !input.isEmpty }
@@ -451,67 +451,6 @@ import UniformTypeIdentifiers
 
     var hasMemories: Bool {
         !session.memories.list.isEmpty || !session.memories.trashed.isEmpty
-    }
-
-    struct OfferedNote: Identifiable {
-        let id: String
-        let title: String
-        let seconds: Double
-        var chosen = true
-    }
-
-    struct HeldSend {
-        let prompt: String
-        let display: String
-        let docs: [DocRef]
-        let stoppable: String?
-        let stage: Whimsical.Stage
-        var notes: [OfferedNote]
-    }
-
-    var heldSend: HeldSend?
-
-    var heldNotes: [OfferedNote] { heldSend?.notes ?? [] }
-
-    var heldSeconds: Double {
-        heldNotes.filter { note in note.chosen }
-            .reduce(0) { sum, note in sum + note.seconds }
-    }
-
-    func toggleHeldNote(_ id: String) {
-        if var held = heldSend,
-           let at = held.notes.firstIndex(where: { note in note.id == id }) {
-            held.notes[at].chosen.toggle()
-            heldSend = held
-        }
-    }
-
-    func answerHeldSend() {
-        if let held = heldSend, canRunTurn {
-            heldSend = nil
-            var prompt = held.prompt
-            let chosen = held.notes.filter { note in note.chosen }
-                .compactMap { note in session.noteToUse(note.id) }
-            if !chosen.isEmpty {
-                prompt = "Notes remembered about this user, chosen by them "
-                    + "for the message below:\n\n"
-                    + chosen.map { note in note.text }
-                        .joined(separator: "\n\n---\n\n")
-                    + "\n\n---\n\n" + prompt
-            }
-            submitText(prompt: prompt, display: held.display,
-                       docs: held.docs, stoppable: held.stoppable,
-                       stage: held.stage)
-        }
-    }
-
-    func dropHeldSend() {
-        if let held = heldSend {
-            heldSend = nil
-            dropPendingAsk()
-            input = held.display
-            caret = input.utf16.count
-        }
     }
 
     func forgetAllMemories() {
@@ -1032,6 +971,8 @@ import UniformTypeIdentifiers
                 runVideoSample()
             } else if line == "picture" {
                 runPictureSample()
+            } else if line == "document" {
+                await runDocumentSample()?.value
             } else if line == "reopen" {
                 if let id = ConversationStore.shared.list.first?.id {
                     openConversation(id)
@@ -1303,7 +1244,6 @@ import UniformTypeIdentifiers
         readOnly = false
         generatedTitle = nil
         followupHint = ""
-        heldSend = nil
         remembered = []
         extractedAt = nil
         statsLabel = ""
@@ -1362,7 +1302,6 @@ import UniformTypeIdentifiers
     func newChat() {
         Footprint.report(.load, "newChat begin")
         followupHint = ""
-        heldSend = nil
         remembered = []
         extractedAt = nil
         lastTurnSpoken = false
@@ -1408,12 +1347,20 @@ import UniformTypeIdentifiers
                                  conversation: currentConversationId)
             : nil
         let conversation = remembers ? conversationNote : nil
+        let pictures = remembers && !lastTurnImages.isEmpty
+            ? Session.PictureNote(
+                names: lastTurnImages.map { img in img.file },
+                stamp: NoteFind.stamp(lastTurnImages.first?.data ?? Data()),
+                answer: messages.last?.text ?? "")
+            : nil
+        lastTurnImages = []
         let hinted = offersFollowupHint && !scriptedVoice
         if !readOnly, titled || hinted || extraction != nil
-            || conversation != nil {
+            || conversation != nil || pictures != nil {
             session.runMetaTurns(
                 titled: titled, wantsFollowup: hinted,
                 extraction: extraction, conversation: conversation,
+                pictures: pictures,
                 onTitle: { [weak self] t in
                     self?.generatedTitle = t
                     self?.transcriptDirty = true
@@ -1474,6 +1421,7 @@ import UniformTypeIdentifiers
 
     var remembered: [Memories.Remembered] = []
     var extractedAt: Date?
+    @ObservationIgnored private var lastTurnImages: [ImageAttachment] = []
 
     var suggestFollowups: Bool = UserDefaults.standard
         .object(forKey: "suggestFollowups") as? Bool ?? true {
@@ -2204,6 +2152,8 @@ import UniformTypeIdentifiers
             let images = attachedImages
             let clips = attachedClips
             let docs = Session.refs(attachedDocs)
+            session.keepDocuments(attachedDocs)
+            lastTurnImages = images
             input = ""
             caret = 0
             attachedImages = []
@@ -2245,6 +2195,8 @@ import UniformTypeIdentifiers
             let images = attachedImages
             let clips = attachedClips
             let docs = Session.refs(attachedDocs)
+            session.keepDocuments(attachedDocs)
+            lastTurnImages = images
             input = ""
             caret = 0
             attachedImages = []
@@ -2482,6 +2434,8 @@ import UniformTypeIdentifiers
             caret = 0
             let docs = Session.refs(attachedDocs)
             let stoppable = ChatModel.stoppableSpan(made, attachedDocs)
+            session.keepDocuments(attachedDocs)
+            lastTurnImages = []
             attachedDocs = []
             let serial = transcriptSerial
             showAsk(display, prompt: prompt, docs: docs)
@@ -2498,25 +2452,13 @@ import UniformTypeIdentifiers
                               docs: [DocRef], stoppable: String?,
                               stage: Whimsical.Stage, serial: Int) async {
         recalling = true
-        let recall = await session.recall(display,
-                                          also: [generatedTitle ?? ""],
+        let recall = await session.recall(display, also: [],
                                           within: currentConversationId)
         recalling = false
         if canRunTurn, serial == transcriptSerial {
-            if let recall, !recall.silent {
-                let notes = zip(recall.ids, zip(recall.titles,
-                                                recall.readSeconds))
-                    .map { id, rest in
-                        OfferedNote(id: id, title: rest.0, seconds: rest.1)
-                    }
-                heldSend = HeldSend(prompt: prompt, display: display,
-                                    docs: docs, stoppable: stoppable,
-                                    stage: stage, notes: notes)
-            } else {
-                let text = recall.map { r in r.block + prompt } ?? prompt
-                submitText(prompt: text, display: display, docs: docs,
-                           stoppable: stoppable, stage: stage)
-            }
+            let text = recall.map { r in r.block + prompt } ?? prompt
+            submitText(prompt: text, display: display, docs: docs,
+                       stoppable: stoppable, stage: stage)
         } else if serial == transcriptSerial {
             dropPendingAsk()
         }
@@ -2933,13 +2875,14 @@ import UniformTypeIdentifiers
         }
     }
 
-    func runDocumentSample() {
+    @discardableResult func runDocumentSample() -> Task<Void, Never>? {
+        var out: Task<Void, Never>? = nil
         if let url = ChatModel.samplePdf {
             markSampleUsed("document")
             input = ""
             caret = 0
             flashNote("Reading the report")
-            Task { @MainActor in
+            out = Task { @MainActor in
                 if let text = await ChatModel.markdown(of: url) {
                     attachDoc("harvest-report.pdf", text, at: 0,
                               from: url)
@@ -2950,6 +2893,7 @@ import UniformTypeIdentifiers
                 }
             }
         }
+        return out
     }
 
     func runVideoSample() {

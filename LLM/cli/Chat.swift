@@ -394,7 +394,9 @@ func benchIds(_ encode: (String) -> [Int32]) -> [Int32] {
         err("[state] this backend keeps no state on disk\n")
     }
     if let pkVal { try await primeOrCook(session, pkVal) }
-    if let drill = recallDrill { await drill.open() }
+    if let drill = memoryDrill {
+        await drill.open(importing: args.value("--import"))
+    }
     err("[chat] thinking \(enableThinking), template reasons "
         + "\(templateSupportsThinking(loaded.template)), soft tokens "
         + "\(await session.supportsSoftTokens()), tools "
@@ -463,7 +465,9 @@ func benchIds(_ encode: (String) -> [Int32]) -> [Int32] {
             onToolRound: { event in err(cliToolRound(event)) })
     } else {
         var asked = user
-        if let drill = recallDrill { asked = await drill.before(user) }
+        if let drill = memoryDrill {
+            asked = await drill.before(user, pp: await session.lastMetrics.pp)
+        }
         stream = session.reply(
             asked, onReasoning: onReasoning,
             onTool: { name in tools.add(name) },
@@ -484,19 +488,15 @@ func benchIds(_ encode: (String) -> [Int32]) -> [Int32] {
             m.contentTokens, m.pp, m.tg, m.endReason, outcome.rawValue,
             Date().timeIntervalSince(t0)))
         traceTurn(t0, user, reasoning.text, content, tools.list, m)
-        if let drill = recallDrill, !user.hasPrefix("img:") {
-            await drill.after(session, said: user, answer: content)
-        }
-        if user.hasPrefix("img:"), let notes = toolRunner as? NotesToolRunner {
-            let body = user.dropFirst("img:".count)
-            let path = String(body[..<(body.firstIndex(of: " ")
-                                       ?? body.endIndex)])
-            let c0 = Date()
-            let caption = await session.conclude(
-                NotesToolRunner.captionInstruction)
-            err(String(format: "[caption] %.1fs: %@\n",
-                       Date().timeIntervalSince(c0), caption))
-            notes.keepPicture(path: path, caption: caption, answer: content)
+        if let drill = memoryDrill {
+            if user.hasPrefix("img:") {
+                let body = user.dropFirst("img:".count)
+                let path = String(body[..<(body.firstIndex(of: " ")
+                                           ?? body.endIndex)])
+                await drill.caption(session, picture: path, answer: content)
+            } else {
+                await drill.after(session, said: user, answer: content)
+            }
         }
     }
 }
