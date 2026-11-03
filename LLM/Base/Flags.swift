@@ -74,6 +74,10 @@ public enum Flags {
         Knob(name: "recall-budget", takesValue: true, help:
             "seconds of prefill a silent memory recall may add to a turn",
             scope: .engine, defaultValue: "5"),
+        Knob(name: "read-budget", takesValue: true, help:
+            "seconds of prefill one fetched page or article may cost at "
+            + "this device's measured rate; a turn may read two and a half "
+            + "of them", scope: .engine, defaultValue: "12"),
         Knob(name: "read-floor-mb", takesValue: true, help:
             "megabytes of jetsam headroom under which a document read stops "
             + "and answers from what was read (iOS)", scope: .engine,

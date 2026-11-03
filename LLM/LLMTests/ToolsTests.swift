@@ -695,4 +695,101 @@ final class ToolsTests: XCTestCase {
         XCTAssertNil(Tools.canonicalArgName("arg_value", names))
         XCTAssertNil(Tools.canonicalArgName("q", ["url"]))
     }
+
+    private static let extract = "Dark matter is unseen.\n\nIt holds "
+        + "galaxies together.\n\n\n== History ==\nOort saw it in 1932. "
+        + "Zwicky measured the Coma cluster.\n\n\n== Evidence ==\nRotation "
+        + "curves stay flat far from the centre.\n\n\n=== Lensing ===\n"
+        + "Light bends around the Bullet cluster.\n\n\n== See also ==\n"
+        + "Dark energy\n\n\n== References ==\nCited works."
+
+    func testWikiSectionsSplitTheLeadAndSkipTheBoilerplate() {
+        let split = Tools.sections(ToolsTests.extract)
+        XCTAssertTrue(split.lead.hasPrefix("Dark matter is unseen."))
+        XCTAssertEqual(split.sections.map { s in s.title },
+                       ["History", "Evidence", "Lensing"])
+        XCTAssertEqual(split.sections.map { s in s.level }, [2, 2, 3])
+        XCTAssertEqual(split.sections[2].body,
+                       "Light bends around the Bullet cluster.")
+        XCTAssertNil(Tools.heading("== not closed"))
+        XCTAssertEqual(Tools.heading("=== Lensing ===")?.level, 3)
+    }
+
+    func testComposedKeepsTheWholeArticleWhenItFits() async {
+        let made = await Tools.composed(ToolsTests.extract, query: "x",
+                                        section: "", budget: 10_000,
+                                        ranker: nil)
+        XCTAssertTrue(made.text.contains("== History ==\nOort"), made.text)
+        XCTAssertTrue(made.text.contains("=== Lensing ==="), made.text)
+        XCTAssertFalse(made.text.contains("References"), made.text)
+        XCTAssertTrue(made.omitted.isEmpty)
+    }
+
+    func testComposedKeepsTheLeadAndTheBestSectionUnderTheBudget() async {
+        let ranker: ReadBudget.Ranker = { _, texts in
+            texts.map { text in text.hasPrefix("Lensing") ? 1 : 0 }
+        }
+        let made = await Tools.composed(ToolsTests.extract,
+                                        query: "bullet cluster", section: "",
+                                        budget: 130, ranker: ranker)
+        XCTAssertTrue(made.text.hasPrefix("Dark matter is unseen."),
+                      made.text)
+        XCTAssertTrue(made.text.contains("=== Lensing ==="), made.text)
+        XCTAssertFalse(made.text.contains("== History =="), made.text)
+        XCTAssertTrue(made.text.contains("Sections not shown: History (54)"),
+                      made.text)
+        XCTAssertEqual(made.omitted.map { s in s.title },
+                       ["History", "Evidence"])
+        XCTAssertEqual(made.shown, ["Lensing"])
+    }
+
+    func testTheBestSectionRidesCutWhenNoSectionFitsWhole() async {
+        let long = "Lead line.\n\n\n== Small ==\nTiny.\n\n\n== Casualties ==\n"
+            + String(repeating: "Seventy million people died. ", count: 40)
+        let ranker: ReadBudget.Ranker = { _, texts in
+            texts.map { text in text.hasPrefix("Casualties") ? 1 : 0 }
+        }
+        let made = await Tools.composed(long, query: "how many died",
+                                        section: "", budget: 700,
+                                        ranker: ranker)
+        XCTAssertTrue(made.text.contains("== Casualties ==\nSeventy"),
+                      made.text)
+        XCTAssertFalse(made.text.contains("== Small =="), made.text)
+        XCTAssertLessThan(made.text.count, 1000, made.text)
+        XCTAssertEqual(made.shown, ["Casualties"])
+        XCTAssertEqual(made.omitted.map { s in s.title }, ["Small"])
+    }
+
+    func testComposedReadsOneSectionByName() async {
+        let made = await Tools.composed(ToolsTests.extract, query: "x",
+                                        section: "evidence", budget: 10_000,
+                                        ranker: nil)
+        XCTAssertEqual(made.text, "== Evidence ==\nRotation curves stay "
+                       + "flat far from the centre.")
+        let missing = await Tools.composed(ToolsTests.extract, query: "x",
+                                           section: "Cosmology",
+                                           budget: 10_000, ranker: nil)
+        XCTAssertTrue(missing.text.hasPrefix("No section named"), missing.text)
+        XCTAssertTrue(missing.text.contains("History; Evidence; Lensing"))
+    }
+
+    func testTheReadBudgetScalesWithTheRateAndEndsTheTurn() {
+        let budget = ReadBudget()
+        budget.setRate(15)
+        XCTAssertEqual(budget.articleChars, ReadBudget.floorChars)
+        budget.setRate(600)
+        XCTAssertEqual(budget.articleChars, ReadBudget.ceilingChars)
+        budget.setRate(200)
+        XCTAssertEqual(budget.articleChars,
+                       Int(200 * ReadBudget.seconds * ReadBudget.bytesPerToken))
+        XCTAssertEqual(budget.room, budget.turnChars)
+        budget.charge(budget.turnChars - 100)
+        XCTAssertTrue(budget.exhausted)
+        budget.beginTurn()
+        XCTAssertFalse(budget.exhausted)
+        XCTAssertTrue(Tools.fruitless(Tools.enoughRead))
+        XCTAssertTrue(Tools.fruitless(
+            "Article \"X\" was already retrieved in this turn; its text"))
+        XCTAssertFalse(Tools.fruitless("Wikipedia -- article \"X\":\nbody"))
+    }
 }

@@ -651,6 +651,7 @@ public enum TurnEvent: Sendable {
                 readGuard: Session.memoryGuard,
                 breakers: turnTables?.breakers,
                 grammarVocab: turnTables?.vocab)
+            ReadBudget.shared.setRate(measuredPP)
             Diag.shared.report(.load, "[chat] session \(modelName): thinking "
                 + (thinkingActive ? "on" : "off, reasoning suppressed")
                 + ", asked " + (config.thinking ? "on" : "off")
@@ -1035,6 +1036,7 @@ public enum TurnEvent: Sendable {
                 if outcome != .stopped {
                     recordTG(metrics.tg)
                     recordPP(metrics.pp)
+                    ReadBudget.shared.setRate(metrics.pp)
                 }
                 reportTurn(metrics, outcome, thinkingActive, thinkTokenCap,
                            began)

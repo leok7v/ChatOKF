@@ -86,6 +86,9 @@ import Observation
                 if let self, let opened, !Task.isCancelled {
                     self.adopt(opened.snapshot)
                     self.isOpen = true
+                    ReadBudget.shared.ranker = { query, texts in
+                        await owner.scores(query, texts)
+                    }
                     Diag.shared.report(.load, String(
                         format: "[memories] %d concepts, re-embedded %d, "
                             + "%.2fs at %@", opened.snapshot.concepts.count,
@@ -128,6 +131,7 @@ import Observation
         opening?.cancel()
         opening = nil
         isOpen = false
+        ReadBudget.shared.ranker = nil
         apply(MemorySnapshot.empty)
     }
 

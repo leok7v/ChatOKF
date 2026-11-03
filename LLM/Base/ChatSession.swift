@@ -1012,6 +1012,7 @@ public actor ChatSession {
         self.stoppable = stoppable
         let asked = ChatSession.folded(unanswered, user)
         unanswered = ""
+        ReadBudget.shared.setQuestion(asked)
         trace(.user, ctx: await backend.position,
               summary: String(asked.prefix(80)), text: asked)
         history.append(AgentMessage(role: "user", content: asked))
@@ -1032,6 +1033,7 @@ public actor ChatSession {
         defer { leaveEngine() }
         let saved = await enterTurn()
         softTurns += 1
+        ReadBudget.shared.setQuestion(user)
         let rows = spans.reduce(0) { sum, span in sum + span.rows }
         trace(.user, ctx: await backend.position,
               summary: String(user.prefix(80))
@@ -1105,8 +1107,9 @@ public actor ChatSession {
                 } ?? ""
                 if result.isEmpty {
                     result = await runTool(call, resolved: resolved)
-                    if result.hasPrefix("error"),
-                       spent.values.contains(result) {
+                    if (result.hasPrefix("error")
+                        && spent.values.contains(result))
+                        || Tools.fruitless(result) {
                         fruitless += 1
                     }
                     spent[signature] = result

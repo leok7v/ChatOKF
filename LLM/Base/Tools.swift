@@ -167,6 +167,7 @@ public struct SafeToolRunner: ToolRunner {
 
     public func beginTurn() {
         memo.reset()
+        ReadBudget.shared.beginTurn()
     }
 }
 
@@ -277,14 +278,19 @@ public enum Tools {
             + "an overview and quick to read; false reads the English "
             + "Wikipedia: the full article, for detail or a topic Simple "
             + "English does not cover. Name the topic as a short phrase, "
-            + "e.g. 'dark matter'. The text ends with a Related articles "
-            + "list you can look up next.",
+            + "e.g. 'dark matter'. A long article comes back as its lead "
+            + "and the sections that fit this device, with the sections "
+            + "left out named at the end; pass `section` to read one of "
+            + "those whole.",
         parametersJSON: "{\"type\":\"object\",\"properties\":{"
             + "\"query\":{\"type\":\"string\",\"description\":\"The topic, "
             + "a short phrase.\"},"
             + "\"simple\":{\"type\":\"boolean\",\"description\":\"true for "
             + "Simple English Wikipedia (short, plain, fast), false for "
-            + "the full English article. Default true.\"}},"
+            + "the full English article. Default true.\"},"
+            + "\"section\":{\"type\":\"string\",\"description\":\"A section "
+            + "name from the list at the end of an earlier result, to read "
+            + "that section whole.\"}},"
             + "\"required\":[\"query\"]}")
 
     static let fetchUrlSpec = ToolSpec(
@@ -293,16 +299,16 @@ public enum Tools {
             + "like example.com also works). Give an `objective`, one line "
             + "saying what you want from the page, and you get the parts "
             + "about it; without one you get the page's readable text from "
-            + "the top, markup removed. Capped to `limit` bytes (default "
-            + "16384; -1 = no cap); use `offset` to page through long "
-            + "content.",
+            + "the top, markup removed. Capped to `limit` bytes, by default "
+            + "what this device reads in a few seconds; use `offset` to "
+            + "page through long content.",
         parametersJSON: "{\"type\":\"object\",\"properties\":{"
             + "\"url\":{\"type\":\"string\",\"description\":\"Full "
             + "http(s):// URL or a bare domain.\"},"
             + "\"objective\":{\"type\":\"string\",\"description\":\"What "
             + "you want from the page, in one line.\"},"
             + "\"limit\":{\"type\":\"integer\",\"description\":\"Max "
-            + "bytes to return (default 16384; -1 = no cap)\"},"
+            + "bytes to return; the default fits this device\"},"
             + "\"offset\":{\"type\":\"integer\",\"description\":\"Byte "
             + "offset for paging (default 0)\"}},"
             + "\"required\":[\"url\"]}")
@@ -944,17 +950,37 @@ public enum Tools {
     private static func runFetch(_ args: [ToolArg],
                                  memo: TurnMemo? = nil) async -> String {
         var result = "error: missing 'url' argument"
+        let budget = ReadBudget.shared
         if let url = findArg(args, "url"), !url.isEmpty {
-            let limStr = findArg(args, "limit") ?? firstValue(args, "cap")
-            let limit = limStr.flatMap { s in Int(s) } ?? 16_384
-            let offset = findArg(args, "offset")
-                .flatMap { s in Int(s) } ?? 0
-            let objective = firstValue(args, "objective")
-                ?? memo?.lastQuery ?? ""
-            result = await fetch(url, limit: limit, offset: offset,
-                                 memo: memo, objective: objective)
+            if budget.exhausted {
+                diag("fetch_url \(url): the turn's reading budget is spent")
+                result = Tools.enoughRead
+            } else {
+                let limStr = findArg(args, "limit") ?? firstValue(args, "cap")
+                let asked = limStr.flatMap { s in Int(s) } ?? 0
+                let limit = asked <= 0 ? min(budget.articleChars, budget.room)
+                                       : min(asked, budget.room)
+                let offset = findArg(args, "offset")
+                    .flatMap { s in Int(s) } ?? 0
+                let objective = firstValue(args, "objective")
+                    ?? memo?.lastQuery ?? ""
+                result = await fetch(url, limit: limit, offset: offset,
+                                     memo: memo, objective: objective)
+                budget.charge(result.count)
+            }
         }
         return result
+    }
+
+    static let enoughRead = "That is enough reading for this answer. Do "
+        + "not call another read tool; answer the user now from what you "
+        + "have read."
+
+    public static func fruitless(_ result: String) -> Bool {
+        result.hasPrefix(Tools.enoughRead)
+            || (result.hasPrefix("Article \"")
+                && result.contains("already retrieved"))
+            || result.hasPrefix("This exact page")
     }
 
     // Mwmbl indexes no search operators: a site:/inurl:/intitle:/filetype:
@@ -1119,7 +1145,9 @@ public enum Tools {
             let simple = firstValue(args, "simple")
                 .map { s in Flags.truthy(s) && s.lowercased() != "false" }
                 ?? true
-            result = await wikipediaQuery(query, simple: simple, memo: memo)
+            result = await wikipediaQuery(
+                query, simple: simple,
+                section: firstValue(args, "section") ?? "", memo: memo)
         }
         return result
     }
@@ -1130,45 +1158,255 @@ public enum Tools {
         let links: [String]
     }
 
+    struct WikiSection {
+        let title: String
+        let level: Int
+        let body: String
+    }
+
+    static let skippedSections: Set<String> = [
+        "see also", "references", "external links", "further reading",
+        "notes", "bibliography", "sources", "footnotes", "citations",
+        "gallery", "notes and references", "references and notes",
+        "related pages", "other websites",
+    ]
+
+    static func heading(_ line: String) -> (title: String, level: Int)? {
+        var out: (title: String, level: Int)? = nil
+        let t = line.trimmingCharacters(in: .whitespaces)
+        let opening = t.prefix(while: { c in c == "=" }).count
+        if opening >= 2, t.count > opening * 2,
+           t.hasSuffix(String(repeating: "=", count: opening)) {
+            let inner = t.dropFirst(opening).dropLast(opening)
+                .trimmingCharacters(in: .whitespaces)
+            if !inner.isEmpty, !inner.hasPrefix("=") {
+                out = (inner, opening)
+            }
+        }
+        return out
+    }
+
+    static func sections(_ text: String)
+        -> (lead: String, sections: [WikiSection]) {
+        var lead: [String] = []
+        var out: [WikiSection] = []
+        var current: (title: String, level: Int)? = nil
+        var body: [String] = []
+        var skipping = 0
+        func close() {
+            if let current, skipping == 0 {
+                let joined = body.joined(separator: "\n")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if !joined.isEmpty {
+                    out.append(WikiSection(title: current.title,
+                                           level: current.level,
+                                           body: joined))
+                }
+            }
+            body = []
+        }
+        for line in text.components(separatedBy: "\n") {
+            if let found = heading(line) {
+                close()
+                if skipping > 0, found.level <= skipping { skipping = 0 }
+                if skipping == 0,
+                   skippedSections.contains(found.title.lowercased()) {
+                    skipping = found.level
+                }
+                current = found
+            } else if current == nil {
+                lead.append(line)
+            } else {
+                body.append(line)
+            }
+        }
+        close()
+        return (lead.joined(separator: "\n")
+                    .trimmingCharacters(in: .whitespacesAndNewlines), out)
+    }
+
+    struct Composed {
+        let text: String
+        let shown: [String]
+        let omitted: [WikiSection]
+    }
+
+    static let rankedChars = 400
+    static let namedOmitted = 15
+    static let namedFloor = 5
+    static let charsPerName = 400
+
+    static func kilo(_ n: Int) -> String {
+        n < 1000 ? "\(n)" : String(format: "%.1fK", Double(n) / 1000)
+    }
+
+    static func headed(_ section: WikiSection) -> String {
+        let marks = String(repeating: "=", count: section.level)
+        return marks + " " + section.title + " " + marks + "\n" + section.body
+    }
+
+    static func oneSection(_ name: String, _ parts: [WikiSection],
+                           budget: Int) -> Composed {
+        let wanted = name.lowercased()
+        let found = parts.first { s in s.title.lowercased() == wanted }
+            ?? parts.first { s in s.title.lowercased().hasPrefix(wanted) }
+        var out: Composed
+        if let found {
+            out = Composed(text: clampText(headed(found), budget),
+                           shown: [found.title], omitted: [])
+        } else {
+            out = Composed(
+                text: "No section named \"\(name)\". The sections are: "
+                    + parts.map { s in s.title }.joined(separator: "; "),
+                shown: [], omitted: [])
+        }
+        return out
+    }
+
+    static func composed(_ text: String, query: String, section: String,
+                         budget: Int, ranker: ReadBudget.Ranker?)
+        async -> Composed {
+        let split = sections(text)
+        var out: Composed
+        if !section.isEmpty {
+            out = oneSection(section, split.sections, budget: budget)
+        } else {
+            let whole = ([split.lead] + split.sections.map { s in headed(s) })
+                .joined(separator: "\n\n")
+            if whole.count <= budget {
+                out = Composed(text: whole,
+                               shown: split.sections.map { s in s.title },
+                               omitted: [])
+            } else {
+                out = await picked(split.lead, split.sections, query: query,
+                                   budget: budget, ranker: ranker)
+            }
+        }
+        return out
+    }
+
+    private static func picked(_ lead: String, _ parts: [WikiSection],
+                               query: String, budget: Int,
+                               ranker: ReadBudget.Ranker?) async -> Composed {
+        let head = clampText(lead, budget)
+        var room = budget - head.count
+        var scores = [Float](repeating: 0, count: parts.count)
+        if let ranker, room > 0, !parts.isEmpty {
+            let got = await ranker(query, parts.map { s in
+                s.title + ": " + String(s.body.prefix(rankedChars))
+            })
+            if got.count == parts.count { scores = got }
+        }
+        let order = parts.indices.sorted { a, b in
+            scores[a] != scores[b] ? scores[a] > scores[b] : a < b
+        }
+        var chosen: [Int: String] = [:]
+        for i in order {
+            let whole = headed(parts[i])
+            if chosen.isEmpty, room > ReadBudget.leastRead {
+                let cut = clampText(whole, room - 2)
+                chosen[i] = cut
+                room -= cut.count + 2
+            } else if whole.count + 2 <= room {
+                chosen[i] = whole
+                room -= whole.count + 2
+            }
+        }
+        var text = head
+        var omitted: [WikiSection] = []
+        for (i, part) in parts.enumerated() {
+            if let kept = chosen[i] {
+                text += "\n\n" + kept
+            } else {
+                omitted.append(part)
+            }
+        }
+        if !omitted.isEmpty {
+            let names = max(namedFloor,
+                            min(namedOmitted, budget / charsPerName))
+            let named = omitted.prefix(names).map { s in
+                s.title + " (" + kilo(s.body.count) + ")"
+            }
+            text += "\n\nSections not shown: " + named.joined(separator: "; ")
+            if omitted.count > names {
+                text += "; and \(omitted.count - names) more"
+            }
+            text += ". Pass section with one of these names to read it whole."
+        }
+        return Composed(text: text,
+                        shown: chosen.keys.sorted()
+                            .map { i in parts[i].title },
+                        omitted: omitted)
+    }
+
+    static let relatedCap = 5
+
     public static func wikipediaQuery(_ query: String, simple: Bool,
-                                      limit: Int = 4000,
+                                      section: String = "",
                                       memo: TurnMemo? = nil) async -> String {
         let wiki = simple ? "Simple English Wikipedia" : "Wikipedia"
+        let budget = ReadBudget.shared
         var result = "error: Wikipedia lookup failed (network error)"
-        do {
-            if let page = try await wikipediaPage(query, simple: simple) {
-                let key = (simple ? "simple:" : "en:") + page.title
-                if let dup = memo?.title(for: key) {
-                    diag("wikipedia_query dedupe \"\(dup)\"")
-                    result = "Article \"\(dup)\" was already retrieved in "
-                        + "this turn; its full text is above. Do not request "
-                        + "it again: use it and its Related articles list, "
-                        + "query a DIFFERENT topic, or give your final "
-                        + "answer now."
+        if budget.exhausted {
+            diag("wikipedia_query \"\(query)\": the turn's reading budget "
+                + "is spent")
+            result = Tools.enoughRead
+        } else {
+            do {
+                if let page = try await wikipediaPage(query, simple: simple) {
+                    result = await served(page, wiki: wiki, query: query,
+                                          simple: simple, section: section,
+                                          memo: memo)
                 } else {
-                    let body = clampText(page.text, limit)
-                    let related = relatedIn(body, links: page.links)
-                    memo?.note(key, page.title)
                     diag("wikipedia_query \(simple ? "simple" : "en") "
-                        + "\"\(query)\" -> \"\(page.title)\" "
-                        + "\(page.text.count) chars, \(body.count) kept")
-                    result = "\(wiki) -- article \"\(page.title)\":\n\(body)"
-                    if !related.isEmpty {
-                        result += "\n\nRelated articles: "
-                            + related.joined(separator: "; ")
-                    }
+                        + "\"\(query)\": no article")
+                    result = "No \(wiki) article matches \"\(query)\". "
+                        + (simple ? "Try again with simple set to false, or "
+                                  : "Try a shorter topic name, or ")
+                        + "web_search, or answer from your own knowledge."
                 }
-            } else {
-                diag("wikipedia_query \(simple ? "simple" : "en") "
-                    + "\"\(query)\": no article")
-                result = "No \(wiki) article matches \"\(query)\". "
-                    + (simple ? "Try again with simple set to false, or "
-                              : "Try a shorter topic name, or ")
-                    + "web_search, or answer from your own knowledge."
+            } catch {
+                diag("wikipedia_query \"\(query)\" transport error: "
+                    + error.localizedDescription)
             }
-        } catch {
-            diag("wikipedia_query \"\(query)\" transport error: "
-                + error.localizedDescription)
+        }
+        return result
+    }
+
+    private static func served(_ page: WikiPage, wiki: String,
+                               query: String, simple: Bool, section: String,
+                               memo: TurnMemo?) async -> String {
+        let budget = ReadBudget.shared
+        let key = (simple ? "simple:" : "en:") + page.title
+            + (section.isEmpty ? "" : "#" + section.lowercased())
+        var result: String
+        if let dup = memo?.title(for: key) {
+            diag("wikipedia_query dedupe \"\(dup)\"")
+            result = "Article \"\(dup)\" was already retrieved in this "
+                + "turn; its text is above. Do not request it again: use "
+                + "it, query a DIFFERENT topic, or give your final answer "
+                + "now."
+        } else {
+            let chars = min(budget.articleChars, budget.room)
+            let asked = budget.question.isEmpty ? query : budget.question
+            let made = await composed(page.text, query: asked,
+                                      section: section, budget: chars,
+                                      ranker: budget.ranker)
+            memo?.note(key, page.title)
+            budget.charge(made.text.count)
+            diag("wikipedia_query \(simple ? "simple" : "en") "
+                + "\"\(query)\" -> \"\(page.title)\" \(page.text.count) "
+                + "chars, \(made.text.count) kept of \(chars), "
+                + "\(made.shown.count) section(s) shown, "
+                + "\(made.omitted.count) left out, \(budget.room) left in "
+                + "the turn: " + made.shown.prefix(6).joined(separator: "; "))
+            result = "\(wiki) -- article \"\(page.title)\":\n" + made.text
+            let related = relatedIn(made.text, links: page.links,
+                                    cap: relatedCap)
+            if !related.isEmpty, budget.room > 0 {
+                result += "\n\nRelated articles: "
+                    + related.joined(separator: "; ")
+            }
         }
         return result
     }

@@ -482,6 +482,7 @@ func benchIds(_ encode: (String) -> [Int32]) -> [Int32] {
         }
         print()
         let m = await session.lastMetrics
+        ReadBudget.shared.setRate(m.pp)
         let outcome = await session.turnOutcome
         err(String(format: "[ctx %d | think %d | gen %d | pp %.1f t/s | "
             + "tg %.1f t/s | %@ %@ %.0fs]\n", m.ctx, m.thinkTokens,

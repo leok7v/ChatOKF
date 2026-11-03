@@ -232,6 +232,22 @@ actor MemoryStore {
         return out
     }
 
+    func scores(_ query: String, _ texts: [String]) -> [Float] {
+        var out: [Float] = []
+        if let embedder {
+            let asked = embedder.embedQuery(query)
+            out = texts.map { text in
+                let vector = embedder.embedPassage(text)
+                var score: Float = 0
+                for i in 0..<min(asked.count, vector.count) {
+                    score += asked[i] * vector[i]
+                }
+                return score
+            }
+        }
+        return out
+    }
+
     func keep(_ note: ConversationNote, title: String, concluded: String,
               by model: String) -> MemorySnapshot? {
         var out: MemorySnapshot? = nil
