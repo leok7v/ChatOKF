@@ -72,10 +72,8 @@ struct SettingsView: View {
             Button("Proceed", role: .destructive) { model.factoryReset() }
             Button("Cancel", role: .cancel) { }
         } message: {
-            Text("This deletes every downloaded model, every conversation "
-               + "including the trash, every attachment kept with them, and "
-               + "all settings, then quits. The next launch starts like a "
-               + "fresh install.")
+            Text("Deletes every model, every conversation and the trash, "
+               + "and all settings, then quits.")
         }
         .alert("Clear all conversations?", isPresented: $confirmClear) {
             Button("Clear", role: .destructive) {
@@ -83,8 +81,7 @@ struct SettingsView: View {
             }
             Button("Cancel", role: .cancel) { }
         } message: {
-            Text("Moves every saved conversation to the trash, where it "
-               + "stays for 30 days.")
+            Text("Trashes every conversation for 30 days.")
         }
         .alert("Forget everything?", isPresented: $confirmForget) {
             Button("Forget", role: .destructive) {
@@ -92,9 +89,7 @@ struct SettingsView: View {
             }
             Button("Cancel", role: .cancel) { }
         } message: {
-            Text("Deletes every memory the assistant has formed from its "
-               + "conversations with you, and empties the memories trash. "
-               + "The conversations themselves stay.")
+            Text("Deletes every memory. The conversations stay.")
         }
         .alert("Resumable is a preview", isPresented: $confirmResumable) {
             Button("Turn On") {
@@ -103,22 +98,16 @@ struct SettingsView: View {
             }
             Button("Not Now", role: .cancel) { }
         } message: {
-            Text("Resumable keeps your conversations ready to continue "
-               + "where you left them. It costs storage: up to a hundred "
-               + "megabytes for a long conversation on this device, and "
-               + "Settings, Storage shows what is kept and lets you clear "
-               + "it.\n\nThis is a Pro feature in the making, switched on "
-               + "here for testing and preview only. It may change or "
-               + "disappear in a later update, and what it keeps may not "
-               + "carry over. Your conversations themselves are not "
-               + "affected.")
+            Text("Keeps each conversation ready to continue, up to a "
+               + "hundred megabytes for a long one.\n\nA preview of a Pro "
+               + "feature: it may change or go away, and what it keeps may "
+               + "not carry over. Your conversations are not affected.")
         }
         .alert("Empty the trash?", isPresented: $confirmEmpty) {
             Button("Empty", role: .destructive) { model.emptyTrash() }
             Button("Cancel", role: .cancel) { }
         } message: {
-            Text("Deletes every conversation in the trash, with the "
-               + "attachments kept for them. This cannot be undone.")
+            Text("Deletes everything in the trash. This cannot be undone.")
         }
         .alert("Delete \(deleteKept?.title ?? "")?",
                isPresented: Binding(
@@ -330,8 +319,8 @@ struct SettingsView: View {
                     }
                 }
             }
-            note("Built on the work below. Each entry says who made it, "
-                + "the terms it arrives under, and what this app changed.")
+            note("Built on the work below: who made it, its terms, and "
+                + "what changed here.")
             card {
                 ForEach(Credits.all) { item in
                     if item.id != Credits.all.first?.id { hairline }
@@ -339,10 +328,9 @@ struct SettingsView: View {
                 }
             }
             heading("The reading voice")
-            note("Supertonic 3 is provided by Supertone Inc. under the "
-                + "BigScience Open RAIL-M License. These restrictions are a "
-                + "condition of that license, and they apply to every use of "
-                + "the voice in this app and to whatever it says.")
+            note("Supertonic 3 by Supertone Inc., under the BigScience "
+                + "Open RAIL-M License. Its restrictions apply to every use "
+                + "of the voice and to whatever it says.")
             card {
                 VoiceRestrictions()
                     .padding(.horizontal, 14)
@@ -621,9 +609,9 @@ struct SettingsView: View {
 
     private var imageRows: some View {
         wideRow("Images",
-                "How closely the assistant looks at a picture: about "
-                + "\(model.imageBudget.tokens) tokens per picture, at its "
-                + "own shape. Larger sees finer detail and takes longer.") {
+                "How closely a picture is looked at, about "
+                + "\(model.imageBudget.tokens) tokens. Larger sees more and "
+                + "takes longer.") {
             Picker("Image detail", selection: $model.imageBudget) {
                 ForEach(ChatModel.ImageBudget.allCases) { size in
                     Text(size.rawValue).tag(size)
@@ -637,14 +625,12 @@ struct SettingsView: View {
     private var documentRows: some View {
         wideRow("Documents",
                 model.docBudget == .UL
-                ? "How much of an attached document the assistant reads: as "
-                    + "much as the model's context holds, about "
-                    + "\(model.docBudgetPages) pages with the model in use. "
-                    + "Long documents take minutes to read; the chat shows "
-                    + "the progress and Stop cancels."
-                : "How much of an attached document the assistant reads: up "
-                    + "to about \(model.docBudgetPages) pages of text. "
-                    + "Anything past that is left out, and the chat says so.") {
+                ? "As much of an attached document as the model holds, "
+                    + "about \(model.docBudgetPages) pages. The chat shows "
+                    + "the progress, and Stop answers from what was read."
+                : "How much of an attached document is read, about "
+                    + "\(model.docBudgetPages) pages. The rest is left out "
+                    + "and the chat says so.") {
             Picker("Document size", selection: $model.docBudget) {
                 ForEach(ChatModel.DocBudget.offered) { size in
                     Text(size.rawValue).tag(size)
@@ -663,9 +649,8 @@ struct SettingsView: View {
                           "Show replies with headings, lists, code and "
                           + "tables.", $model.renderMarkdown)
                 hairline
-                switchRow("Always show sample prompts",
-                          "Keep the examples on an empty chat after you have "
-                          + "tried them all.", $model.alwaysShowSamples)
+                switchRow("Always show sample prompts", "",
+                          $model.alwaysShowSamples)
             }
             heading("Zoom")
             card { textSizeRow }
@@ -719,8 +704,7 @@ struct SettingsView: View {
     }
 
     private var draftSample: some View {
-        Text("Text and controls throughout the app, on top of your "
-            + "device's own text size.")
+        Text("Text and controls size.")
             .font(appTextFont(.callout, draftScale))
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
@@ -738,19 +722,16 @@ struct SettingsView: View {
             card {
                 if model.canSuggestFollowups {
                     switchRow("Suggest follow-up questions",
-                              "Suggest a sensible next question as a hint in "
-                              + "the message box. "
+                              "Suggests a next question as a hint. "
                               + (isOS ? "Swipe right to ask it."
-                                      : "Tab or the right arrow asks it."),
+                                      : "Press Tab to ask it."),
                               $model.suggestFollowups)
                     hairline
                 }
                 switchRow("Web Access",
-                          "Let the assistant search, fetch and read the "
-                          + "Internet, including Wikipedia, the headlines "
-                          + "and the weather. Your search terms leave the "
-                          + "device, and the weather uses your rough "
-                          + "location.",
+                          "Search, Wikipedia, pages, headlines and weather. "
+                          + "What is searched for leaves this device. See "
+                          + "Privacy for details.",
                           Binding(
                     get: { model.webAccess },
                     set: { on in model.setAccess(web: on) }
@@ -769,8 +750,7 @@ struct SettingsView: View {
 
     private var totalRecallRow: some View {
         switchRow("Total Recall",
-                  "The assistant remembers what it learns from your chats "
-                  + "and uses it when it fits. Memories stay on this "
+                  "Takes notes of our conversations and keeps them on this "
                   + "device.",
                   $model.totalRecall)
     }
@@ -779,8 +759,7 @@ struct SettingsView: View {
         VStack(spacing: 0) {
             switchRow("Thinking",
                       "Think before answering. Slower, but better on hard "
-                      + "questions. The thinking shows above each answer, "
-                      + "and Quick Answer cuts it short.", Binding(
+                      + "questions.", Binding(
                 get: { model.thinkingActive },
                 set: { on in
                     if on != model.thinking { model.toggleThinking() }
@@ -788,8 +767,8 @@ struct SettingsView: View {
             ))
             hairline
             wideRow("Budget",
-                    "How long to think before answering: about "
-                    + "\(Int(model.thinkBudget.seconds)) seconds.") {
+                    "About \(Int(model.thinkBudget.seconds)) seconds of "
+                    + "thinking.") {
                 Picker("Thinking budget", selection: $model.thinkBudget) {
                     ForEach(ChatModel.ThinkBudget.allCases) { size in
                         Text(size.rawValue).tag(size)
@@ -804,8 +783,7 @@ struct SettingsView: View {
             }
             hairline
             switchRow("Export Reasoning",
-                      "Include the thinking above each answer in exported "
-                      + "and shared transcripts.",
+                      "Keep the thinking in exported transcripts.",
                       $model.exportReasoning)
         }
     }
@@ -813,9 +791,9 @@ struct SettingsView: View {
     private var privacyPane: some View {
         VStack(alignment: .leading, spacing: 18) {
             title("Privacy")
-            note("What you type is answered on this device. These are "
-                + "the only places anything leaves it, and only while the "
-                + "tool that needs them is switched on.")
+            note("Answers are made on this device. These are the only "
+                + "places anything leaves it, each only while its switch "
+                + "is on.")
             heading("Web search")
             card {
                 ForEach(SearchProvider.allCases) { provider in
@@ -824,25 +802,21 @@ struct SettingsView: View {
                 }
             }
             .id(searchRevision)
-            note("With both off, the assistant is not offered web search "
-                + "at all.")
+            note("With both off there is no web search.")
             if model.memoriesSupported {
                 heading("Memories")
                 card {
                     switchRow("Backup Memories",
                               "Include memories in iCloud and local backups. "
-                              + "Apple can see backed-up data to some degree "
-                              + "unless you encrypt your backups, which is a "
-                              + "setting on your device, not in this app.",
+                              + "Encrypted backups are a device setting, not "
+                              + "this app's.",
                               $model.backupMemories)
                 }
             }
             heading("Also reached")
             card {
                 destination("Wikipedia",
-                    "The topic the assistant looks up, as a search on "
-                        + "Wikipedia's own site, and the date for today's "
-                        + "headlines.",
+                    "The topic looked up, and the date for the headlines.",
                     "https://foundation.wikimedia.org/wiki/"
                         + "Policy:Privacy_policy")
                 hairline
@@ -852,15 +826,14 @@ struct SettingsView: View {
                     "https://ipinfo.io/privacy-policy")
                 hairline
                 destination("Open-Meteo and weather.gov",
-                    "The coordinates a forecast is for, and nothing else.",
+                    "The place of the forecast.",
                     "https://open-meteo.com/en/terms")
                 hairline
                 destination("Pages you ask it to read",
-                    "Whatever address you or the model hands to the page "
-                        + "reader.", "")
+                    "The address of the page.", "")
                 hairline
                 destination("Hugging Face",
-                    "Model downloads only. No conversation text.",
+                    "Model downloads only.",
                     "https://huggingface.co/privacy")
             }
         }
@@ -916,13 +889,13 @@ struct SettingsView: View {
             title("Misc")
             card {
                 switchRow("Confirm before deleting a conversation",
-                          "Ask before a conversation is deleted. Off deletes "
-                          + "at once.", $model.confirmDeleteConversation)
+                          "Off deletes at once.",
+                          $model.confirmDeleteConversation)
                 hairline
                 switchRow("Debug",
-                          "Show speed and memory under the message box, "
-                          + "and the details of each chat. Log starts at "
-                          + "the next app launch.", $model.statusLine)
+                          "Speed and memory under the message box, and the "
+                          + "chat details. The log starts at the next "
+                          + "launch.", $model.statusLine)
                 if unlocked || model.resumable {
                     hairline
                     resumableRow
@@ -931,9 +904,7 @@ struct SettingsView: View {
             if model.memoriesSupported, model.hasMemories || unlocked {
                 card {
                     wideRow(nil,
-                            "Delete every memory the assistant has formed "
-                            + "from its conversations with you. The "
-                            + "conversations themselves stay.") {
+                            "Delete every memory. The conversations stay.") {
                         Button(role: .destructive) {
                             confirmForget = true
                         } label: {
@@ -978,8 +949,8 @@ struct SettingsView: View {
 
     private var resumableRow: some View {
         switchRow("Resumable",
-                  "Pick up any saved conversation where you left it. Uses "
-                  + "more storage; Settings, Storage shows how much.",
+                  "Continue a saved conversation where it stopped. Costs "
+                  + "storage, shown under Storage.",
                   Binding(
             get: { model.resumable },
             set: { on in
@@ -1038,12 +1009,10 @@ struct SettingsView: View {
         let rows = keptRows
         return VStack(alignment: .leading, spacing: 18) {
             title("Storage")
-            note("What this app keeps on the device beyond the "
-                + "conversations themselves: the state that lets a "
-                + "conversation continue where it left off, the documents "
-                + "attached to it, and what waits in the trash. Deleting a "
-                + "conversation here moves it to the trash, as in the "
-                + "sidebar, and frees its state at once.")
+            note("What the app keeps beside the conversations: the state "
+                + "that lets one continue, its attachments, and the trash. "
+                + "A delete here trashes the conversation and frees its "
+                + "state at once.")
             let manyModels = model.downloadedModels > 1
             let kept = model.storage.total > 0
             if manyModels || kept || model.storage.trash > 0 {
@@ -1154,9 +1123,8 @@ struct SettingsView: View {
 
     private var reasoningEffortRow: some View {
         wideRow("Reasoning Effort",
-                "How hard to think. High thinks longer and more carefully "
-                + "but can go in circles. Low answers sooner. Applies from "
-                + "the next new chat.") {
+                "High thinks longer, Low answers sooner. From the next "
+                + "chat.") {
             Picker("Reasoning effort", selection: Binding(
                 get: { model.reasoningEffort },
                 set: { level in model.setReasoningEffort(level) }
@@ -1173,10 +1141,8 @@ struct SettingsView: View {
     private var diagnosticsPane: some View {
         VStack(alignment: .leading, spacing: 18) {
             title("Diagnostics")
-            note("Extra detail for the diagnostics log. A switch that is "
-                + "off costs nothing. The session details screen says where "
-                + "the log is. A launch argument naming the same category "
-                + "wins over these switches for that run.")
+            note("More detail in the log. Off costs nothing. The chat "
+                + "details say where the log is.")
             card {
                 switchRow("All", "Every switch below at once.", Binding(
                     get: { DiagGate.switchable.allSatisfy { g in g.wanted } },

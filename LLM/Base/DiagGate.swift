@@ -41,22 +41,19 @@ public enum DiagGate: String, CaseIterable, Identifiable, Sendable {
         case .fault:
             out = "Errors that stop something working. Always recorded."
         case .load:
-            out = "What the app found at launch, and each model as it is "
-                + "prepared, primed and released."
+            out = "The launch, and each model as it loads."
         case .net:
             out = "Each piece of a model download as it lands."
         case .turn:
-            out = "One line per reply, with the token counts and speeds, "
-                + "and a line per attachment."
+            out = "One line per reply and per attachment, with counts and "
+                + "speeds."
         case .tools:
-            out = "Every tool the assistant calls, what it asked for, and "
-                + "what came back."
+            out = "Every tool call, its arguments and its result."
         case .voice:
             out = "What the microphone hears and what the reading voice is "
                 + "doing."
         case .perf:
-            out = "Moments the app freezes or a screen redraw runs long, "
-                + "and how fast the graphics work finishes."
+            out = "Freezes, slow redraws, and the GPU's pace."
         case .memory:
             out = "Record memory use step by step during downloads and "
                 + "while a prompt is processed, so a climb shows as a curve."

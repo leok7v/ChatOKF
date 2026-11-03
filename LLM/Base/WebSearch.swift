@@ -20,16 +20,13 @@ public enum SearchProvider: String, CaseIterable, Identifiable, Sendable {
         let out: String
         switch self {
         case .parallel:
-            out = "A commercial search service, tried first because it "
-                + "finds a great deal more, and it reads pages for the "
-                + "assistant. What you searched for, the address of a page "
-                + "read and what is wanted from it, and your network "
-                + "address reach it, and its policy does not say how long "
-                + "a search is kept."
+            out = "A commercial search, tried first, which also reads "
+                + "pages. It receives what you search for, the page address "
+                + "and your network address. Its policy does not say how "
+                + "long it keeps a search."
         case .mwmbl:
-            out = "A non-profit open search index, used when Parallel is "
-                + "off or comes back empty. It keeps no record of a search "
-                + "that points back to you and stores no network address."
+            out = "A non-profit index, used when Parallel is off or empty. "
+                + "It keeps nothing that points back to you."
         }
         return out
     }

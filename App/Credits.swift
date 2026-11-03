@@ -72,9 +72,7 @@ enum Credits {
                    + "bekko-embedding-v1-a25m",
                changed: "An 8-bit GGUF of the author's weights, downloaded "
                    + "with the first model. It turns your questions and the "
-                   + "assistant's memories into vectors on this device, so "
-                   + "the memory that fits a question can be found without "
-                   + "the question leaving."),
+                   + "assistant's memories into vectors on this device."),
         Credit(name: "Open Knowledge Format",
                author: "Google Cloud",
                terms: "Apache-2.0",
