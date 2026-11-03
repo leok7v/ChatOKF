@@ -79,15 +79,47 @@ enum WebSearch {
         + "answering, read the best one or two pages with "
         + "fetch_url(url, objective)."
 
+    static let roundSeconds: TimeInterval = 20
+
     static func run(_ query: String, count: Int) async -> String {
+        let deadline = Date().addingTimeInterval(roundSeconds)
         var hits: [SearchHit] = []
         if SearchProvider.parallel.on {
-            hits = await ParallelSearch.shared.search(query, count: count)
+            hits = await within(deadline) {
+                await ParallelSearch.shared.search(query, count: count)
+            } ?? []
         }
         if hits.isEmpty && SearchProvider.mwmbl.on {
-            hits = await mwmbl(query, count: count)
+            let left = deadline.timeIntervalSinceNow
+            hits = await within(deadline) {
+                await mwmbl(query, count: count, timeout: left)
+            } ?? []
+        }
+        if hits.isEmpty, deadline.timeIntervalSinceNow <= 0 {
+            Tools.diag("web_search \"\(query)\": the round's "
+                + "\(Int(roundSeconds)) s are spent")
         }
         return format(hits, query)
+    }
+
+    static func within<T: Sendable>(
+        _ deadline: Date, _ work: @escaping @Sendable () async -> T
+    ) async -> T? {
+        let left = deadline.timeIntervalSinceNow
+        var out: T? = nil
+        if left > 0 {
+            out = await withTaskGroup(of: T?.self) { group in
+                group.addTask { await work() }
+                group.addTask {
+                    try? await Task.sleep(for: .seconds(left))
+                    return nil
+                }
+                let first = await group.next() ?? nil
+                group.cancelAll()
+                return first
+            }
+        }
+        return out
     }
 
     static func format(_ hits: [SearchHit], _ query: String) -> String {
@@ -205,15 +237,17 @@ enum WebSearch {
         return text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private static func mwmbl(_ query: String,
-                              count: Int) async -> [SearchHit] {
+    private static func mwmbl(_ query: String, count: Int,
+                              timeout: TimeInterval) async -> [SearchHit] {
         var out: [SearchHit] = []
         var comps = URLComponents(
             string: "https://api.mwmbl.org/api/v1/search/")
         comps?.queryItems = [URLQueryItem(name: "s", value: query)]
         if let url = comps?.url {
+            var req = URLRequest(url: url)
+            req.timeoutInterval = min(ParallelSearch.timeout, max(1, timeout))
             do {
-                let (data, resp) = try await URLSession.shared.data(from: url)
+                let (data, resp) = try await URLSession.shared.data(for: req)
                 let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
                 if code == 200 { out = mwmblHits(data, count) }
                 if out.isEmpty {
@@ -272,7 +306,7 @@ actor ParallelSearch {
     private static let endpoint =
         URL(string: "https://search.parallel.ai/mcp")!
     private static let version = "2025-06-18"
-    private static let timeout: TimeInterval = 10
+    static let timeout: TimeInterval = 10
 
     private var session = ""
     private var spec: MCPTool?

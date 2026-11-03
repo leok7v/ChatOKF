@@ -672,17 +672,17 @@ import UniformTypeIdentifiers
         var seconds: Double {
             switch self {
             case .XS: return 10
-            case .S: return 20
-            case .M: return 45
-            case .L: return 90
-            case .XL: return 180
+            case .S: return 30
+            case .M: return 60
+            case .L: return 120
+            case .XL: return 240
             }
         }
     }
 
     var thinkBudget: ThinkBudget = {
         let raw = UserDefaults.standard.string(forKey: "thinkBudget") ?? ""
-        return ThinkBudget(rawValue: raw) ?? .L
+        return ThinkBudget(rawValue: raw) ?? .S
     }() {
         didSet {
             UserDefaults.standard.set(thinkBudget.rawValue,

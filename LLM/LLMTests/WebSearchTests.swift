@@ -246,6 +246,21 @@ private func clampSample(_ dice: inout Dice) -> String {
         #expect(tool.arguments("x").isEmpty)
     }
 
+    @Test func aRoundEndsAtItsDeadline() async {
+        let late = await WebSearch.within(
+            Date().addingTimeInterval(0.2)) { () -> Int in
+            try? await Task.sleep(for: .seconds(5))
+            return 1
+        }
+        #expect(late == nil)
+        let quick = await WebSearch.within(
+            Date().addingTimeInterval(5)) { () -> Int in 2 }
+        #expect(quick == 2)
+        let gone = await WebSearch.within(Date()) { () -> Int in 3 }
+        #expect(gone == nil)
+        #expect(Tools.fruitless(WebSearch.format([], "q")))
+    }
+
     @Test func bothProvidersAreOnByDefault() {
         #expect(SearchProvider.parallel.on)
         #expect(SearchProvider.mwmbl.on)

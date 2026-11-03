@@ -981,6 +981,7 @@ public enum Tools {
             || (result.hasPrefix("Article \"")
                 && result.contains("already retrieved"))
             || result.hasPrefix("This exact page")
+            || result.hasPrefix("No web results")
     }
 
     // Mwmbl indexes no search operators: a site:/inurl:/intitle:/filetype:

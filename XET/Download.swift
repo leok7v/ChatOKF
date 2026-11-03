@@ -59,15 +59,14 @@ final class Jobs: @unchecked Sendable {
 
     func land(_ job: Job) throws {
         lock.lock()
+        defer { lock.unlock() }
         for s in job.slices { ahead[s.offset] = s.length }
         let before = have
         while let n = ahead[have] {
             ahead[have] = nil
             have += n
         }
-        let now = have
-        lock.unlock()
-        if now > before { try landed(now) }
+        if have > before { try landed(have) }
     }
 
     var committed: Int64 {
