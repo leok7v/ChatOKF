@@ -329,8 +329,14 @@ import UniformTypeIdentifiers
             in: .whitespacesAndNewlines)
         let has = !text.isEmpty || !attachedImages.isEmpty
             || !attachedDocs.isEmpty || !attachedClips.isEmpty
-        return ready && !busy && has
+        return ready && (!turnLive || stopPressed) && pendingSend == nil
+            && has
     }
+
+    var turnLive: Bool { genTask != nil || sendTask != nil }
+    private(set) var stopPressed = false
+    var showsStop: Bool { turnLive && !stopPressed }
+    private(set) var pendingSend: Task<Void, Never>?
 
     var typing: Bool { !input.isEmpty }
 
@@ -885,7 +891,7 @@ import UniformTypeIdentifiers
         if !compiling {
             loadError = nil
             Task.detached {
-                _ = ChatModel.samplePictureThumb
+                _ = ChatModel.pictureThumbs
                 _ = ChatModel.sampleClipThumb
             }
             Session.pruneUnavailable()
@@ -1428,6 +1434,7 @@ import UniformTypeIdentifiers
 
     func newChat() {
         Footprint.report(.load, "newChat begin")
+        pictureTurn += 1
         followupHint = ""
         remembered = []
         extractedAt = nil
@@ -1510,8 +1517,9 @@ import UniformTypeIdentifiers
     }
 
     static let sampleTexts: Set<String> = Set(
-        [sampleResearch, sampleStory, sampleClip, sampleEuler,
-         sampleInterest, sampleCookies, sampleReport].map { text in
+        ([sampleResearch, sampleClip, sampleEuler, sampleInterest,
+          sampleCookies, sampleReport]
+            + pictureSamples.map { sample in sample.prompt }).map { text in
             text.split(whereSeparator: { c in c.isWhitespace })
                 .joined(separator: " ")
         })
@@ -2282,6 +2290,7 @@ import UniformTypeIdentifiers
             stopAsked = true
             prefillProgress = nil
         } else {
+            stopPressed = true
             session.stop()
         }
     }
@@ -2314,7 +2323,18 @@ import UniformTypeIdentifiers
 
     func send() {
         let attached = !attachedImages.isEmpty || !attachedClips.isEmpty
-        if attached, canRunTurn {
+        let winding = turnLive ? stopPressed : session.metaTaskRunning
+        if winding {
+            if pendingSend == nil {
+                pendingSend = Task { @MainActor in
+                    await self.sendTask?.value
+                    await self.genTask?.value
+                    await self.session.awaitMeta()
+                    self.pendingSend = nil
+                    self.send()
+                }
+            }
+        } else if attached, canRunTurn {
             sendSoft()
         } else {
             sendText()
@@ -2417,6 +2437,7 @@ import UniformTypeIdentifiers
                            events: AsyncStream<TurnEvent>) {
         let voiced = spoken || heardTurn
         heardTurn = false
+        stopPressed = false
         followupHint = ""
         spokenTurn = voiced
         lastTurnSpoken = voiced
@@ -2945,7 +2966,6 @@ import UniformTypeIdentifiers
     }
 
     static let sampleResearch = Texts.text("sample-research")
-    static let sampleStory = Texts.text("sample-story")
     static let sampleClip = Texts.text("sample-clip")
     static let sampleEuler = Texts.text("sample-euler")
     static let sampleInterest = Texts.text("sample-interest")
@@ -2953,16 +2973,75 @@ import UniformTypeIdentifiers
     var calcSampleIsInterest: Bool { modelName != Models.fallback }
 
     static let benchText = Texts.text("bench-512")
-    nonisolated static let samplePicture: Data? = Bundle.main
-        .url(forResource: "dogs-beach", withExtension: "jpg")
-        .flatMap { url in try? Data(contentsOf: url) }
+    struct PictureSample: Sendable {
+        let id: String
+        let file: String
+        let prompt: String
+        let title: String
+        let subtitle: String
+
+        var data: Data? {
+            Bundle.main.url(forResource: file, withExtension: "jpg")
+                .flatMap { url in try? Data(contentsOf: url) }
+        }
+    }
+
+    nonisolated static let pictureSamples: [PictureSample] = [
+        PictureSample(id: "picture", file: "dogs-beach",
+                      prompt: Texts.text("sample-story"),
+                      title: "Picture Understanding",
+                      subtitle: "It writes a story about this photo"),
+        PictureSample(id: "earth", file: "greenland",
+                      prompt: Texts.text("sample-earth"),
+                      title: "Where on Earth?",
+                      subtitle: "A view from orbit"),
+        PictureSample(id: "roses", file: "roses-ab",
+                      prompt: Texts.text("sample-roses"),
+                      title: "Real or AI?",
+                      subtitle: "One rose grew, one was generated"),
+        PictureSample(id: "room", file: "living-room",
+                      prompt: Texts.text("sample-room"),
+                      title: "Count What's There",
+                      subtitle: "Glasses, plants, and where they stand"),
+    ]
+
+    nonisolated static let pictureThumbs: [String: CGImage] = {
+        var out: [String: CGImage] = [:]
+        for sample in pictureSamples {
+            if let thumb = sample.data.flatMap({ data in
+                VisionPreprocess.thumbnail(data, maxPx: 128)
+            }) {
+                out[sample.id] = thumb
+            }
+        }
+        return out
+    }()
+
+    private static let launchSerial: Int = {
+        let key = "sampleLaunches"
+        let n = UserDefaults.standard.integer(forKey: key)
+        UserDefaults.standard.set(n + 1, forKey: key)
+        return n
+    }()
+
+    private var pictureTurn = ChatModel.launchSerial
+
+    var pictureSample: PictureSample? {
+        var out: PictureSample? = nil
+        if canAttachImages {
+            let open = ChatModel.pictureSamples.filter { sample in
+                ChatModel.pictureThumbs[sample.id] != nil
+                    && showSample(sample.id)
+            }
+            if !open.isEmpty {
+                out = open[pictureTurn % open.count]
+            }
+        }
+        return out
+    }
 
     static let sampleVideo: URL? = Bundle.main
         .url(forResource: "dogs-beach", withExtension: "mp4")
-    nonisolated static let samplePictureThumb: CGImage? =
-        samplePicture.flatMap { data in
-        VisionPreprocess.thumbnail(data, maxPx: 128)
-    }
 
     static let sampleReport = Texts.text("sample-report")
     static let samplePdf: URL? = Bundle.main
@@ -2994,9 +3073,7 @@ import UniformTypeIdentifiers
     private var applicableSampleIds: [String] {
         var ids = ["calc"]
         if accessState != .offline { ids.append("research") }
-        if canAttachImages, ChatModel.samplePictureThumb != nil {
-            ids.append("picture")
-        }
+        if let picture = pictureSample { ids.append(picture.id) }
         if canOfferVideoSample { ids.append("video") }
         if canOfferDocumentSample { ids.append("document") }
         return ids
@@ -3053,12 +3130,13 @@ import UniformTypeIdentifiers
     }
 
     func runPictureSample() {
-        if let data = ChatModel.samplePicture {
-            markSampleUsed("picture")
+        if let sample = pictureSample ?? ChatModel.pictureSamples.first,
+           let data = sample.data {
+            markSampleUsed(sample.id)
             input = ""
             caret = 0
-            attachImage(data, name: "dogs-beach.jpg", at: 0)
-            input += ChatModel.sampleStory
+            attachImage(data, name: sample.file + ".jpg", at: 0)
+            input += sample.prompt
             send()
         }
     }

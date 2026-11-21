@@ -56,6 +56,21 @@ jobs:
           xcodebuild -project ChatOKF.xcodeproj -scheme ChatOKF \
             -destination 'generic/platform=macOS' \
             CODE_SIGNING_ALLOWED=NO build
+      # The Bonsai 2 2B, 915 MB at its catalog pin, for the smoke test in
+      # HadamardTests. A cold cache downloads it from the Hub once.
+      - uses: actions/cache@v6
+        with:
+          path: ~/huggingface.co/leok7v/Ternary-Bonsai-2-2B-gguf
+          key: bonsai2-2b-b8c9e0a0b668fbea4d687cd60a1c1cf145650566
+      - name: Bonsai 2 2B
+        run: |
+          d=~/huggingface.co/leok7v/Ternary-Bonsai-2-2B-gguf
+          f=$d/Ternary-Bonsai-2-2B-Q2_0.ggxf
+          if [ ! -s "$f" ]; then
+            mkdir -p "$d"
+            curl -fL --retry 3 -o "$f" "https://huggingface.co/leok7v/Ternary-Bonsai-2-2B-gguf/resolve/b8c9e0a0b668fbea4d687cd60a1c1cf145650566/Ternary-Bonsai-2-2B-Q2_0.ggxf"
+          fi
+          test "$(stat -f %z "$f")" = 914735104
       - name: Test
         run: |
           xcodebuild -project ChatOKF.xcodeproj -scheme ChatOKF \

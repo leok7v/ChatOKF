@@ -12,6 +12,13 @@ let needsBonsai2Weights = ConditionTrait.enabled(
     Comment(rawValue: "no Ternary-Bonsai-2-{2B,4B}-Q2_0.gguf under "
         + "~/huggingface.co/prism-ml or ~/Models/prism-ml"))
 
+let bonsai2SmokePath = TestWeights.find("Ternary-Bonsai-2-2B")
+
+let needsBonsai2Smoke = ConditionTrait.enabled(
+    if: bonsai2SmokePath != nil && MetalContext.supported,
+    Comment(rawValue: TestWeights.missing("Ternary-Bonsai-2-2B")
+        + ", or no Metal device"))
+
 struct HadamardTests {
 
     private func fill(_ n: Int, seed: UInt64) -> [Float] {
@@ -216,6 +223,24 @@ struct HadamardTests {
                 try HadamardFold.read(g, nV: 4, nK: 2)
             }
         }
+    }
+
+    @Test(needsBonsai2Smoke) func theBonsai22BNamesTheCapitalOfFrance()
+        throws {
+        let chat = try QwenMetalChat(ggufPath: try #require(bonsai2SmokePath))
+        let ids = chat.tokenizer.encode("The capital of France is",
+                                        addSpecial: true)
+        chat.engine.reset()
+        chat.engine.sampler = nil
+        var next = chat.engine.extend(ids)
+        var out: [Int32] = []
+        while out.count < 16 {
+            out.append(next)
+            next = chat.engine.decode(next)
+        }
+        let text = chat.tokenizer.decode(out)
+        print("bonsai2 2B smoke: \(out) \(text.debugDescription)")
+        #expect(text.contains("Paris"), "decoded: \(text)")
     }
 
     @Test(needsBonsai2Weights) func theBonsai2FilesRead() throws {

@@ -850,12 +850,11 @@ struct ContentView: View {
                         .help("Try to hold the Option key \u{1F609}")
                 }
             }
-            if model.canAttachImages, model.showSample("picture"),
-               ChatModel.samplePictureThumb != nil {
+            if let picture = model.pictureSample {
                 sampleCard(symbol: "photo",
-                           title: "Picture Understanding",
-                           subtitle: "It writes a story about this photo",
-                           thumb: ChatModel.samplePictureThumb,
+                           title: picture.title,
+                           subtitle: picture.subtitle,
+                           thumb: ChatModel.pictureThumbs[picture.id],
                            action: model.runPictureSample)
             }
             if model.canOfferVideoSample, model.showSample("video") {

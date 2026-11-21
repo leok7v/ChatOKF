@@ -458,15 +458,15 @@ struct Composer: View {
     }
 
     private var primaryIcon: String {
-        model.busy ? "stop.fill" : "arrow.up"
+        model.showsStop ? "stop.fill" : "arrow.up"
     }
 
     private var primaryHelp: String {
-        model.busy ? "Stop" : "Send"
+        model.showsStop ? "Stop" : "Send"
     }
 
     private func fire() {
-        if model.busy {
+        if model.showsStop {
             model.stop()
         } else {
             if isOS { focus.request(false) }
@@ -475,7 +475,7 @@ struct Composer: View {
     }
 
     private var sendLive: Bool {
-        model.busy || model.canSend
+        model.showsStop || model.canSend
     }
 
     private var sendBackground: Color {

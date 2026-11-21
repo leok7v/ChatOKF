@@ -102,6 +102,7 @@ public enum Models {
             if let one = qwen38(gb) { band.insert(one) }
             if gb >= 9 { band.insert("Ternary-Bonsai-27B") }
             band.insert("Ternary-Bonsai-1.7B")
+            band.insert(fallback)
             if gb >= 8 { band.insert(e4b) }
             if gb >= 16 { band.insert("gemma-4-12B") }
         }
