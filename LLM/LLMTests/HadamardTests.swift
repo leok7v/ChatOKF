@@ -15,9 +15,8 @@ let needsBonsai2Weights = ConditionTrait.enabled(
 let bonsai2SmokePath = TestWeights.find("Ternary-Bonsai-2-2B")
 
 let needsBonsai2Smoke = ConditionTrait.enabled(
-    if: bonsai2SmokePath != nil && MetalContext.supported,
-    Comment(rawValue: TestWeights.missing("Ternary-Bonsai-2-2B")
-        + ", or no Metal device"))
+    if: bonsai2SmokePath != nil,
+    Comment(rawValue: TestWeights.missing("Ternary-Bonsai-2-2B")))
 
 struct HadamardTests {
 
@@ -226,20 +225,24 @@ struct HadamardTests {
     }
 
     @Test(needsBonsai2Smoke) func theBonsai22BNamesTheCapitalOfFrance()
-        throws {
-        let chat = try QwenMetalChat(ggufPath: try #require(bonsai2SmokePath))
-        let ids = chat.tokenizer.encode("The capital of France is",
-                                        addSpecial: true)
-        chat.engine.reset()
-        chat.engine.sampler = nil
-        var next = chat.engine.extend(ids)
+        async throws {
+        let path = try #require(bonsai2SmokePath)
+        let backend: any AgentBackend = MetalContext.supported
+            ? try QwenMetalChat(ggufPath: path).backend()
+            : try QwenChat(ggufPath: path).backend()
+        await backend.useSampler(nil)
+        await backend.reset()
+        var next = try await backend.extend(
+            backend.encode("The capital of France is"))
         var out: [Int32] = []
-        while out.count < 16 {
+        while out.count < 8 {
             out.append(next)
-            next = chat.engine.decode(next)
+            next = try await backend.decode(next)
         }
-        let text = chat.tokenizer.decode(out)
-        print("bonsai2 2B smoke: \(out) \(text.debugDescription)")
+        let text = backend.text(out)
+        print("bonsai2 2B smoke, "
+            + (MetalContext.supported ? "Metal" : "CPU")
+            + ": \(out) \(text.debugDescription)")
         #expect(text.contains("Paris"), "decoded: \(text)")
     }
 

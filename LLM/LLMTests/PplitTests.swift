@@ -35,6 +35,8 @@ final class PplitTests: XCTestCase {
     }
 
     func testTheSmallestModelOnDiskScoresChatFramed() throws {
+        try XCTSkipUnless(MetalContext.supported,
+                          "the scorer runs on Metal, and this GPU cannot")
         let text = try String(contentsOfFile: pplitCorpusBeside(),
                               encoding: .utf8)
         let convs = Array(parsePplitCorpus(text).prefix(2))

@@ -56,21 +56,30 @@ jobs:
           xcodebuild -project ChatOKF.xcodeproj -scheme ChatOKF \
             -destination 'generic/platform=macOS' \
             CODE_SIGNING_ALLOWED=NO build
-      # The Bonsai 2 2B, 915 MB at its catalog pin, for the smoke test in
-      # HadamardTests. A cold cache downloads it from the Hub once.
+      # The speech packs, 96 MB at their pins: Whistle (speech in) and the
+      # Supertonic q4 voice (speech out). Both run on the CPU, which this
+      # runner has; its GPU is below Apple family 6 and runs no model.
       - uses: actions/cache@v6
         with:
-          path: ~/huggingface.co/leok7v/Ternary-Bonsai-2-2B-gguf
-          key: bonsai2-2b-b8c9e0a0b668fbea4d687cd60a1c1cf145650566
-      - name: Bonsai 2 2B
+          path: |
+            ~/huggingface.co/leok7v/whistle
+            ~/huggingface.co/leok7v/supertonic
+          key: speech-2cf3336e-c8b0e4ee
+      - name: Speech packs
         run: |
-          d=~/huggingface.co/leok7v/Ternary-Bonsai-2-2B-gguf
-          f=$d/Ternary-Bonsai-2-2B-Q2_0.ggxf
-          if [ ! -s "$f" ]; then
-            mkdir -p "$d"
-            curl -fL --retry 3 -o "$f" "https://huggingface.co/leok7v/Ternary-Bonsai-2-2B-gguf/resolve/b8c9e0a0b668fbea4d687cd60a1c1cf145650566/Ternary-Bonsai-2-2B-Q2_0.ggxf"
-          fi
-          test "$(stat -f %z "$f")" = 914735104
+          get() {
+            f=~/huggingface.co/leok7v/$1/$3
+            if [ ! -s "$f" ]; then
+              mkdir -p "$(dirname "$f")"
+              curl -fL --retry 3 -o "$f" \
+                "https://huggingface.co/leok7v/$1/resolve/$2/$3"
+            fi
+            test "$(stat -f %z "$f")" = "$4"
+          }
+          get whistle 2cf3336eb343a699303895130a3937bb6de7a318 \
+            whistle.cact 16919407
+          get supertonic c8b0e4ee7181c403f4c01ed2f76e9c725128eaf6 \
+            supertonic-q4.safetensors 79154016
       - name: Test
         run: |
           xcodebuild -project ChatOKF.xcodeproj -scheme ChatOKF \

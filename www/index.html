@@ -199,9 +199,10 @@ a:hover { color: var(--delta); }
 :root[data-theme="dark"] .i-moon { display: none; }
 .tgl:hover { color: var(--trace); border-color: var(--trace-dim); }
 
-/* what a narrowing bar sheds, least useful first. The App Store button is
+/* what a narrowing bar sheds, least useful first. The App Store link is
    the last thing to go, because on a phone it is the only thing in the bar
    a visitor might have come for. */
+.top nav .lnk.store { color: var(--ink); font-weight: 600; }
 @media (max-width: 940px) { .top nav .lnk.opt1 { display: none; } }
 @media (max-width: 820px) { .top nav .lnk.opt2 { display: none; } }
 @media (max-width: 700px) { .top nav .lnk.opt3 { display: none; } }
@@ -229,6 +230,16 @@ a:hover { color: var(--delta); }
 }
 .get.sm { font-size: 0.84rem; padding: 0.42rem 0.8rem; border-radius: 7px; }
 .cta { display: flex; flex-wrap: wrap; gap: 0.7rem; margin: 1.6rem 0 0; }
+/* Apple's badge as supplied: never under 40 px tall, never recoloured */
+.badge { display: inline-flex; border-radius: 8px; }
+.badge img { display: block; height: 46px; width: auto; }
+.badge .on-light { display: none; }
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) .badge .on-dark { display: none; }
+  :root:not([data-theme="dark"]) .badge .on-light { display: block; }
+}
+:root[data-theme="light"] .badge .on-dark { display: none; }
+:root[data-theme="light"] .badge .on-light { display: block; }
 
 /* ---------- hero ------------------------------------------------------- */
 
@@ -386,8 +397,8 @@ footer { border-top: 1px solid var(--edge); padding: 2.2rem 0 3rem; }
     <a class="get sm ghost"
        href="https://github.com/leok7v/ChatOKF/releases/latest/download/ChatOKF.dmg"
        target="_blank" rel="noopener noreferrer">Download</a>
-    <a class="get sm"
-       href="https://apps.apple.com/us/app/chatokf/id6811258150"
+    <a class="lnk store"
+       href="https://apps.apple.com/app/id6811258150"
        target="_blank" rel="noopener noreferrer">App Store</a>
     <button class="tgl" id="tgl" type="button" aria-label="Switch theme">
       <svg class="i-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -413,9 +424,13 @@ footer { border-top: 1px solid var(--edge); padding: 2.2rem 0 3rem; }
     talk to it. The part that does the thinking is downloaded onto your own
     device, so your conversation never leaves it.</p>
     <div class="cta">
-      <a class="get"
-         href="https://apps.apple.com/us/app/chatokf/id6811258150"
-         target="_blank" rel="noopener noreferrer">Get it on the App Store</a>
+      <a class="badge"
+         href="https://apps.apple.com/app/id6811258150"
+         target="_blank" rel="noopener noreferrer"><img class="on-dark"
+         src="media/app-store-badge-white.svg" width="138" height="46"
+         alt="Download on the App Store"><img class="on-light"
+         src="media/app-store-badge-black.svg" width="138" height="46"
+         alt="Download on the App Store"></a>
       <a class="get ghost"
          href="https://github.com/leok7v/ChatOKF/releases/latest/download/ChatOKF.dmg"
          target="_blank" rel="noopener noreferrer">Download for macOS</a>
@@ -658,7 +673,7 @@ brew install --cask chatokf</code></pre>
       </div>
       <div class="cell">
         <span class="k">Mac, iPhone and iPad</span>
-        <span class="v"><a href="https://apps.apple.com/us/app/chatokf/id6811258150"
+        <span class="v"><a href="https://apps.apple.com/app/id6811258150"
           target="_blank" rel="noopener noreferrer">On the App Store</a></span>
       </div>
       <div class="cell">
