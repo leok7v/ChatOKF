@@ -245,6 +245,28 @@ final class StoreReferenceTests: XCTestCase {
         try? FileManager.default.removeItem(at: root)
     }
 
+    func testTheParagraphSidecarRoundTripsAndScoresTheBody() throws {
+        let e = try embedder()
+        let root = try copyOfData(cold: false)
+        try? FileManager.default.removeItem(at: root.appendingPathComponent(
+            Store.paragraphSidecarName(for: e.name)))
+        let cold = Store(root: root, embedder: e)
+        cold.load()
+        let long = cold.concepts.filter { c in c.paragraphVectors.count > 1 }
+        XCTAssertGreaterThan(long.count, 0)
+        XCTAssertGreaterThan(cold.embeddedCount, 0)
+        XCTAssertEqual(Store.scoredParagraphs("one paragraph only").count, 0)
+        let warm = Store(root: root, embedder: e)
+        warm.load()
+        XCTAssertEqual(warm.embeddedCount, 0, "the paragraph sidecar loads")
+        for (a, b) in zip(cold.concepts, warm.concepts) {
+            XCTAssertEqual(a.paragraphVectors, b.paragraphVectors, a.id)
+        }
+        print("[store] \(long.count) of \(cold.concepts.count) concepts carry "
+              + "paragraph vectors, \(cold.embeddedCount) embedded cold")
+        try? FileManager.default.removeItem(at: root)
+    }
+
     func testASecondReadEmbedsNoParagraphAgain() throws {
         let e = try embedder()
         let root = try copyOfData(cold: false)

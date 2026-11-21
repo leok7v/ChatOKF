@@ -18,6 +18,8 @@ final class QwenMetalMTP {
     private let bFfnGate, bFfnUp: MTLBuffer
     let bHidden: MTLBuffer
     let bLogits: MTLBuffer
+    private let bRot: MTLBuffer
+    private let fold: FoldBuffers?
 
     init(_ model: QwenModel, _ w: QwenMTP, ctx: MetalContext, pageP: Int) {
         self.w = w
@@ -26,7 +28,9 @@ final class QwenMetalMTP {
         map = model.gguf.map
         tokEmbd = model.tokEmbd
         head = model.output
+        fold = FoldBuffers(model, ctx)
         let c = model.cfg
+        bRot = ctx.makeF32(c.nEmbd)
         pool = MetalKVPool(device: ctx.device, P: pageP,
                            kvDim: c.headDim * c.nHeadKV,
                            capacity: MetalKVPool.pagesFor(model.gguf,
@@ -91,7 +95,14 @@ final class QwenMetalMTP {
         f.rmsnorm(x: bCur, weightOff: off(w.headNorm), out: bHidden,
                   n: c.nEmbd, eps: c.eps)
         if wantHead {
-            f.gemv(head, x: bHidden, out: bLogits, off: off(head))
+            var fed = bHidden
+            if let fb = fold, let t = fb.fold.transform(head) {
+                f.hadamard(x: bHidden, out: bRot, signs: fb.signs[c.nEmbd]!,
+                           K: c.nEmbd, rows: 1, block: t.block,
+                           inverse: false)
+                fed = bRot
+            }
+            f.gemv(head, x: fed, out: bLogits, off: off(head))
         }
     }
 
@@ -144,6 +155,10 @@ final class QwenMetalMTP {
         let rowBytes = GGUF.rowByteCount(tokEmbd.type, c.nEmbd)
         f.dequantRow(weightOff: off(tokEmbd) + UInt64(token * rowBytes),
                      out: bEmbed, n: c.nEmbd, type: tokEmbd.type)
+        if let fb = fold, let t = fb.fold.inverseTransform(tokEmbd) {
+            f.hadamard(x: bEmbed, out: bEmbed, signs: fb.signs[c.nEmbd]!,
+                       K: c.nEmbd, rows: 1, block: t.block, inverse: true)
+        }
         f.rmsnorm(x: bEmbed, weightOff: off(w.enorm), out: bCat, n: c.nEmbd,
                   eps: c.eps)
         f.rmsnorm(x: hidden, weightOff: off(w.hnorm), out: bCat, n: c.nEmbd,

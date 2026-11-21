@@ -53,6 +53,9 @@ targets:
         SWIFT_INSTALL_OBJC_HEADER: "NO"
         # Binds cblas_sgemm$NEWLAPACK.
         OTHER_SWIFT_FLAGS: -Xcc -DACCELERATE_NEW_LAPACK
+        EXCLUDED_SOURCE_FILE_NAMES[sdk=iphoneos*]: "*-macOS.swift"
+        EXCLUDED_SOURCE_FILE_NAMES[sdk=iphonesimulator*]: "*-macOS.swift"
+        EXCLUDED_SOURCE_FILE_NAMES[sdk=macosx*]: "*-iOS.swift"
       configs:
         # OPTIMIZED EVEN IN DEBUG.
         Debug:
@@ -77,6 +80,27 @@ targets:
         OTHER_SWIFT_FLAGS: -Xcc -DACCELERATE_NEW_LAPACK
       configs:
         # Unusable unoptimized: the engine is plain loops over floats.
+        Debug:
+          SWIFT_OPTIMIZATION_LEVEL: "-O"
+  # Speech in: the Whistle recognizer. Self contained like TTS, it imports
+  # neither LLM nor Chat.
+  ASR:
+    type: library.static
+    supportedDestinations: [macOS, iOS]
+    sources:
+      - path: ASR
+        excludes:
+          - WhistleTests.swift
+          - buildServer.json
+    settings:
+      base:
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: complete
+        SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
+        SWIFT_INSTALL_OBJC_HEADER: "NO"
+        # Binds cblas_sgemm$NEWLAPACK.
+        OTHER_SWIFT_FLAGS: -Xcc -DACCELERATE_NEW_LAPACK
+      configs:
         Debug:
           SWIFT_OPTIMIZATION_LEVEL: "-O"
   # The Xet download protocol: chunk decode, reconstruction, parallel
@@ -167,6 +191,7 @@ targets:
       - target: LLM
       - target: MD
       - target: TTS
+      - target: ASR
       - target: XET
     configFiles:
       Debug: config/platform.xcconfig
@@ -215,6 +240,7 @@ targets:
     dependencies:
       - target: LLM
       - target: TTS
+      - target: ASR
       - target: XET
     settings:
       base:
@@ -317,6 +343,25 @@ targets:
         # Ad hoc on macOS, as in ChatOKFTests.
         CODE_SIGN_STYLE: Automatic
         CODE_SIGN_IDENTITY[sdk=macosx*]: "-"
+  # UNHOSTED for the same reason as LLMTests. TTS speaks the clip one test
+  # hears.
+  ASRTests:
+    type: bundle.unit-test
+    supportedDestinations: [macOS, iOS]
+    sources:
+      - ASR/WhistleTests.swift
+    dependencies:
+      - target: ASR
+      - target: TTS
+    settings:
+      base:
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: complete
+        SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
+        GENERATE_INFOPLIST_FILE: YES
+        # Ad hoc on macOS, as in ChatOKFTests.
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY[sdk=macosx*]: "-"
   # UNHOSTED for the same reason as LLMTests. The live suite runs only with
   # CHATOKF_LIVE_NETWORK set.
   XETTests:
@@ -344,6 +389,7 @@ schemes:
         LLMTests: [test]
         MDTests: [test]
         TTSTests: [test]
+        ASRTests: [test]
         XETTests: [test]
     test:
       config: Debug
@@ -352,6 +398,7 @@ schemes:
         - LLMTests
         - MDTests
         - TTSTests
+        - ASRTests
         - XETTests
     run:
       config: Release
@@ -380,6 +427,7 @@ schemes:
         LLMTests: [test]
         MDTests: [test]
         TTSTests: [test]
+        ASRTests: [test]
         XETTests: [test]
     test:
       config: Debug
@@ -390,4 +438,5 @@ schemes:
         - LLMTests
         - MDTests
         - TTSTests
+        - ASRTests
         - XETTests

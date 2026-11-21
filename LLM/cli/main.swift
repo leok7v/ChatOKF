@@ -64,6 +64,7 @@ let pkVal = args.value("--precook")
 let imageBudget = args.int("--image-budget") ?? 280
 let greedyDecode = args.flag("--greedy")
 let stopAtVal = args.int("--stop-at")
+let lettersVal = args.int("--letters")
 var stopArmed = true
 
 if args.flag("--emit-iq-tables") {
@@ -72,6 +73,7 @@ if args.flag("--emit-iq-tables") {
 }
 
 try probeTTS()
+try probeASR()
 try probeVit()
 
 let arg1 = args.rest.first ?? ""

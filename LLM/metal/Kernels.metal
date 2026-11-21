@@ -23,18 +23,20 @@ inline float srq_side(float v, float s, float lo, float hi) {
 // two-blocks-in-flight shape is TUNED; do not simplify without re-measuring.
 struct GemvArgs { ulong woff; uint K; uint M; };
 
-kernel void q2_0_gemv(
-        device const uchar * weights [[buffer(0)]],
-        device const float * x       [[buffer(1)]],
-        device       float * out     [[buffer(2)]],
-        constant GemvArgs  & a       [[buffer(3)]],
-        uint3  tgpig [[threadgroup_position_in_grid]],
-        ushort tiisg [[thread_index_in_simdgroup]]) {
+template <int QK>
+inline void q2_0_gemv_impl(
+        device const uchar * weights,
+        device const float * x,
+        device       float * out,
+        constant GemvArgs  & a,
+        uint3  tgpig,
+        ushort tiisg) {
     const uint NR0 = 8;
     const uint row0 = tgpig.x * NR0;
-    const uint nblk = a.K / 128;
-    const ushort TPB = 8, SW = 16, STEP = 32 / TPB;   // 4 blocks in flight
-    const ulong rowBytes = (ulong) nblk * 34;
+    const uint nblk = a.K / QK;
+    const ushort SW = 16, TPB = QK / SW, STEP = 32 / TPB;
+    const ushort BB = 2 + QK / 4;
+    const ulong rowBytes = (ulong) nblk * BB;
     device const uchar * W = weights + a.woff;
     const ushort grp = tiisg / TPB;
     const ushort il  = (tiisg % TPB) * SW;
@@ -44,8 +46,8 @@ kernel void q2_0_gemv(
     uint ib = grp;
     for (; ib + STEP < nblk; ib += 2 * STEP) {
         const uint ib0 = ib, ib1 = ib + STEP;
-        device const float * y0 = x + (ulong) ib0 * 128 + il;
-        device const float * y1 = x + (ulong) ib1 * 128 + il;
+        device const float * y0 = x + (ulong) ib0 * QK + il;
+        device const float * y1 = x + (ulong) ib1 * QK + il;
         float yl0[16], yl1[16];
         float sy0 = 0.0f, sy1 = 0.0f;
         for (ushort i = 0; i < SW; i++) {
@@ -56,9 +58,9 @@ kernel void q2_0_gemv(
             const uint row = row0 + r;
             if (row < a.M) {
                 device const uchar * b0 =
-                    W + row * rowBytes + (ulong) ib0 * 34;
+                    W + row * rowBytes + (ulong) ib0 * BB;
                 device const uchar * b1 =
-                    W + row * rowBytes + (ulong) ib1 * 34;
+                    W + row * rowBytes + (ulong) ib1 * BB;
                 const float d0 = (float) (*(device const half *) b0);
                 const float d1 = (float) (*(device const half *) b1);
                 device const uchar * q0 = b0 + 2 + il / 4;
@@ -78,7 +80,7 @@ kernel void q2_0_gemv(
         }
     }
     for (; ib < nblk; ib += STEP) {           // tail (odd block count)
-        device const float * y = x + (ulong) ib * 128 + il;
+        device const float * y = x + (ulong) ib * QK + il;
         float yl[16];
         float sy = 0.0f;
         for (ushort i = 0; i < SW; i++) {
@@ -88,7 +90,7 @@ kernel void q2_0_gemv(
         for (uint r = 0; r < NR0; r++) {
             const uint row = row0 + r;
             if (row < a.M) {
-                device const uchar * bp = W + row * rowBytes + (ulong) ib * 34;
+                device const uchar * bp = W + row * rowBytes + (ulong) ib * BB;
                 const float d = (float) (*(device const half *) bp);
                 device const uchar * qs = bp + 2 + il / 4;
                 float lo = 0.0f, hi = 0.0f;
@@ -108,19 +110,32 @@ kernel void q2_0_gemv(
     }
 }
 
+#define Q20_GEMV_KERNEL(NAME, QK)                                      \
+kernel void NAME(                                                      \
+        device const uchar * weights [[buffer(0)]],                    \
+        device const float * x       [[buffer(1)]],                    \
+        device       float * out     [[buffer(2)]],                    \
+        constant GemvArgs  & a       [[buffer(3)]],                    \
+        uint3  tgpig [[threadgroup_position_in_grid]],                 \
+        ushort tiisg [[thread_index_in_simdgroup]]) {                  \
+    q2_0_gemv_impl<QK>(weights, x, out, a, tgpig, tiisg);              \
+}
+
+Q20_GEMV_KERNEL(q2_0_gemv, 128)
+Q20_GEMV_KERNEL(q2_64_gemv, 64)
+
 
 // out[n*M+m] matches GQ.matvec's column order.
 struct block_q2_0 { half d; uchar qs[32]; };
+struct block_q2_64 { half d; uchar qs[16]; };
 struct block_q4_0 { half d; uchar qs[16]; };
 struct block_q8_0 { half d; char qs[32]; };
 struct block_iq4_nl { half d; uchar qs[16]; };
 
 // The `_h` twins write half DIRECTLY, not via float. Q4_0 splits a byte into
 // element j (LOW nibble) and j+16 (HIGH), so its sub-blocks interleave.
-static inline void dq_q2_0_h(device const block_q2_0 * xb, short il,
-                             thread half4x4 & reg) {
-    device const uchar * qs = xb->qs;
-    const half d = xb->d;
+static inline void dq_q2_codes_h(device const uchar * qs, half d, short il,
+                                 thread half4x4 & reg) {
     const int bo = il * 4;
     for (int i = 0; i < 4; i++) {
         const uchar b = qs[bo + i];
@@ -129,6 +144,16 @@ static inline void dq_q2_0_h(device const block_q2_0 * xb, short il,
         reg[i][2] = ((half) ((b >> 4) & 3) - 1.0h) * d;
         reg[i][3] = ((half) ((b >> 6) & 3) - 1.0h) * d;
     }
+}
+
+static inline void dq_q2_0_h(device const block_q2_0 * xb, short il,
+                             thread half4x4 & reg) {
+    dq_q2_codes_h(xb->qs, xb->d, il, reg);
+}
+
+static inline void dq_q2_64_h(device const block_q2_64 * xb, short il,
+                              thread half4x4 & reg) {
+    dq_q2_codes_h(xb->qs, xb->d, il, reg);
 }
 
 
@@ -310,6 +335,7 @@ kernel void NAME(                                                           \
 }
 
 GEMM_MM_KERNEL(q2_0_gemm_mm_h, block_q2_0, half,  8, 128, dq_q2_0_h)
+GEMM_MM_KERNEL(q2_64_gemm_mm_h, block_q2_64, half, 4, 64, dq_q2_64_h)
 GEMM_MM_KERNEL(q4_0_gemm_mm_h, block_q4_0, half,  2,  32, dq_q4_0_h)
 GEMM_MM_KERNEL(q8_0_gemm_mm_h, block_q8_0, half,  2,  32, dq_q8_0_h)
 
@@ -2300,20 +2326,31 @@ static inline void dq_iq4_nl_h(device const block_iq4_nl * xb, short il,
 GEMM_MM_KERNEL(iq4_nl_gemm_mm_h, block_iq4_nl, half,  2,  32, dq_iq4_nl_h)
 
 // `woff` already points at the wanted row's first block.
-kernel void q2_0_dequant_row(
-        device const uchar * weights [[buffer(0)]],
-        device       float * out     [[buffer(1)]],
-        constant GemvArgs  & a       [[buffer(2)]],
-        uint gid [[thread_position_in_grid]]) {
+template <int QK>
+inline void q2_0_dequant_row_impl(device const uchar * weights,
+                                  device float * out, constant GemvArgs & a,
+                                  uint gid) {
     if (gid < a.K) {
-        const uint ib = gid / 128;
-        const uint j  = gid % 128;
-        device const uchar * bp = weights + a.woff + (ulong) ib * 34;
+        const uint ib = gid / QK;
+        const uint j  = gid % QK;
+        device const uchar * bp = weights + a.woff + (ulong) ib * (2 + QK / 4);
         const float d = (float) (*(device const half *) bp);
         const uchar code = (bp[2 + (j >> 2)] >> ((j & 3) * 2)) & 3;
         out[gid] = (float) ((int) code - 1) * d;
     }
 }
+
+#define Q20_DQROW_KERNEL(NAME, QK)                                     \
+kernel void NAME(                                                      \
+        device const uchar * weights [[buffer(0)]],                    \
+        device       float * out     [[buffer(1)]],                    \
+        constant GemvArgs  & a       [[buffer(2)]],                    \
+        uint gid [[thread_position_in_grid]]) {                        \
+    q2_0_dequant_row_impl<QK>(weights, out, a, gid);                   \
+}
+
+Q20_DQROW_KERNEL(q2_0_dequant_row, 128)
+Q20_DQROW_KERNEL(q2_64_dequant_row, 64)
 
 
 // The same codebook and offset gemma's INT4 QAT uses, which is what makes the
@@ -2483,7 +2520,7 @@ Q40_NB_KERNEL(q4_0_gemm_nb_r5, 5, 4)
 
 // One weight read serves R1 columns: prefill without matrix units is
 // otherwise one weight stream per token. A column stages a quarter block.
-template<ushort R1, ushort NR0>
+template<ushort R1, ushort NR0, int QK>
 void q2_0_gemm_nb_impl(
         device const uchar * weights,
         device const float * X,
@@ -2495,9 +2532,10 @@ void q2_0_gemm_nb_impl(
     const ushort NY = 32 / NX;
     const ushort tx = tiisg % NX;
     const ushort ty = tiisg / NX;
+    const ushort BB = 2 + QK / 4;
     const uint row0 = (tgpig.x * NY + ty) * NR0;
-    const uint nblk = a.K / 128;
-    const ulong rowBytes = (ulong) nblk * 34;
+    const uint nblk = a.K / QK;
+    const ulong rowBytes = (ulong) nblk * BB;
     device const uchar * W = weights + a.woff;
     float acc[NR0 * R1];
     #pragma clang loop unroll(full)
@@ -2509,7 +2547,7 @@ void q2_0_gemm_nb_impl(
         #pragma clang loop unroll(full)
         for (ushort r = 0; r < NR0; r++) {
             device const uchar * bp = W
-                + min(row0 + r, a.M - 1) * rowBytes + (ulong) ib * 34;
+                + min(row0 + r, a.M - 1) * rowBytes + (ulong) ib * BB;
             dd[r] = (row0 + r < a.M)
                 ? (float) (*(device const half *) bp) : 0.0f;
             qs[r] = bp + 2;
@@ -2517,12 +2555,12 @@ void q2_0_gemm_nb_impl(
         float sy[R1];
         #pragma clang loop unroll(full)
         for (ushort c = 0; c < R1; c++) { sy[c] = 0.0f; }
-        for (ushort g = 0; g < 32; g++) {
+        for (ushort g = 0; g < QK / 4; g++) {
             float4 yv[R1];
             #pragma clang loop unroll(full)
             for (ushort c = 0; c < R1; c++) {
                 device const float4 * y = (device const float4 *)
-                    (X + (ulong) c * a.K + (ulong) ib * 128);
+                    (X + (ulong) c * a.K + (ulong) ib * QK);
                 yv[c] = y[g];
                 sy[c] += yv[c].x + yv[c].y + yv[c].z + yv[c].w;
             }
@@ -2568,7 +2606,7 @@ void q2_0_gemm_nb_impl(
     }
 }
 
-#define Q20_NB_KERNEL(NAME, R1, NR0)                                   \
+#define Q20_NB_KERNEL(NAME, R1, NR0, QK)                               \
 kernel void NAME(                                                      \
         device const uchar * weights [[buffer(0)]],                    \
         device const float * X       [[buffer(1)]],                    \
@@ -2576,13 +2614,17 @@ kernel void NAME(                                                      \
         constant GemvArgs  & a       [[buffer(3)]],                    \
         uint3  tgpig [[threadgroup_position_in_grid]],                 \
         ushort tiisg [[thread_index_in_simdgroup]]) {                  \
-    q2_0_gemm_nb_impl<R1, NR0>(weights, X, out, a, tgpig, tiisg);      \
+    q2_0_gemm_nb_impl<R1, NR0, QK>(weights, X, out, a, tgpig, tiisg);  \
 }
 
-Q20_NB_KERNEL(q2_0_gemm_nb_r2, 2, 4)
-Q20_NB_KERNEL(q2_0_gemm_nb_r3, 3, 4)
-Q20_NB_KERNEL(q2_0_gemm_nb_r4, 4, 4)
-Q20_NB_KERNEL(q2_0_gemm_nb_r5, 5, 4)
+Q20_NB_KERNEL(q2_0_gemm_nb_r2, 2, 4, 128)
+Q20_NB_KERNEL(q2_0_gemm_nb_r3, 3, 4, 128)
+Q20_NB_KERNEL(q2_0_gemm_nb_r4, 4, 4, 128)
+Q20_NB_KERNEL(q2_0_gemm_nb_r5, 5, 4, 128)
+Q20_NB_KERNEL(q2_64_gemm_nb_r2, 2, 4, 64)
+Q20_NB_KERNEL(q2_64_gemm_nb_r3, 3, 4, 64)
+Q20_NB_KERNEL(q2_64_gemm_nb_r4, 4, 4, 64)
+Q20_NB_KERNEL(q2_64_gemm_nb_r5, 5, 4, 64)
 
 
 kernel void q4_0_dequant_row(
@@ -3315,6 +3357,225 @@ kernel void add_inplace(device float * x [[buffer(0)]],
     if (gid < n) { x[gid] += y[gid]; }
 }
 
+struct HadArgs { uint K; uint blocks; float scale; };
+
+constexpr int had_log2(int n) { return n <= 1 ? 0 : 1 + had_log2(n / 2); }
+
+template <int NE>
+inline void had_regs(thread float (&reg)[NE]) {
+    #pragma clang loop unroll(full)
+    for (int b = 0; b < had_log2(NE); b++) {
+        const int m = 1 << b;
+        #pragma clang loop unroll(full)
+        for (int j = 0; j < NE; j++) {
+            if ((j & m) == 0) {
+                const float x = reg[j];
+                const float y = reg[j | m];
+                reg[j] = x + y;
+                reg[j | m] = x - y;
+            }
+        }
+    }
+}
+
+template <int NE>
+inline void had_lanes(thread float (&reg)[NE], ushort lane) {
+    #pragma clang loop unroll(full)
+    for (int b = 0; b < 5; b++) {
+        const int m = 1 << b;
+        #pragma clang loop unroll(full)
+        for (int j = 0; j < NE; j++) {
+            const float x = reg[j];
+            const float y = simd_shuffle_xor(x, m);
+            reg[j] = (lane & m) == 0 ? x + y : y - x;
+        }
+    }
+}
+
+template <int N, int NT, bool INV>
+inline void had_load(thread float (&reg)[N / NT], device const float * src,
+                     device const float * s, float scale, ushort tid) {
+    #pragma clang loop unroll(full)
+    for (int i = 0; i < N / NT; i++) {
+        const uint e = i * NT + tid;
+        reg[i] = INV ? src[e] * scale : src[e] * scale * s[e];
+    }
+}
+
+template <int N, int NT, bool INV>
+inline void had_store(thread const float (&reg)[N / NT], device float * dst,
+                      device const float * s, ushort tid) {
+    #pragma clang loop unroll(full)
+    for (int i = 0; i < N / NT; i++) {
+        const uint e = i * NT + tid;
+        dst[e] = INV ? reg[i] * s[e] : reg[i];
+    }
+}
+
+template <int N, bool INV>
+inline void hadamard_sg(device const float * src, device float * dst,
+                        device const float * signs, constant HadArgs & a,
+                        uint g, ushort lane) {
+    constexpr int NE = N / 32;
+    const uint nb = a.K / N;
+    const ulong at = (ulong) (g / nb) * a.K + (ulong) (g % nb) * N;
+    device const float * s = signs + (g % nb) * N;
+    float reg[NE];
+    had_load<N, 32, INV>(reg, src + at, s, a.scale, lane);
+    had_lanes<NE>(reg, lane);
+    had_regs<NE>(reg);
+    had_store<N, 32, INV>(reg, dst + at, s, lane);
+}
+
+template <int N, bool INV>
+inline void hadamard_tg(device const float * src, device float * dst,
+                        device const float * signs, constant HadArgs & a,
+                        threadgroup float * shmem, uint g, ushort tid) {
+    constexpr int NT = 256;
+    constexpr int NE = N / NT;
+    const uint nb = a.K / N;
+    const ulong at = (ulong) (g / nb) * a.K + (ulong) (g % nb) * N;
+    device const float * s = signs + (g % nb) * N;
+    float reg[NE];
+    had_load<N, NT, INV>(reg, src + at, s, a.scale, tid);
+    had_lanes<NE>(reg, (ushort) (tid % 32));
+    #pragma clang loop unroll(full)
+    for (int b = 5; b < 8; b++) {
+        const int m = 1 << b;
+        #pragma clang loop unroll(full)
+        for (int j = 0; j < NE; j++) { shmem[j * NT + tid] = reg[j]; }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        #pragma clang loop unroll(full)
+        for (int j = 0; j < NE; j++) {
+            const float x = reg[j];
+            const float y = shmem[j * NT + (tid ^ m)];
+            reg[j] = (tid & m) == 0 ? x + y : y - x;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    had_regs<NE>(reg);
+    had_store<N, NT, INV>(reg, dst + at, s, tid);
+}
+
+#define HAD_SG_KERNEL(NAME, N, INV)                                         \
+kernel void NAME(                                                           \
+        device const float * src   [[buffer(0)]],                           \
+        device       float * dst   [[buffer(1)]],                           \
+        device const float * signs [[buffer(2)]],                           \
+        constant HadArgs   & a     [[buffer(3)]],                           \
+        uint   tgid  [[threadgroup_position_in_grid]],                      \
+        ushort sgitg [[simdgroup_index_in_threadgroup]],                    \
+        ushort tiisg [[thread_index_in_simdgroup]]) {                       \
+    const uint g = tgid * 4 + sgitg;                                        \
+    if (g < a.blocks) {                                                     \
+        hadamard_sg<N, INV>(src, dst, signs, a, g, tiisg);                  \
+    }                                                                       \
+}
+
+#define HAD_TG_KERNEL(NAME, N, INV)                                         \
+kernel void NAME(                                                           \
+        device const float * src   [[buffer(0)]],                           \
+        device       float * dst   [[buffer(1)]],                           \
+        device const float * signs [[buffer(2)]],                           \
+        constant HadArgs   & a     [[buffer(3)]],                           \
+        threadgroup float  * shmem [[threadgroup(0)]],                      \
+        uint   tgid  [[threadgroup_position_in_grid]],                      \
+        ushort tiitg [[thread_index_in_threadgroup]]) {                     \
+    hadamard_tg<N, INV>(src, dst, signs, a, shmem, tgid, tiitg);            \
+}
+
+HAD_SG_KERNEL(hadamard_512, 512, false)
+HAD_SG_KERNEL(hadamard_512_inv, 512, true)
+HAD_TG_KERNEL(hadamard_1024, 1024, false)
+HAD_TG_KERNEL(hadamard_1024_inv, 1024, true)
+HAD_TG_KERNEL(hadamard_4096, 4096, false)
+HAD_TG_KERNEL(hadamard_4096_inv, 4096, true)
+
+struct GroupArgs { uint hd; uint nk; uint rep; uint rows; };
+
+kernel void hadamard_group(
+        device const float * src [[buffer(0)]],
+        device       float * dst [[buffer(1)]],
+        constant GroupArgs & a   [[buffer(2)]],
+        uint gid [[thread_position_in_grid]]) {
+    const uint width = a.hd * a.nk * a.rep;
+    if (gid < a.rows * width) {
+        const uint row = gid / width;
+        const uint i = gid % width;
+        const uint d = i % a.hd;
+        const uint rep = (i / a.hd) % a.rep;
+        const uint k = i / (a.hd * a.rep);
+        dst[gid] = src[row * width + d + a.hd * (k + a.nk * rep)];
+    }
+}
+
+struct NormHadArgs {
+    ulong woff; uint n; float eps; uint xStride; uint yStride; float scale;
+};
+
+template <bool ADD>
+inline void rmsnorm_had_512_impl(device float * x, device const float * r,
+                                 device const uchar * weights,
+                                 device float * y, device float * rot,
+                                 device const float * signs,
+                                 constant NormHadArgs & a,
+                                 threadgroup float * shmem, uint row,
+                                 uint ntg, uint sgi, uint tii) {
+    device       float * xr = x + (ulong) row * a.xStride;
+    device const float * rr = r + (ulong) row * a.xStride;
+    device       float * yr = y + (ulong) row * a.yStride;
+    device       float * hr = rot + (ulong) row * a.yStride;
+    const uint base = sgi * 512;
+    float reg[16];
+    float ss = 0.0f;
+    #pragma clang loop unroll(full)
+    for (int i = 0; i < 16; i++) {
+        const uint e = base + i * 32 + tii;
+        float v = xr[e];
+        if (ADD) {
+            v += rr[e];
+            xr[e] = v;
+        }
+        reg[i] = v;
+        ss += v * v;
+    }
+    const float sumsq = tg_reduce_sum(ss, shmem, ntg, sgi, tii);
+    const float scale = 1.0f / sqrt(sumsq / (float) a.n + a.eps);
+    device const float * w = (device const float *) (weights + a.woff);
+    #pragma clang loop unroll(full)
+    for (int i = 0; i < 16; i++) {
+        const uint e = base + i * 32 + tii;
+        const float v = reg[i] * scale * w[e];
+        yr[e] = v;
+        reg[i] = v * a.scale * signs[e];
+    }
+    had_lanes<16>(reg, (ushort) tii);
+    had_regs<16>(reg);
+    #pragma clang loop unroll(full)
+    for (int i = 0; i < 16; i++) { hr[base + i * 32 + tii] = reg[i]; }
+}
+
+#define NORM_HAD_KERNEL(NAME, ADD)                                          \
+kernel void NAME(                                                           \
+        device       float * x       [[buffer(0)]],                         \
+        device const float * r       [[buffer(1)]],                         \
+        device const uchar * weights [[buffer(2)]],                         \
+        device       float * y       [[buffer(3)]],                         \
+        device       float * rot     [[buffer(4)]],                         \
+        device const float * signs   [[buffer(5)]],                         \
+        constant NormHadArgs & a     [[buffer(6)]],                         \
+        threadgroup float  * shmem   [[threadgroup(0)]],                    \
+        uint  row  [[threadgroup_position_in_grid]],                        \
+        uint  ntg  [[threads_per_threadgroup]],                             \
+        uint  sgi  [[simdgroup_index_in_threadgroup]],                      \
+        uint  tii  [[thread_index_in_simdgroup]]) {                         \
+    rmsnorm_had_512_impl<ADD>(x, r, weights, y, rot, signs, a, shmem, row,  \
+                              ntg, sgi, tii);                               \
+}
+
+NORM_HAD_KERNEL(rmsnorm_had_512, false)
+NORM_HAD_KERNEL(add_rmsnorm_had_512, true)
+
 // dt (ssm_dt.bias) and aNeg (ssm_a = -exp(A_log)) are SEPARATE f32 tensors
 // and take a buffer each, since nothing puts two tensors in one window.
 struct GateArgs { ulong dtOff; ulong aOff; uint nV; };
@@ -3684,23 +3945,34 @@ kernel void kv_append(
 // woff = token_embd base, K = nEmbd, M = N, rowBytes = the type's row stride.
 struct EmbedArgs { ulong woff; uint K; uint M; uint rowBytes; };
 
-kernel void embed_batch(
-        device const uchar * weights [[buffer(0)]],
-        device const int   * ids     [[buffer(1)]],
-        device       float * out     [[buffer(2)]],
-        constant EmbedArgs & a       [[buffer(3)]],
-        uint gid [[thread_position_in_grid]]) {
+template <int QK>
+inline void q2_0_embed_impl(device const uchar * weights,
+                            device const int * ids, device float * out,
+                            constant EmbedArgs & a, uint gid) {
     if (gid < a.M * a.K) {
         const uint n = gid / a.K;
         const uint k = gid % a.K;
         device const uchar * bp = weights + a.woff
-            + (ulong) ids[n] * a.rowBytes + (ulong) (k / 128) * 34;
+            + (ulong) ids[n] * a.rowBytes + (ulong) (k / QK) * (2 + QK / 4);
         const float d = (float) (*(device const half *) bp);
-        const uint j = k % 128;
+        const uint j = k % QK;
         const uchar code = (bp[2 + j / 4] >> ((j & 3) * 2)) & 3;
         out[gid] = (float) ((int) code - 1) * d;
     }
 }
+
+#define Q20_EMBED_KERNEL(NAME, QK)                                     \
+kernel void NAME(                                                      \
+        device const uchar * weights [[buffer(0)]],                    \
+        device const int   * ids     [[buffer(1)]],                    \
+        device       float * out     [[buffer(2)]],                    \
+        constant EmbedArgs & a       [[buffer(3)]],                    \
+        uint gid [[thread_position_in_grid]]) {                        \
+    q2_0_embed_impl<QK>(weights, ids, out, a, gid);                    \
+}
+
+Q20_EMBED_KERNEL(embed_batch, 128)
+Q20_EMBED_KERNEL(q2_64_embed_batch, 64)
 
 
 kernel void q4_0_embed_batch(
@@ -4170,11 +4442,13 @@ inline simdgroup_float8x8 fa_scores(threadgroup const half * qs, uint hd,
 
 // A simdgroup matrix carries no scalar multiply, so the correction rides a
 // DIAGONAL matrix: one extra product per dim tile.
-inline void fa_rescale(thread simdgroup_float8x8 * o, ushort tiles,
+template <ushort OT>
+inline void fa_rescale(thread simdgroup_float8x8 (&o)[OT],
                        threadgroup const half * diag) {
     simdgroup_half8x8 d;
     simdgroup_load(d, diag, 8, ulong2(0, 0), false);
-    for (ushort i = 0; i < tiles; i++) {
+    #pragma clang loop unroll(full)
+    for (ushort i = 0; i < OT; i++) {
         simdgroup_float8x8 t = make_filled_simdgroup_matrix<float, 8>(0.f);
         simdgroup_multiply_accumulate(t, d, o[i], t);
         o[i] = t;
@@ -4230,7 +4504,8 @@ inline void fa_softmax(threadgroup float * s, threadgroup half * p,
     }
 }
 
-inline void fa_context(thread simdgroup_float8x8 * o, ushort oTiles,
+template <ushort OT>
+inline void fa_context(thread simdgroup_float8x8 (&o)[OT],
                        threadgroup const half * p,
                        device const KVTable & vT, uint t0, uint tEnd,
                        uint P, uint kvDim, uint kvh, uint hd, uint slice) {
@@ -4240,7 +4515,8 @@ inline void fa_context(thread simdgroup_float8x8 * o, ushort oTiles,
             simdgroup_half8x8 pm;
             simdgroup_load(pm, p + kb * 8, FA_K, ulong2(0, 0), false);
             device const half * vb = kv_row(vT, t, P, kvDim, kvh, hd) + slice;
-            for (ushort i = 0; i < oTiles; i++) {
+            #pragma clang loop unroll(full)
+            for (ushort i = 0; i < OT; i++) {
                 simdgroup_half8x8 vv;
                 simdgroup_load(vv, vb + i * 8, kvDim, ulong2(0, 0), false);
                 simdgroup_multiply_accumulate(o[i], pm, vv, o[i]);
@@ -4251,12 +4527,14 @@ inline void fa_context(thread simdgroup_float8x8 * o, ushort oTiles,
 
 // Through threadgroup memory, the only place with the [row][dim] layout; each
 // simdgroup lands in its OWN 64-float window, since all four store at once.
-inline void fa_store(thread simdgroup_float8x8 * o, ushort oTiles,
+template <ushort OT>
+inline void fa_store(thread simdgroup_float8x8 (&o)[OT],
                      threadgroup float * mine, threadgroup const float * lRow,
                      device float * outN, device const float * gateN,
                      uint base, uint row, uint hd, uint slice, uint gated,
                      ushort nq, ushort tiisg) {
-    for (ushort i = 0; i < oTiles; i++) {
+    #pragma clang loop unroll(full)
+    for (ushort i = 0; i < OT; i++) {
         simdgroup_store(o[i], mine, 8, ulong2(0, 0), false);
         simdgroup_barrier(mem_flags::mem_threadgroup);
         for (ushort j = tiisg; j < FA_Q * 8; j += 32) {
@@ -4271,22 +4549,22 @@ inline void fa_store(thread simdgroup_float8x8 * o, ushort oTiles,
     }
 }
 
-kernel void attn_batch_mm(
-        device const float   * qN    [[buffer(0)]],
-        device const KVTable & kT    [[buffer(1)]],
-        device const KVTable & vT    [[buffer(2)]],
-        device const float   * gateN [[buffer(3)]],
-        device       float   * outN  [[buffer(4)]],
-        constant AttnBatchArgs & a   [[buffer(5)]],
-        device const uint    * blk   [[buffer(6)]],
-        threadgroup uchar    * shmem [[threadgroup(0)]],
-        uint   tgid  [[threadgroup_position_in_grid]],
-        ushort tiitg [[thread_index_in_threadgroup]],
-        ushort sgitg [[simdgroup_index_in_threadgroup]],
-        ushort tiisg [[thread_index_in_simdgroup]]) {
-    const uint hd = a.hd;
+template <ushort OT>
+inline void attn_batch_mm_impl(
+        device const float   * qN,
+        device const KVTable & kT,
+        device const KVTable & vT,
+        device const float   * gateN,
+        device       float   * outN,
+        constant AttnBatchArgs & a,
+        device const uint    * blk,
+        threadgroup uchar    * shmem,
+        uint   tgid,
+        ushort tiitg,
+        ushort sgitg,
+        ushort tiisg) {
+    const uint hd = OT * 32;
     const uint slice = sgitg * (hd / 4);       // this simdgroup's dim slice
-    const ushort oTiles = (ushort) (hd / 4 / 8);
     const uint n0 = (tgid / a.nH) * FA_Q;
     const uint h = tgid % a.nH;
     const ushort nq = (ushort) min((uint) FA_Q, a.N - n0);
@@ -4309,8 +4587,9 @@ kernel void attn_batch_mm(
     // The correction matrix is DIAGONAL, so its off-diagonal must be zero and
     // stay zero, which is why each pass clears only the cell it wrote.
     for (uint i = tiitg; i < FA_Q * 8; i += 128) { cDiag[i] = 0.0h; }
-    simdgroup_float8x8 o[16];
-    for (ushort i = 0; i < oTiles; i++) {
+    simdgroup_float8x8 o[OT];
+    #pragma clang loop unroll(full)
+    for (ushort i = 0; i < OT; i++) {
         o[i] = make_filled_simdgroup_matrix<float, 8>(0.f);
     }
     // The union of the LIVE rows' ranges; rows past nq are excluded, since
@@ -4337,16 +4616,37 @@ kernel void attn_batch_mm(
         threadgroup_barrier(mem_flags::mem_threadgroup);
         fa_softmax(sBuf, pBuf, mRow, lRow, cDiag, tiitg);
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        fa_rescale(o, oTiles, cDiag);
-        fa_context(o, oTiles, pBuf, vT, t0, tEnd, a.P, a.kvDim, kvh, hd,
-                   slice);
+        fa_rescale<OT>(o, cDiag);
+        fa_context<OT>(o, pBuf, vT, t0, tEnd, a.P, a.kvDim, kvh, hd, slice);
         threadgroup_barrier(mem_flags::mem_threadgroup);
         for (uint i = tiitg; i < FA_Q * 8; i += 128) { cDiag[i] = 0.0h; }
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
-    fa_store(o, oTiles, sBuf + sgitg * 64, lRow, outN, gateN, base, row, hd,
-             slice, a.gated, nq, tiisg);
+    fa_store<OT>(o, sBuf + sgitg * 64, lRow, outN, gateN, base, row, hd,
+                 slice, a.gated, nq, tiisg);
 }
+
+#define ATTN_MM_KERNEL(NAME, OT)                                            \
+kernel void NAME(                                                           \
+        device const float   * qN    [[buffer(0)]],                         \
+        device const KVTable & kT    [[buffer(1)]],                         \
+        device const KVTable & vT    [[buffer(2)]],                         \
+        device const float   * gateN [[buffer(3)]],                         \
+        device       float   * outN  [[buffer(4)]],                         \
+        constant AttnBatchArgs & a   [[buffer(5)]],                         \
+        device const uint    * blk   [[buffer(6)]],                         \
+        threadgroup uchar    * shmem [[threadgroup(0)]],                    \
+        uint   tgid  [[threadgroup_position_in_grid]],                      \
+        ushort tiitg [[thread_index_in_threadgroup]],                       \
+        ushort sgitg [[simdgroup_index_in_threadgroup]],                    \
+        ushort tiisg [[thread_index_in_simdgroup]]) {                       \
+    attn_batch_mm_impl<OT>(qN, kT, vT, gateN, outN, a, blk, shmem, tgid,    \
+                           tiitg, sgitg, tiisg);                            \
+}
+
+ATTN_MM_KERNEL(attn_batch_h128_mm, 4)
+ATTN_MM_KERNEL(attn_batch_h256_mm, 8)
+ATTN_MM_KERNEL(attn_batch_h512_mm, 16)
 
 // Each mirrors the CPU ViT (Qwen/QwenViT.swift) op for op; that is the oracle.
 

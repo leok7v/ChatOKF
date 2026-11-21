@@ -65,6 +65,14 @@ enum Credits {
                    + "Swift speaks them on device with no network. The "
                    + "license's use restrictions, shown below, bind every "
                    + "use of the voice."),
+        Credit(name: "Whistle",
+               author: "Cactus Compute",
+               terms: "Apache-2.0",
+               source: "https://huggingface.co/Cactus-Compute/whistle",
+               changed: "Hears you for the models that have no ears of "
+                   + "their own. The file is the authors' own, downloaded "
+                   + "with the first model; our engine in Swift turns your "
+                   + "speech into text on this device."),
         Credit(name: "bekko-embedding-v1-a25m",
                author: "Yuichi Tateno (hotchpotch)",
                terms: "MIT",

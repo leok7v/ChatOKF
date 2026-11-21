@@ -77,12 +77,13 @@ import Observation
 
     public var count: Int { list.count }
 
-    public func open() {
+    public func open(encoder: String? = nil) {
         if !isOpen, opening == nil, active {
             let excluded = !backup
             let owner = self.owner
             opening = Task(priority: .utility) { [weak self] in
-                let opened = await owner.open(excludedFromBackup: excluded)
+                let opened = await owner.open(excludedFromBackup: excluded,
+                                              encoder: encoder)
                 if let self, let opened, !Task.isCancelled {
                     self.adopt(opened.snapshot)
                     self.isOpen = true
@@ -154,19 +155,32 @@ import Observation
         await owner.map()
     }
 
-    static func line(_ concept: Concept) -> String {
+    static func line(_ concept: Concept,
+                     window: (from: Int, to: Int)? = nil) -> String {
         var out = "- " + concept.title
         if concept.description.lowercased().hasPrefix(Memories.opening) {
             out = "- " + concept.description
         } else if !concept.description.isEmpty {
             out += ": " + concept.description
         }
-        let body = concept.body.replacingOccurrences(of: "\n", with: " ")
-        if !body.isEmpty {
-            out += "\n  " + String(body.prefix(Memories.bodyCap))
-            if body.count > Memories.bodyCap { out += " ..." }
+        let bytes = Array(concept.body.utf8)
+        let span = window ?? (0, Memories.bodyCap)
+        let end = Memories.boundary(bytes, span.to)
+        if !bytes.isEmpty {
+            let text = String(decoding: bytes[span.from..<end], as: UTF8.self)
+                .replacingOccurrences(of: "\n", with: " ")
+            out += "\n  " + (span.from > 0 ? "... " : "") + text
+            if end < bytes.count { out += " ..." }
         }
         return out + "\n"
+    }
+
+    static func boundary(_ bytes: [UInt8], _ at: Int) -> Int {
+        var end = min(at, bytes.count)
+        while end > 0 && end < bytes.count && bytes[end] & 0xC0 == 0x80 {
+            end -= 1
+        }
+        return end
     }
 
     func relevant(_ hit: Hit) -> Bool {
@@ -184,7 +198,8 @@ import Observation
             let found = await owner.search(
                 ticket, queries, limit: Memories.recallLimit + read.count)
             if let found {
-                out = recalled(found, pp: pp, excluding: read)
+                out = await recalled(found, about: question, pp: pp,
+                                     excluding: read)
             } else {
                 Diag.shared.report(.turn, "[recall] superseded")
             }
@@ -195,23 +210,31 @@ import Observation
         return out
     }
 
-    private func recalled(_ result: SearchResult, pp: Double,
-                          excluding read: Set<String>) -> Recall? {
+    private func recalled(_ result: SearchResult, about question: String,
+                          pp: Double,
+                          excluding read: Set<String>) async -> Recall? {
         var out: Recall? = nil
         let searched = result.embedSeconds + result.scanSeconds
             + result.literalSeconds
-        let fresh = result.hits.filter { hit in
+        let fresh = Memories.freshestFirst(result.hits.filter { hit in
             !read.contains(hit.concept.id) && relevant(hit)
                 && Memories.recalls(hit.concept)
-        }.prefix(Memories.recallLimit)
+        }).prefix(Memories.recallLimit)
         if !fresh.isEmpty {
             var notes = fresh.map { hit in hit.concept }
+            var windows: [String: (from: Int, to: Int)] = [:]
+            for note in notes {
+                windows[note.id] = await owner.window(
+                    note.id, about: question, limit: Memories.bodyCap)
+            }
             var made = Memories.recall(of: notes, standout: result.standout,
-                                       searched: searched, pp: pp)
+                                       searched: searched, pp: pp,
+                                       windows: windows)
             while made.seconds > Memories.budgetSeconds, notes.count > 1 {
                 notes.removeLast()
                 made = Memories.recall(of: notes, standout: result.standout,
-                                       searched: searched, pp: pp)
+                                       searched: searched, pp: pp,
+                                       windows: windows)
             }
             out = made
         } else {
@@ -232,17 +255,47 @@ import Observation
         concept.type != MemoryStore.documentType
     }
 
+    nonisolated static let recencyMargin: Float = 0.03
+
+    nonisolated static func freshestFirst(_ hits: [Hit]) -> [Hit] {
+        let top = hits.map { hit in hit.relevance }.max() ?? 0
+        let close = hits.filter { hit in
+            hit.relevance >= top - Memories.recencyMargin
+        }
+        let rest = hits.filter { hit in
+            hit.relevance < top - Memories.recencyMargin
+        }
+        let dated = close.sorted { left, right in
+            let l = left.concept.generatedAt ?? .distantPast
+            let r = right.concept.generatedAt ?? .distantPast
+            let ordered: Bool
+            if l != r {
+                ordered = l > r
+            } else if left.relevance != right.relevance {
+                ordered = left.relevance > right.relevance
+            } else {
+                ordered = left.concept.id < right.concept.id
+            }
+            return ordered
+        }
+        return dated + rest
+    }
+
     static let heading = "What you remember about me from our earlier "
         + "chats (in these notes \"the user\" is me, the person "
         + "writing to you); use what bears on my message:\n"
 
     public static func recall(of notes: [Concept], standout: Float = 0,
                               searched: Double = 0, pp: Double,
-                              block given: String = "") -> Recall {
+                              block given: String = "",
+                              windows: [String: (from: Int, to: Int)] = [:])
+        -> Recall {
         var block = given
         if block.isEmpty {
             block = Memories.heading
-            for note in notes { block += Memories.line(note) }
+            for note in notes {
+                block += Memories.line(note, window: windows[note.id])
+            }
             block += "\n"
         }
         let tokens = Int(Double(block.utf8.count) / Memories.bytesPerToken)

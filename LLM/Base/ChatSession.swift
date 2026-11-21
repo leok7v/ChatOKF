@@ -91,6 +91,7 @@ public actor ChatSession {
     private let toolDialectXML: Bool
     private let wire: ChatWire
     private var turnSampler: Sampler?
+    private var logitTap: (@Sendable ([Float]) -> Void)?
     static let maxToolRounds = 10
     static let maxFruitless = 2
     // While a call is open nothing streams and the loop breaker never trips, so
@@ -252,6 +253,10 @@ public actor ChatSession {
 
     public func setTrace(_ sink: (@Sendable (TraceEvent) -> Void)?) {
         traceSink = sink
+    }
+
+    public func setLogitTap(_ tap: (@Sendable ([Float]) -> Void)?) {
+        logitTap = tap
     }
 
     public func supportsSoftTokens() async -> Bool {
@@ -1533,6 +1538,9 @@ public actor ChatSession {
         if overthinkLambda != 0 && reasons && !overthinkTokens.isEmpty {
             sampler.overthinkTokens = overthinkTokens
             sampler.overthinkLambda = overthinkLambda
+        }
+        if let tap = logitTap {
+            sampler.logitMask = { logits in tap(logits) }
         }
         turnSampler = sampler
         if let gate = ensureGate() { gate.disarm() }

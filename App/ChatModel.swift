@@ -1,3 +1,5 @@
+import ASR
+@preconcurrency import AVFoundation
 import Chat
 import Foundation
 import ImageIO
@@ -89,7 +91,7 @@ import UniformTypeIdentifiers
     var inTurn: Bool { busy || listening || speech.engaged }
 
     var voiceReady: Bool {
-        lastTurnSpoken && canAttachAudio && !busy && !listening
+        lastTurnSpoken && canHear && !busy && !listening
             && !speech.engaged && input.isEmpty
     }
 
@@ -206,22 +208,46 @@ import UniformTypeIdentifiers
     }
 
     enum Sidecar: CaseIterable {
-        case encoder, voice
+        case encoder, voice, hearing
 
         var label: String {
-            self == .encoder ? "memory encoder" : "text to speech"
+            let out: String
+            switch self {
+            case .encoder: out = "memory encoder"
+            case .voice: out = "text to speech"
+            case .hearing: out = "speech to text"
+            }
+            return out
         }
 
         var bytes: Int64 {
-            self == .encoder ? EncoderPack.bytes : VoicePack.chosen.bytes
+            let out: Int64
+            switch self {
+            case .encoder: out = EncoderPack.bytes
+            case .voice: out = VoicePack.chosen.bytes
+            case .hearing: out = HearingPack.bytes
+            }
+            return out
         }
 
         var onDisk: Bool {
-            self == .encoder ? EncoderPack.onDisk : VoicePack.onDisk
+            let out: Bool
+            switch self {
+            case .encoder: out = EncoderPack.onDisk
+            case .voice: out = VoicePack.onDisk
+            case .hearing: out = HearingPack.onDisk
+            }
+            return out
         }
 
         var page: URL {
-            self == .encoder ? EncoderPack.page : VoicePack.page
+            let out: URL
+            switch self {
+            case .encoder: out = EncoderPack.page
+            case .voice: out = VoicePack.page
+            case .hearing: out = HearingPack.page
+            }
+            return out
         }
 
         var sizeText: String {
@@ -230,10 +256,17 @@ import UniformTypeIdentifiers
 
         func fetch(_ onProgress: @escaping @Sendable (HubFetch.Status) -> Void)
             async -> String? {
-            self == .encoder
-                ? await EncoderPack.fetch(background: isOS,
-                                          onProgress: onProgress)
-                : await VoicePack.fetch(onProgress: onProgress)
+            let out: String?
+            switch self {
+            case .encoder:
+                out = await EncoderPack.fetch(background: isOS,
+                                              onProgress: onProgress)
+            case .voice:
+                out = await VoicePack.fetch(onProgress: onProgress)
+            case .hearing:
+                out = await HearingPack.fetch(onProgress: onProgress)
+            }
+            return out
         }
     }
 
@@ -268,6 +301,7 @@ import UniformTypeIdentifiers
                 + (failure ?? "landed"))
         }
         speech.adoptPack()
+        hearingOnDisk = HearingPack.onDisk
         session.memories.open()
     }
 
@@ -336,6 +370,17 @@ import UniformTypeIdentifiers
 
     var canAttachImages: Bool { session.modalities.images }
     var canAttachAudio: Bool { session.modalities.audio }
+    var canHear: Bool { canAttachAudio || whistleHears }
+    private(set) var hearingOnDisk = HearingPack.onDisk
+
+    var whistleHears: Bool {
+        hearingOnDisk && ChatModel.heardLanguage != nil
+    }
+
+    static let heardLanguage: String? = {
+        let code = Locale.current.language.languageCode?.identifier ?? ""
+        return Transcriber.languages.contains(code) ? code : nil
+    }()
     var canAttachVideo: Bool {
         session.modalities.video
             && !attachedClips.contains { c in c.isVideo }
@@ -748,6 +793,8 @@ import UniformTypeIdentifiers
     private static let readFiles = Flags.values("read-file")
     private static let readPrompt = Flags.value("read-prompt") ?? ""
     @ObservationIgnored private var readTask: Task<Void, Never>?
+    private static let hearFiles = Flags.values("hear-file")
+    @ObservationIgnored private var hearTask: Task<Void, Never>?
     struct Demo {
         let prompts: [String]
         let ask: String
@@ -886,6 +933,9 @@ import UniformTypeIdentifiers
             if let demo, !Self.arming, !demo.answer.isEmpty {
                 speech.demoVoice = demo.answer
             }
+            if !Self.benchPrompt.isEmpty {
+                session.toolRunnerOverride = BenchRunner()
+            }
             Instrument.timed("makeSession") {
                 session.makeSession(sessionConfig()) { [weak self] e in
                     self?.recordTrace(e)
@@ -910,6 +960,9 @@ import UniformTypeIdentifiers
             }
             if !Self.readFiles.isEmpty, readTask == nil {
                 readTask = Task { @MainActor in await self.runReadFiles() }
+            }
+            if !Self.hearFiles.isEmpty, hearTask == nil {
+                hearTask = Task { @MainActor in await self.runHearFiles() }
             }
             if let demo, Self.arming {
                 Self.arm(demo)
@@ -1049,6 +1102,80 @@ import UniformTypeIdentifiers
         }
         docBudget = budget
         readTask = nil
+    }
+
+    private func runHearFiles() async {
+        await readTask?.value
+        await session.awaitPrimed()
+        await sidecarTask?.value
+        for file in Self.hearFiles {
+            let samples = ChatModel.audio(ChatModel.cachedFile(file))
+            let said = listenFormat.map { format in
+                ChatModel.gated(samples, format)
+            } ?? []
+            Diag.shared.report(.voice, String(
+                format: "[hear-file] %@: %.1fs, %d utterance(s)", file,
+                Double(samples.count) / Double(Transcriber.sampleRate),
+                said.count))
+            if said.isEmpty {
+                flashNote("Nothing was heard in \(file)")
+            } else if canAttachAudio {
+                sendSpoken(said)
+            } else {
+                sendHeard(said)
+            }
+            await sendTask?.value
+            await settled()
+        }
+        hearTask = nil
+    }
+
+    nonisolated static let roomTone = 0.5
+
+    static func heardName() -> String {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd_HH-mm-ss"
+        return "heard-" + f.string(from: Date()) + ".wav"
+    }
+
+    nonisolated static func audio(_ url: URL) -> [Float] {
+        var out: [Float] = []
+        if let file = try? AVAudioFile(forReading: url),
+           let buffer = AVAudioPCMBuffer(
+               pcmFormat: file.processingFormat,
+               frameCapacity: AVAudioFrameCount(file.length)),
+           (try? file.read(into: buffer)) != nil,
+           let channel = buffer.floatChannelData {
+            let frames = Array(UnsafeBufferPointer(
+                start: channel[0], count: Int(buffer.frameLength)))
+            out = Transcriber.resampled(
+                frames, rate: file.processingFormat.sampleRate)
+        }
+        return out
+    }
+
+    nonisolated static func gated(_ samples: [Float],
+                                  _ format: (rate: Double, seconds: Double))
+        -> [SpeechGate.Utterance] {
+        var out: [SpeechGate.Utterance] = []
+        if format.rate == Double(Transcriber.sampleRate), !samples.isEmpty {
+            let gate = SpeechGate(rate: format.rate,
+                                  maxSeconds: format.seconds)
+            var noise = SplitNoise()
+            let lead = (0..<Int(format.rate * roomTone)).map { _ in
+                noise.next() * 1e-4
+            }
+            let fed = lead + samples
+            var at = 0
+            while at < fed.count {
+                let end = min(at + 4096, fed.count)
+                out += gate.push(Array(fed[at..<end]))
+                at = end
+            }
+            out += gate.finish()
+        }
+        return out
     }
 
     private func runBench() async {
@@ -1957,8 +2084,10 @@ import UniformTypeIdentifiers
 
     private func beginListening() {
         speech.stopSpeaking()
-        if ready, !busy, let rate = session.audioSampleRate,
-           let maxSeconds = session.maxAudioSeconds {
+        if ready, !busy, let format = listenFormat {
+            let rate = format.rate
+            let maxSeconds = format.seconds
+            if !canAttachAudio { warmTranscriber() }
             rateInUse = rate
             let gate = SpeechGate(rate: rate, maxSeconds: maxSeconds)
             let mic = Microphone(rate: rate)
@@ -2060,7 +2189,7 @@ import UniformTypeIdentifiers
         let said = heard.take()
         if DiagGate.voice.on, !said.isEmpty {
             Microphone.keep(said.map { u in u.samples }, rate: rateInUse,
-                            to: ChatModel.cachedFile("heard.wav"))
+                            to: ChatModel.cachedFile(ChatModel.heardName()))
         }
         let secs = Double(heard.samples) / max(rateInUse, 1)
         Diag.shared.report(.voice, String(
@@ -2078,8 +2207,65 @@ import UniformTypeIdentifiers
         } else {
             flashHUD(Whimsical.current(.heard, hold: 0), prominent: true,
                      seconds: 2)
-            sendSpoken(said)
+            if canAttachAudio { sendSpoken(said) } else { sendHeard(said) }
         }
+    }
+
+    private var listenFormat: (rate: Double, seconds: Double)? {
+        var out: (rate: Double, seconds: Double)? = nil
+        if canAttachAudio, let rate = session.audioSampleRate,
+           let seconds = session.maxAudioSeconds {
+            out = (rate, seconds)
+        } else if whistleHears {
+            out = (Double(Transcriber.sampleRate), Transcriber.windowSeconds)
+        }
+        return out
+    }
+
+    @ObservationIgnored private var transcriber: Task<Transcriber?, Never>?
+    @ObservationIgnored private var heardTurn = false
+
+    private func warmTranscriber() {
+        if transcriber == nil, let path = HearingPack.path {
+            transcriber = Task.detached { Transcriber(pack: path) }
+        }
+    }
+
+    private func sendHeard(_ said: [SpeechGate.Utterance]) {
+        warmTranscriber()
+        let pending = transcriber
+        let language = ChatModel.heardLanguage
+        if sendTask == nil {
+            sendTask = Task { @MainActor in
+                let began = Date()
+                let text = await ChatModel.transcribed(
+                    said, by: await pending?.value, language: language)
+                Diag.shared.report(.voice, String(
+                    format: "[hearing] %d utterance(s) -> %d chars in %.2fs",
+                    said.count, text.count, Date().timeIntervalSince(began)))
+                self.sendTask = nil
+                if text.isEmpty {
+                    self.flashNote("Nothing was understood")
+                } else {
+                    self.input = self.input.isEmpty ? text
+                        : self.input + " " + text
+                    self.caret = self.input.utf16.count
+                    self.heardTurn = true
+                    self.send()
+                }
+            }
+        }
+    }
+
+    nonisolated private static func transcribed(
+        _ said: [SpeechGate.Utterance], by transcriber: Transcriber?,
+        language: String?) async -> String {
+        await Task.detached {
+            said.compactMap { utterance in
+                transcriber?.transcribe(utterance.samples, language: language)
+                    .text.trimmingCharacters(in: .whitespacesAndNewlines)
+            }.filter { text in !text.isEmpty }.joined(separator: " ")
+        }.value
     }
 
     var readingDocument: Bool {
@@ -2229,9 +2415,11 @@ import UniformTypeIdentifiers
     private func beginTurn(_ asked: Message, spoken: Bool,
                            cue: SpokenCue.Kind, stage: Whimsical.Stage,
                            events: AsyncStream<TurnEvent>) {
+        let voiced = spoken || heardTurn
+        heardTurn = false
         followupHint = ""
-        spokenTurn = spoken
-        lastTurnSpoken = spoken
+        spokenTurn = voiced
+        lastTurnSpoken = voiced
         prefilling = true
         stopAsked = false
         activePrefillStage = stage
@@ -2907,6 +3095,23 @@ import UniformTypeIdentifiers
         }
     }
 
+}
+
+struct SplitNoise {
+    private var state: UInt64 = 0x9E37_79B9_7F4A_7C15
+
+    mutating func next() -> Float {
+        state = state &* 6364136223846793005 &+ 1442695040888963407
+        return Float(Int64(bitPattern: state >> 1) % 2001 - 1000) / 1000
+    }
+}
+
+struct BenchRunner: ToolRunner {
+    var tools: [ToolSpec] { [] }
+
+    func execute(_ name: String, _ args: [ToolArg]) async -> String {
+        "error: the bench offers no tools"
+    }
 }
 
 final class Paced: @unchecked Sendable {

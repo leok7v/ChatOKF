@@ -133,7 +133,8 @@ public enum QwenMetalKernelBench {
         let reps = 20
         let off = ctx.window(UInt64(t.base - gguf.map))
         var result = -1.0
-        let tiled = [.q2_0, .q4_0, .q8_0, .f16, .bf16, .f32].contains(t.type)
+        let tiled = [.q2_0, .q2_64, .q4_0, .q8_0, .f16, .bf16, .f32]
+            .contains(t.type)
             || Blocks.superBlocked(t.type)
         for _ in 0 ..< 3 {
             var ms = -1.0

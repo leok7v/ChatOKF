@@ -170,6 +170,11 @@ public enum Flags {
         Knob(name: "read-prompt", takesValue: true, help:
             "the question sent with read-file, default a summary request",
             scope: .diagnostic, defaultValue: ""),
+        Knob(name: "hear-file", takesValue: true, help:
+            "a 16 kHz WAV in the app's Caches folder the app hears at "
+            + "launch as if spoken into the microphone, through the speech "
+            + "gate; repeatable, one turn each", scope: .diagnostic,
+            defaultValue: ""),
         Knob(name: "tts-lang", takesValue: true, help:
             "the language tag the reading voice wraps a sentence in: na is "
             + "Supertonic's language-agnostic tag, or one of its 31 codes",

@@ -50,7 +50,7 @@ public struct Judge: Sendable {
         return forms + forms.map { form in " " + form }
     }
 
-    func ids(_ option: String) -> Set<Int32> {
+    public func ids(_ option: String) -> Set<Int32> {
         var out: Set<Int32> = []
         for spelling in Judge.spellings(option) {
             if let first = backend.encode(spelling).first { out.insert(first) }
@@ -58,7 +58,8 @@ public struct Judge: Sendable {
         return out
     }
 
-    static func shares(_ logits: [Float], _ ids: [Set<Int32>]) -> [Double] {
+    public static func shares(_ logits: [Float],
+                              _ ids: [Set<Int32>]) -> [Double] {
         let top = logits.max() ?? 0
         var total = 0.0
         for value in logits { total += exp(Double(value - top)) }

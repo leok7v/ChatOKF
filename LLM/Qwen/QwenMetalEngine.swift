@@ -42,6 +42,8 @@ public final class QwenMetalEngine {
     private let bQFull, bQ, bGate, bK1, bV1, bAttnOut: MTLBuffer
     private let bFfnGate, bFfnUp: MTLBuffer
     private let bLogits: MTLBuffer
+    private let bRot, bORot: MTLBuffer
+    private let fold: FoldBuffers?
 
     public init(_ model: QwenModel, pageP: Int = 512) throws {
         self.model = model
@@ -52,6 +54,9 @@ public final class QwenMetalEngine {
         try ctx.prewarm()
         GPUContender.shared.start(ctx)
         let c = cfg
+        fold = FoldBuffers(model, ctx)
+        bRot = ctx.makeF32(c.nEmbd)
+        bORot = ctx.makeF32(max(c.valueDim, 1))
         bx = ctx.makeF32(c.nEmbd)
         bNormed = ctx.makeF32(c.nEmbd)
         bContrib = ctx.makeF32(c.nEmbd)
@@ -207,12 +212,102 @@ public final class QwenMetalEngine {
         ctx.window(UInt64(t.base - map))
     }
 
+    private func rotated(_ f: MetalEnc, _ w: GGUFTensor, x: MTLBuffer,
+                         into out: MTLBuffer, rows: Int,
+                         xOffBytes: Int = 0) -> (buf: MTLBuffer, off: Int) {
+        var fed = (buf: x, off: xOffBytes)
+        if let fb = fold, let t = fb.fold.transform(w) {
+            var src = x
+            var srcOff = xOffBytes
+            if let g = t.grouping {
+                f.hadamardGroup(x: x, out: out, rows: rows, g)
+                src = out
+                srcOff = 0
+            }
+            f.hadamard(x: src, out: out, signs: fb.signs[w.dims[0]]!,
+                       K: w.dims[0], rows: rows, block: t.block,
+                       inverse: false, xOffBytes: srcOff)
+            fed = (out, 0)
+        }
+        return fed
+    }
+
+    private func gathered(_ f: MetalEnc, x: MTLBuffer, rows: Int) {
+        if let fb = fold, let t = fb.fold.inverseTransform(model.tokEmbd) {
+            f.hadamard(x: x, out: x, signs: fb.signs[cfg.nEmbd]!,
+                       K: cfg.nEmbd, rows: rows, block: t.block,
+                       inverse: true)
+        }
+    }
+
+    private func firstRotated(_ il: Int, count: Int) -> GGUFTensor {
+        var out = model.output
+        if il < count {
+            let L = model.layers[il]
+            out = L.recurrent ? L.wqkv! : L.wq!
+        }
+        return out
+    }
+
+    private func fusedSigns(_ w: GGUFTensor, add: Bool) -> MTLBuffer? {
+        var out: MTLBuffer? = nil
+        if let fb = fold, let t = fb.fold.transform(w), t.grouping == nil,
+           MetalEnc.fusesHadamard(block: t.block, K: w.dims[0]),
+           QwenMetalEngine.runs("norm"),
+           !add || QwenMetalEngine.runs("glue") {
+            out = fb.signs[w.dims[0]]
+        }
+        return out
+    }
+
+    private func normInto(_ f: MetalEnc, x: MTLBuffer, r: MTLBuffer?,
+                          y: MTLBuffer, rot: MTLBuffer, rows: Int,
+                          weightOff: WeightRef, for w: GGUFTensor) -> Fed {
+        var fed = Fed(buf: y, rotated: false)
+        if let signs = fusedSigns(w, add: r != nil) {
+            f.rmsnormHadamard(x: x, r: r, weightOff: weightOff, y: y, rot: rot,
+                              signs: signs, n: w.dims[0], rows: rows,
+                              eps: cfg.eps)
+            fed = Fed(buf: rot, rotated: true)
+        } else if let r {
+            addNorm(f, x: x, r: r, y: y, rows: rows, weightOff: weightOff)
+        } else {
+            firstNorm(f, x: x, y: y, rows: rows, weightOff: weightOff)
+        }
+        return fed
+    }
+
+    private func input(_ f: MetalEnc, _ fed: Fed, _ w: GGUFTensor,
+                       into out: MTLBuffer, rows: Int) -> MTLBuffer {
+        fed.rotated ? fed.buf
+                    : rotated(f, w, x: fed.buf, into: out, rows: rows).buf
+    }
+
     // The batched forward is built on the simdgroup-matrix GEMM, so it exists
     // only with matrix units; an A13 takes the token-by-token path, plain SIMD.
     var batched: Bool { ctx.matrixUnits }
     // Each chunk re-streams all weights once; capped by activation memory and
     // the serial-over-N GDN scan.
     static let prefillChunk = Flags.int("prefill-chunk") ?? 512
+    static let probeChunk = 128
+    private var tokenSeconds = 0.0
+
+    private func timedChunk(_ wanted: Int) -> Int {
+        var out = wanted
+        if let budget = prefillSeconds {
+            let fit = tokenSeconds > 0
+                ? Int(budget / tokenSeconds)
+                : QwenMetalEngine.probeChunk
+            out = min(wanted, max(16, fit))
+        }
+        return out
+    }
+
+    private func learn(_ cb: MTLCommandBuffer, tokens: Int) {
+        let gpu = cb.gpuEndTime - cb.gpuStartTime
+        if gpu > 0, tokens >= 16 { tokenSeconds = gpu / Double(tokens) }
+    }
+
     static let skip: Set<String> = Set(
         (Flags.value("skip") ?? "").split(separator: ",").map(String.init))
     static func runs(_ group: String) -> Bool { !skip.contains(group) }
@@ -267,7 +362,8 @@ public final class QwenMetalEngine {
         let f = MetalEnc(ctx: ctx, e: e, concurrent: true)
         f.embedBatch(ids: idsBuf, weightOff: off(model.tokEmbd), out: b.x,
                      nEmbd: c.nEmbd, N: n, type: model.tokEmbd.type)
-        encodeChunk(f, b, N: n, basePos: 0, pos3: nil, head: false)
+        gathered(f, x: b.x, rows: n)
+        _ = encodeChunk(f, b, N: n, basePos: 0, pos3: nil, head: false)
         e.endEncoding()
         commitTimed(cb, "ppl.trunk")
         let sub = 64
@@ -282,9 +378,11 @@ public final class QwenMetalEngine {
                    span * c.nEmbd * MemoryLayout<Float>.stride)
             let hb = ctx.queue.makeCommandBuffer()!
             let he = hb.makeComputeCommandEncoder()!
-            MetalEnc(ctx: ctx, e: he).gemm(model.output, X: hidden,
-                                           out: logits,
-                                           off: off(model.output), N: span)
+            let hf = MetalEnc(ctx: ctx, e: he)
+            let fed = rotated(hf, model.output, x: hidden, into: hidden,
+                              rows: span)
+            hf.gemm(model.output, X: fed.buf, out: logits,
+                    off: off(model.output), N: span)
             he.endEncoding()
             commitTimed(hb, "ppl.head")
             let lp = logits.contents().assumingMemoryBound(to: Float.self)
@@ -384,29 +482,32 @@ public final class QwenMetalEngine {
     }
 
     func prefillBatch(_ ids: [Int32], chunk c0: Int? = nil) -> Int32 {
-        var chunk = GPUGate.shared.chunkCap(c0 ?? defaultChunk)
+        let wanted = GPUGate.shared.chunkCap(c0 ?? defaultChunk)
         let c = cfg
         var out: Int32 = 0
         // One scratch set sized to the largest chunk; each chunk is its own
         // waited command buffer, so there is no cross-chunk hazard.
-        let capN = min(chunk, ids.count)
+        let capN = min(wanted, ids.count)
         let b = BatchScratch(ctx: ctx, cfg: c, N: capN)
         let seed = mtp.map { _ in
             QwenMTPSeedScratch(ctx: ctx, cfg: c, N: capN)
         }
         let idsBuf = ctx.device.makeBuffer(length: capN * 4,
                                            options: .storageModeShared)!
+        var ceiling = capN
         var i = 0
         while i < ids.count && !stopSignal.raisedNow && !gpuFault {
             let mark = bookmark()
             var placed = 0
             var attempt = 0
+            var chunk = c0 == nil ? timedChunk(ceiling) : ceiling
             while placed == 0 && attempt <= GPUGate.retries
                   && !stopSignal.raisedNow {
                 if attempt > 0 {
                     restore(mark)
                     GPUGate.shared.backoff(attempt - 1)
                     chunk = max(8, chunk / 4)
+                    ceiling = chunk
                     gpuFault = false
                 }
                 let end = min(i + chunk, ids.count)
@@ -423,13 +524,15 @@ public final class QwenMetalEngine {
                 f.embedBatch(ids: idsBuf, weightOff: off(model.tokEmbd),
                              out: b.x, nEmbd: c.nEmbd, N: N,
                              type: model.tokEmbd.type)
+                gathered(f, x: b.x, rows: N)
                 encodeDrafterInput(f, x: b.x, N: N, seed)
-                encodeChunk(f, b, N: N, basePos: basePos, pos3: nil)
+                _ = encodeChunk(f, b, N: N, basePos: basePos, pos3: nil)
                 encodeDrafterSeed(f, hidden: b.normed, N: N, basePos: basePos,
                                   seed)
                 e.endEncoding()
                 commitTimed(cb, "prefillBatch")
                 if !gpuFault {
+                    learn(cb, tokens: N)
                     pos += N
                     keepPrev(b.normed, row: N - 1)
                     if end == ids.count {
@@ -447,40 +550,53 @@ public final class QwenMetalEngine {
     private func encodeChunk(_ f: MetalEnc, _ b: BatchScratch, N: Int,
                              basePos: Int, pos3: MTLBuffer?,
                              head: Bool = true,
-                             ring: StateRing = .inPlace) {
+                             ring: StateRing = .inPlace) -> Fed {
         let c = cfg
-        firstNorm(f, x: b.x, y: b.normed, rows: N, count: c.nLayer)
-        for il in 0..<c.nLayer {
+        let count = c.nLayer
+        var fed = normInto(f, x: b.x, r: nil, y: b.normed, rot: b.rot,
+                           rows: N, weightOff: firstNormOff(count),
+                           for: firstRotated(0, count: count))
+        for il in 0..<count {
             let L = model.layers[il]
             if L.recurrent {
-                gdnBatch(f, L, il, b, N: N, ring: ring)
+                gdnBatch(f, L, il, b, N: N, ring: ring, fed: fed)
             } else {
                 attnBatchLayer(f, L, il, b, N: N, basePos: basePos,
-                               pos3: pos3)
+                               pos3: pos3, fed: fed)
             }
-            addNorm(f, x: b.x, r: b.contrib, y: b.normed, rows: N,
-                    weightOff: off(L.attnPostNorm))
+            let mid = normInto(f, x: b.x, r: b.contrib, y: b.normed,
+                               rot: b.rot, rows: N,
+                               weightOff: off(L.attnPostNorm), for: L.ffnGate)
             if QwenMetalEngine.runs("ffn") {
+                let x = input(f, mid, L.ffnGate, into: b.rot, rows: N)
                 f.parallel {
-                    f.gemm(L.ffnGate, X: b.normed, out: b.ffnGate,
+                    f.gemm(L.ffnGate, X: x, out: b.ffnGate,
                            off: off(L.ffnGate), N: N)
-                    f.gemm(L.ffnUp, X: b.normed, out: b.ffnUp,
+                    f.gemm(L.ffnUp, X: x, out: b.ffnUp,
                            off: off(L.ffnUp), N: N)
                 }
                 if QwenMetalEngine.runs("glue") {
                     f.siluMul(a: b.ffnGate, b: b.ffnUp, n: N * c.nFF)
                 }
+                _ = rotated(f, L.ffnDown, x: b.ffnGate, into: b.ffnGate,
+                            rows: N)
                 f.gemm(L.ffnDown, X: b.ffnGate, out: b.contrib,
                        off: off(L.ffnDown), N: N)
             }
-            addNorm(f, x: b.x, r: b.contrib, y: b.normed, rows: N,
-                    weightOff: nextNorm(il, count: c.nLayer))
+            fed = normInto(f, x: b.x, r: b.contrib, y: b.normed, rot: b.rot,
+                           rows: N, weightOff: nextNorm(il, count: count),
+                           for: firstRotated(il + 1, count: count))
         }
         if head {
-            f.gemv(model.output, x: b.normed, out: bLogits,
-                   off: off(model.output),
-                   xOffBytes: (N - 1) * c.nEmbd * MemoryLayout<Float>.stride)
+            let last = (N - 1) * c.nEmbd * MemoryLayout<Float>.stride
+            let x = fed.rotated
+                ? (buf: b.rot, off: last)
+                : rotated(f, model.output, x: b.normed, into: b.rot,
+                          rows: 1, xOffBytes: last)
+            f.gemv(model.output, x: x.buf, out: bLogits,
+                   off: off(model.output), xOffBytes: x.off)
         }
+        return fed
     }
 
     // The <|image_pad|> rows are replaced CPU-side, so no splice kernel exists.
@@ -556,8 +672,15 @@ public final class QwenMetalEngine {
                                c.nEmbd * 4)
                 }
             } else {
-                QB.dequant(model.tokEmbd, row: Int(ids[g]),
-                           count: c.nEmbd, into: xp + k * c.nEmbd)
+                var row = [Float](repeating: 0, count: c.nEmbd)
+                row.withUnsafeMutableBufferPointer { rb in
+                    QB.dequant(model.tokEmbd, row: Int(ids[g]),
+                               count: c.nEmbd, into: rb.baseAddress!)
+                }
+                Hadamard.gathered(&row, model.tokEmbd, model.hadamard)
+                row.withUnsafeBufferPointer { rb in
+                    _ = memcpy(xp + k * c.nEmbd, rb.baseAddress!, c.nEmbd * 4)
+                }
             }
         }
         let pp = pos3Buf.contents().assumingMemoryBound(to: Int32.self)
@@ -571,7 +694,7 @@ public final class QwenMetalEngine {
         let e = cb.makeComputeCommandEncoder(dispatchType: .concurrent)!
         let f = MetalEnc(ctx: ctx, e: e, concurrent: true)
         encodeDrafterInput(f, x: b.x, N: N, seed)
-        encodeChunk(f, b, N: N, basePos: basePos, pos3: pos3Buf)
+        _ = encodeChunk(f, b, N: N, basePos: basePos, pos3: pos3Buf)
         encodeDrafterSeed(f, hidden: b.normed, N: N, basePos: basePos, seed)
         e.endEncoding()
         commitTimed(cb, "prefillVision")
@@ -583,17 +706,17 @@ public final class QwenMetalEngine {
 
     private func gdnBatch(_ f: MetalEnc, _ L: QwenLayer, _ il: Int,
                           _ b: BatchScratch, N: Int,
-                          ring: StateRing = .inPlace) {
+                          ring: StateRing = .inPlace, fed: Fed) {
         let c = cfg
         let qkv = b.qkv
         let convOut = b.convOut
         let gate = b.g
         let beta = b.beta
         if QwenMetalEngine.runs("proj") {
+            let x = input(f, fed, L.wqkv!, into: b.rot, rows: N)
             f.parallel {
-                f.gemm(L.wqkv!, X: b.normed, out: qkv, off: off(L.wqkv!),
-                       N: N)
-                f.gemm(L.wqkvGate!, X: b.normed, out: b.z,
+                f.gemm(L.wqkv!, X: x, out: qkv, off: off(L.wqkv!), N: N)
+                f.gemm(L.wqkvGate!, X: x, out: b.z,
                        off: off(L.wqkvGate!), N: N)
                 f.gemm(L.ssmBeta!, X: b.normed, out: b.betaPre,
                        off: off(L.ssmBeta!), N: N)
@@ -632,7 +755,9 @@ public final class QwenMetalEngine {
         }
         normSilu(f, o: b.o, z: b.z, rows: N * c.nVHead,
                  weightOff: off(L.ssmNorm!))
-        f.gemm(L.ssmOut!, X: b.o, out: b.contrib, off: off(L.ssmOut!), N: N)
+        let fed = rotated(f, L.ssmOut!, x: b.o, into: b.oRot, rows: N)
+        f.gemm(L.ssmOut!, X: fed.buf, out: b.contrib, off: off(L.ssmOut!),
+               N: N)
     }
 
     private func nextNorm(_ il: Int, count: Int) -> WeightRef {
@@ -640,11 +765,14 @@ public final class QwenMetalEngine {
                        : off(model.outputNorm)
     }
 
+    private func firstNormOff(_ count: Int) -> WeightRef {
+        count > 0 ? off(model.layers[0].attnNorm) : off(model.outputNorm)
+    }
+
     private func firstNorm(_ f: MetalEnc, x: MTLBuffer, y: MTLBuffer,
-                           rows: Int, count: Int) {
+                           rows: Int, weightOff: WeightRef) {
         if QwenMetalEngine.runs("norm") {
-            let w = count > 0 ? model.layers[0].attnNorm : model.outputNorm
-            f.rmsnormBatch(x: x, weightOff: off(w), y: y, n: cfg.nEmbd,
+            f.rmsnormBatch(x: x, weightOff: weightOff, y: y, n: cfg.nEmbd,
                            rows: rows, eps: cfg.eps)
         }
     }
@@ -685,14 +813,15 @@ public final class QwenMetalEngine {
 
     private func attnBatchLayer(_ f: MetalEnc, _ L: QwenLayer, _ il: Int,
                                 _ b: BatchScratch, N: Int, basePos: Int,
-                                pos3: MTLBuffer? = nil) {
+                                pos3: MTLBuffer? = nil, fed: Fed) {
         let c = cfg
         let kvDim = c.headDim * c.nHeadKV
+        let x = input(f, fed, L.wq!, into: b.rot, rows: N)
         f.parallel {
-            f.gemm(L.wq!, X: b.normed, out: c.dense ? b.q : b.qFull,
+            f.gemm(L.wq!, X: x, out: c.dense ? b.q : b.qFull,
                    off: off(L.wq!), N: N)
-            f.gemm(L.wk!, X: b.normed, out: b.k1, off: off(L.wk!), N: N)
-            f.gemm(L.wv!, X: b.normed, out: b.v1, off: off(L.wv!), N: N)
+            f.gemm(L.wk!, X: x, out: b.k1, off: off(L.wk!), N: N)
+            f.gemm(L.wv!, X: x, out: b.v1, off: off(L.wv!), N: N)
         }
         if !c.dense {
             f.splitQGateBatch(qFullN: b.qFull, qN: b.q, gateN: b.gate,
@@ -735,6 +864,7 @@ public final class QwenMetalEngine {
                         scale: 1 / Float(c.headDim).squareRoot(),
                         basePos: basePos, N: N, gated: c.dense ? 0 : 1)
         }
+        _ = rotated(f, L.wo!, x: b.attnOut, into: b.attnOut, rows: N)
         f.gemm(L.wo!, X: b.attnOut, out: b.contrib, off: off(L.wo!), N: N)
     }
 
@@ -826,16 +956,20 @@ public final class QwenMetalEngine {
 
     // No commit: the caller appends the lm_head in the SAME command buffer, so
     // a decoded token is ONE dispatch stream and ONE GPU sync.
-    private func encodeForward(_ f: MetalEnc, token: Int, pos: Int) {
+    private func encodeForward(_ f: MetalEnc, token: Int, pos: Int) -> Fed {
         let c = cfg
         let rowBytes = GGUF.rowByteCount(model.tokEmbd.type, c.nEmbd)
         f.dequantRow(weightOff: off(model.tokEmbd) + UInt64(token * rowBytes),
                      out: bx, n: c.nEmbd, type: model.tokEmbd.type)
+        gathered(f, x: bx, rows: 1)
         let count = min(c.nLayer, maxLayers)
-        firstNorm(f, x: bx, y: bNormed, rows: 1, count: count)
+        var fed = normInto(f, x: bx, r: nil, y: bNormed, rot: bRot, rows: 1,
+                           weightOff: firstNormOff(count),
+                           for: firstRotated(0, count: count))
         for il in 0..<count {
-            encodeLayer(f, il, pos: pos, next: nextNorm(il, count: count))
+            fed = encodeLayer(f, il, pos: pos, count: count, fed: fed)
         }
+        return fed
     }
 
     private var imatrix: [String: MTLBuffer] = [:]
@@ -903,32 +1037,36 @@ public final class QwenMetalEngine {
         return Data(bytes: b.contents(), count: b.length)
     }
 
-    private func encodeLayer(_ f: MetalEnc, _ il: Int, pos: Int,
-                             next: WeightRef) {
+    private func encodeLayer(_ f: MetalEnc, _ il: Int, pos: Int, count: Int,
+                             fed: Fed) -> Fed {
         let c = cfg
         let L = model.layers[il]
         tally(f, "l\(il).in", bNormed, c.nEmbd)
         if L.recurrent {
-            gdnLayer(f, L, il)
+            gdnLayer(f, L, il, fed: fed)
         } else {
-            attnLayer(f, L, il, pos: pos)
+            attnLayer(f, L, il, pos: pos, fed: fed)
         }
-        addNorm(f, x: bx, r: bContrib, y: bNormed, rows: 1,
-                weightOff: off(L.attnPostNorm))
+        let mid = normInto(f, x: bx, r: bContrib, y: bNormed, rot: bRot,
+                           rows: 1, weightOff: off(L.attnPostNorm),
+                           for: L.ffnGate)
         tally(f, "l\(il).post", bNormed, c.nEmbd)
         if QwenMetalEngine.runs("ffn") {
+            let x = input(f, mid, L.ffnGate, into: bRot, rows: 1)
             f.parallel {
-                f.gemv(L.ffnGate, x: bNormed, out: bFfnGate,
-                       off: off(L.ffnGate))
-                f.gemv(L.ffnUp, x: bNormed, out: bFfnUp, off: off(L.ffnUp))
+                f.gemv(L.ffnGate, x: x, out: bFfnGate, off: off(L.ffnGate))
+                f.gemv(L.ffnUp, x: x, out: bFfnUp, off: off(L.ffnUp))
             }
             if QwenMetalEngine.runs("glue") {
                 f.siluMul(a: bFfnGate, b: bFfnUp, n: c.nFF)
             }
             tally(f, "l\(il).ffn_down", bFfnGate, c.nFF)
+            _ = rotated(f, L.ffnDown, x: bFfnGate, into: bFfnGate, rows: 1)
             f.gemv(L.ffnDown, x: bFfnGate, out: bContrib, off: off(L.ffnDown))
         }
-        addNorm(f, x: bx, r: bContrib, y: bNormed, rows: 1, weightOff: next)
+        return normInto(f, x: bx, r: bContrib, y: bNormed, rot: bRot, rows: 1,
+                        weightOff: nextNorm(il, count: count),
+                        for: firstRotated(il + 1, count: count))
     }
 
     public func tapLayers(token: Int) -> [[Float]] {
@@ -940,15 +1078,18 @@ public final class QwenMetalEngine {
         let f0 = MetalEnc(ctx: ctx, e: e0)
         f0.dequantRow(weightOff: off(model.tokEmbd) + UInt64(token * rowBytes),
                       out: bx, n: c.nEmbd, type: model.tokEmbd.type)
-        firstNorm(f0, x: bx, y: bNormed, rows: 1, count: c.nLayer)
+        gathered(f0, x: bx, rows: 1)
+        var fed = normInto(f0, x: bx, r: nil, y: bNormed, rot: bRot, rows: 1,
+                           weightOff: firstNormOff(c.nLayer),
+                           for: firstRotated(0, count: c.nLayer))
         e0.endEncoding()
         commitTimed(cb0, "tap.embed")
         out.append(Array(bx.f32(c.nEmbd)))
         for il in 0..<c.nLayer {
             let cb = ctx.queue.makeCommandBuffer()!
             let e = cb.makeComputeCommandEncoder()!
-            encodeLayer(MetalEnc(ctx: ctx, e: e), il, pos: pos,
-                        next: nextNorm(il, count: c.nLayer))
+            fed = encodeLayer(MetalEnc(ctx: ctx, e: e), il, pos: pos,
+                              count: c.nLayer, fed: fed)
             e.endEncoding()
             commitTimed(cb, "tap.l\(il)")
             out.append(Array(bx.f32(c.nEmbd)))
@@ -963,7 +1104,7 @@ public final class QwenMetalEngine {
         let e = cb.makeComputeCommandEncoder(dispatchType: .concurrent)!
         let f = MetalEnc(ctx: ctx, e: e, concurrent: true)
         if seed { encodeDrafterRow(f, token: token, pos: pos) }
-        encodeForward(f, token: token, pos: pos)
+        _ = encodeForward(f, token: token, pos: pos)
         e.endEncoding()
         commitTimed(cb, "forward")
         keepPrev(bNormed, row: 0)
@@ -975,8 +1116,9 @@ public final class QwenMetalEngine {
         let e = cb.makeComputeCommandEncoder(dispatchType: .concurrent)!
         let f = MetalEnc(ctx: ctx, e: e, concurrent: true)
         if seed { encodeDrafterRow(f, token: token, pos: pos) }
-        encodeForward(f, token: token, pos: pos)
-        f.gemv(model.output, x: bNormed, out: bLogits, off: off(model.output))
+        let fed = encodeForward(f, token: token, pos: pos)
+        let x = input(f, fed, model.output, into: bRot, rows: 1)
+        f.gemv(model.output, x: x, out: bLogits, off: off(model.output))
         e.endEncoding()
         commitTimed(cb, "forward+head")
         keepPrev(bNormed, row: 0)
@@ -997,13 +1139,14 @@ public final class QwenMetalEngine {
         }
     }
 
-    private func gdnLayer(_ f: MetalEnc, _ L: QwenLayer, _ il: Int) {
+    private func gdnLayer(_ f: MetalEnc, _ L: QwenLayer, _ il: Int,
+                          fed: Fed) {
         let c = cfg
         if QwenMetalEngine.runs("proj") {
+            let x = input(f, fed, L.wqkv!, into: bRot, rows: 1)
             f.parallel {
-                f.gemv(L.wqkv!, x: bNormed, out: bQkv, off: off(L.wqkv!))
-                f.gemv(L.wqkvGate!, x: bNormed, out: bZ,
-                       off: off(L.wqkvGate!))
+                f.gemv(L.wqkv!, x: x, out: bQkv, off: off(L.wqkv!))
+                f.gemv(L.wqkvGate!, x: x, out: bZ, off: off(L.wqkvGate!))
                 f.gemv(L.ssmBeta!, x: bNormed, out: bBetaPre,
                        off: off(L.ssmBeta!))
                 f.gemv(L.ssmAlpha!, x: bNormed, out: bAlphaPre,
@@ -1036,19 +1179,20 @@ public final class QwenMetalEngine {
         }
         normSilu(f, o: bO, z: bZ, rows: c.nVHead, weightOff: off(L.ssmNorm!))
         tally(f, "l\(il).ssm_out", bO, c.valueDim)
-        f.gemv(L.ssmOut!, x: bO, out: bContrib, off: off(L.ssmOut!))
+        let fed = rotated(f, L.ssmOut!, x: bO, into: bORot, rows: 1)
+        f.gemv(L.ssmOut!, x: fed.buf, out: bContrib, off: off(L.ssmOut!))
     }
 
     private func attnLayer(_ f: MetalEnc, _ L: QwenLayer, _ il: Int,
-                           pos: Int) {
+                           pos: Int, fed: Fed) {
         let c = cfg
         // The hybrid fuses q|gate in wq and splits it; dense qwen3 projects q
         // straight.
+        let x = input(f, fed, L.wq!, into: bRot, rows: 1)
         f.parallel {
-            f.gemv(L.wq!, x: bNormed, out: c.dense ? bQ : bQFull,
-                   off: off(L.wq!))
-            f.gemv(L.wk!, x: bNormed, out: bK1, off: off(L.wk!))
-            f.gemv(L.wv!, x: bNormed, out: bV1, off: off(L.wv!))
+            f.gemv(L.wq!, x: x, out: c.dense ? bQ : bQFull, off: off(L.wq!))
+            f.gemv(L.wk!, x: x, out: bK1, off: off(L.wk!))
+            f.gemv(L.wv!, x: x, out: bV1, off: off(L.wv!))
         }
         if !c.dense {
             f.splitQGate(qFull: bQFull, q: bQ, gate: bGate, hd: c.headDim,
@@ -1085,6 +1229,7 @@ public final class QwenMetalEngine {
                         gated: c.dense ? 0 : 1)
         }
         tally(f, "l\(il).attn_out", bAttnOut, c.headDim * c.nHead)
+        _ = rotated(f, L.wo!, x: bAttnOut, into: bAttnOut, rows: 1)
         f.gemv(L.wo!, x: bAttnOut, out: bContrib, off: off(L.wo!))
     }
 
@@ -1222,9 +1367,12 @@ public final class QwenMetalEngine {
         let f = MetalEnc(ctx: ctx, e: e, concurrent: true)
         f.embedBatch(ids: idsBuf, weightOff: off(model.tokEmbd), out: b.x,
                      nEmbd: c.nEmbd, N: width, type: model.tokEmbd.type)
-        encodeChunk(f, b, N: width, basePos: p0, pos3: nil, head: false,
-                    ring: StateRing(slot0: recSlot, slots: recSlots))
-        f.gemm(model.output, X: b.normed, out: lg, off: off(model.output),
+        gathered(f, x: b.x, rows: width)
+        let last = encodeChunk(f, b, N: width, basePos: p0, pos3: nil,
+                               head: false,
+                               ring: StateRing(slot0: recSlot, slots: recSlots))
+        let rot = input(f, last, model.output, into: b.rot, rows: width)
+        f.gemm(model.output, X: rot, out: lg, off: off(model.output),
                N: width)
         f.argmaxRows(x: lg, out: specPick!, n: c.nVocab, rows: width)
         e.endEncoding()
@@ -1285,25 +1433,55 @@ public final class QwenMetalEngine {
     public func logits(_ hidden: MTLBuffer) -> [Float] {
         let cb = ctx.queue.makeCommandBuffer()!
         let e = cb.makeComputeCommandEncoder()!
-        MetalEnc(ctx: ctx, e: e).gemv(model.output, x: hidden, out: bLogits,
-                                      off: off(model.output))
+        let f = MetalEnc(ctx: ctx, e: e)
+        let fed = rotated(f, model.output, x: hidden, into: bRot, rows: 1)
+        f.gemv(model.output, x: fed.buf, out: bLogits, off: off(model.output))
         e.endEncoding()
         commitTimed(cb, "logits")
         return Array(bLogits.f32(cfg.nVocab))
     }
 }
 
+struct Fed {
+    let buf: MTLBuffer
+    let rotated: Bool
+}
+
+struct FoldBuffers {
+    let fold: HadamardFold
+    let signs: [Int: MTLBuffer]
+
+    init?(_ model: QwenModel, _ ctx: MetalContext) {
+        if let fold = model.hadamard {
+            var signs: [Int: MTLBuffer] = [:]
+            for name in fold.rotated.union(fold.inverse) {
+                let width = model.gguf.tensor(name).dims[0]
+                if signs[width] == nil {
+                    let ones = [Float](repeating: 1, count: width)
+                    signs[width] = ctx.makeF32(fold.signs[width] ?? ones)
+                }
+            }
+            self.fold = fold
+            self.signs = signs
+        } else {
+            return nil
+        }
+    }
+}
 
 private struct BatchScratch {
     let x, normed, contrib: MTLBuffer
     let qkv, z, betaPre, alphaPre, beta, g, convOut, o: MTLBuffer
     let qFull, q, gate, k1, v1, attnOut: MTLBuffer
     let ffnGate, ffnUp: MTLBuffer
+    let rot, oRot: MTLBuffer
 
     init(ctx: MetalContext, cfg c: QwenConfig, N: Int) {
         x = ctx.makeF32(N * c.nEmbd)
         normed = ctx.makeF32(N * c.nEmbd)
         contrib = ctx.makeF32(N * c.nEmbd)
+        rot = ctx.makeF32(N * c.nEmbd)
+        oRot = ctx.makeF32(N * max(c.valueDim, 1))
         qkv = ctx.makeF32(N * c.convDim)
         z = ctx.makeF32(N * c.valueDim)
         betaPre = ctx.makeF32(N * c.nVHead)

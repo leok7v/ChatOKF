@@ -182,7 +182,7 @@ public enum MetalGolden {
                               N: vN)
         })
 
-        for ty in [GGUFType.q2_0, .q4_0, .q8_0, .bf16, .f32]
+        for ty in [GGUFType.q2_0, .q2_64, .q4_0, .q8_0, .bf16, .f32]
             + QwenMetalSelfTest.gemvTypes {
             if let w = matrix(ty) {
                 let K = w.dims[0], M = w.dims[1]
@@ -193,7 +193,7 @@ public enum MetalGolden {
                                   count: M) { f in
                     f.gemv(w, x: xv, out: ov, off: off(w))
                 })
-                if ty == .q2_0
+                if ty == .q2_0 || ty == .q2_64
                     || ty == .q4_0 || ty == .q8_0 || ty == .iq4_nl
                     || Blocks.superBlocked(ty) {
                     for n in [8, 33] {
@@ -207,6 +207,51 @@ public enum MetalGolden {
                 }
             }
         }
+
+        for block in MetalEnc.hadamardBlocks.sorted() {
+            let rows = 3, K = 2 * block
+            let signs = ctx.makeF32(fill(K, seed: 71).map { v in
+                v < 0 ? Float(-1) : 1
+            })
+            for inverse in [false, true] {
+                let x = ctx.makeF32(fill(rows * K, seed: 70))
+                let o = ctx.makeF32(rows * K)
+                let nm = "hadamard_\(block)" + (inverse ? "_inv" : "")
+                cases.append(Case(name: nm, out: o, count: rows * K) { f in
+                    f.hadamard(x: x, out: o, signs: signs, K: K, rows: rows,
+                               block: block, inverse: inverse)
+                })
+            }
+        }
+
+        if let w = vector(.f32) {
+            let n = min(w.dims[0], 2048) / 512 * 512
+            let rows = 3
+            let signs = ctx.makeF32(fill(n, seed: 73).map { v in
+                v < 0 ? Float(-1) : 1
+            })
+            for add in [false, true] where MetalEnc.fusesHadamard(block: 512,
+                                                                   K: n) {
+                let x = ctx.makeF32(fill(rows * n, seed: 74))
+                let r = ctx.makeF32(fill(rows * n, seed: 75))
+                let y = ctx.makeF32(rows * n)
+                let h = ctx.makeF32(rows * n)
+                let nm = (add ? "add_" : "") + "rmsnorm_had_512"
+                cases.append(Case(name: nm, out: h, count: rows * n) { f in
+                    f.rmsnormHadamard(x: x, r: add ? r : nil, weightOff: off(w),
+                                      y: y, rot: h, signs: signs, n: n,
+                                      rows: rows, eps: eps)
+                })
+            }
+        }
+
+        let grp = HadamardFold.Grouping(hd: 128, nk: 16, rep: 2)
+        let gw = grp.hd * grp.nk * grp.rep
+        let gx = ctx.makeF32(fill(3 * gw, seed: 72))
+        let go = ctx.makeF32(3 * gw)
+        cases.append(Case(name: "hadamard_group", out: go, count: 3 * gw) { f in
+            f.hadamardGroup(x: gx, out: go, rows: 3, grp)
+        })
 
         for hd in [256, 512] {
             let nH = 2, nKV = 1, T = 40, P = 8

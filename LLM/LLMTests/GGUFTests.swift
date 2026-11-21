@@ -53,10 +53,62 @@ final class GGUFTests: XCTestCase {
     }
 
     private func tensorEntry(_ name: String, elements: Int,
-                             offset: Int) -> [UInt8] {
+                             offset: Int, type: Int = 0,
+                             rows: Int = 0) -> [UInt8] {
         let n = Array(name.utf8)
-        return le(UInt64(n.count), 8) + n + le(1, 4)
-            + le(UInt64(elements), 8) + le(0, 4) + le(UInt64(offset), 8)
+        let dims = rows > 0 ? le(2, 4) + le(UInt64(elements), 8)
+                                + le(UInt64(rows), 8)
+                            : le(1, 4) + le(UInt64(elements), 8)
+        return le(UInt64(n.count), 8) + n + dims + le(UInt64(type), 4)
+            + le(UInt64(offset), 8)
+    }
+
+    private let ternaryWeights = 4096
+
+    private func ternaryFile(qk: Int, pad: Int = 0) throws -> String {
+        let n = ternaryWeights
+        let rowBytes = n / qk * (2 + qk / 4)
+        var bytes = magic + le(3, 4) + le(2, 8) + le(0, 8)
+        bytes += tensorEntry("a", elements: n, offset: 0, type: 42, rows: 1)
+        bytes += tensorEntry("b", elements: n, offset: rowBytes + pad,
+                             type: 42, rows: 1)
+        bytes += [UInt8](repeating: 0, count: (32 - bytes.count % 32) % 32)
+        bytes += [UInt8](repeating: 0, count: rowBytes + pad)
+        for _ in 0..<(n / qk) {
+            bytes += le(0x3C00, 2)
+            bytes += (0..<(qk / 4)).map { i in UInt8(0b11_10_01_00 ^ i) }
+        }
+        return try write(bytes, "ternary.gguf")
+    }
+
+    func testTheOffsetGapTellsTheTwoTernaryLayoutsApart() throws {
+        let fork = try GGUF(path: try ternaryFile(qk: 128))
+        XCTAssertEqual(fork.q2Block, 128)
+        XCTAssertEqual(fork.tensor("b").type, .q2_0)
+        XCTAssertEqual(fork.tensor("b").byteCount, 4096 / 128 * 34)
+        for pad in [0, 31] {
+            let up = try GGUF(path: try ternaryFile(qk: 64, pad: pad))
+            XCTAssertEqual(up.q2Block, 64, "pad \(pad)")
+            XCTAssertEqual(up.tensor("b").type, .q2_64, "pad \(pad)")
+            XCTAssertEqual(up.tensor("b").byteCount, 4096 / 64 * 18)
+        }
+    }
+
+    func testTheUpstreamTernaryBlockDecodesAsUpstreamDoes() throws {
+        let g = try GGUF(path: try ternaryFile(qk: 64))
+        let t = g.tensor("b")
+        var got = [Float](repeating: 0, count: ternaryWeights)
+        GQ.dequantSpan(t, row: 0, from: 0, count: ternaryWeights, into: &got)
+        for j in 0..<ternaryWeights {
+            let inBlock = j % 64
+            let byte = UInt8(0b11_10_01_00 ^ (inBlock / 4))
+            let code = Int((byte >> UInt8((inBlock % 4) * 2)) & 3)
+            XCTAssertEqual(got[j], Float(code - 1), "weight \(j)")
+        }
+        var out = [Float](repeating: 0, count: 1)
+        let ones = [Float](repeating: 1, count: ternaryWeights)
+        GQ.matvec(t, x: ones, out: &out)
+        XCTAssertEqual(out[0], got.reduce(0, +), accuracy: 1e-5)
     }
 
     private func fileOf(_ names: [String]) throws -> String {
@@ -113,6 +165,15 @@ final class GGUFTests: XCTestCase {
 
     func testAMissingFileThrows() {
         XCTAssertThrowsError(try GGUF(path: "/nonexistent/nowhere.gguf"))
+    }
+
+    func testACutFileThrows() throws {
+        let whole = try fileOf(["blk.0.attn_q.weight", "blk.0.attn_k.weight"])
+        let handle = try FileHandle(forUpdating: URL(fileURLWithPath: whole))
+        let size = try handle.seekToEnd()
+        try handle.truncate(atOffset: size - 1000)
+        try handle.close()
+        XCTAssertThrowsError(try GGUF(path: whole))
     }
 
     // The gate. Every failure path, many times over, and the descriptor table

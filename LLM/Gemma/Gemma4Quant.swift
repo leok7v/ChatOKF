@@ -81,6 +81,7 @@ enum GQ {
              .iq2_xxs, .iq2_xs, .iq3_xxs, .iq1_s, .iq3_s, .iq2_s,
              .iq4_xs, .iq1_m: out = Blocks.superBlock
         case .q2_0: out = 128
+        case .q2_64: out = 64
         default: out = 32
         }
         return out
@@ -90,6 +91,8 @@ enum GQ {
         switch w.type {
         case .q2_0:
             Q2_0.matvec(w, x: x, out: &out)
+        case .q2_64:
+            Q2_0.matvec(w, x: x, out: &out, qk: 64)
         case .q4_0:
             rowParallel(w, x: x, out: &out) { p, xp, k in
                 var acc: Float = 0
@@ -334,6 +337,9 @@ enum GQ {
         case .q2_0:
             Q2_0.dequant(base + from / Q2_0.qk * Q2_0.blockBytes,
                          count: count, into: o)
+        case .q2_64:
+            Q2_0.dequant(base + from / 64 * Q2_0.blockBytes(64),
+                         count: count, qk: 64, into: o)
         case .q4_0:
             Q4_0.dequant(base + from / Q4_0.qk * Q4_0.blockBytes,
                          count: count, into: o)

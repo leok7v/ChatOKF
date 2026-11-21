@@ -83,3 +83,52 @@ public enum VoicePack {
     }
 
 }
+
+public enum HearingPack {
+
+    static let repo = "leok7v/whistle"
+    static let revision = "2cf3336eb343a699303895130a3937bb6de7a318"
+    static let file = "whistle.cact"
+    public static let bytes: Int64 = 16_919_407
+
+    public static let page = URL(string: "https://huggingface.co/" + repo)!
+
+    private static var home: URL {
+        VoicePack.root.appendingPathComponent("whistle", isDirectory: true)
+    }
+
+    private static var fileURL: URL {
+        home.appendingPathComponent(revision, isDirectory: true)
+            .appendingPathComponent(file)
+    }
+
+    public static var path: String? {
+        let whole = ModelCatalog.isComplete(fileURL.deletingLastPathComponent())
+            && FileManager.default.fileExists(atPath: fileURL.path)
+        return whole ? fileURL.path : nil
+    }
+
+    public static var onDisk: Bool { path != nil }
+
+    public static func fetch(
+        onProgress: @escaping @Sendable (HubFetch.Status) -> Void
+    ) async -> String? {
+        var failure: String? = "download failed, check your connection"
+        do {
+            _ = try await HubFetch.fetch(
+                repo: repo, into: home, revision: revision,
+                files: [file], excludeFromBackup: true,
+                background: isOS, report: onProgress)
+            failure = nil
+        } catch HubError.digest {
+            failure = "download failed verification, try again"
+        } catch HubError.space(let needed, let free, let freeable) {
+            failure = HubFetch.spaceMessage(needed: needed, free: free,
+                                            freeable: freeable)
+        } catch {
+            Diag.shared.report(.net, "[hearing] fetch failed: \(error)")
+        }
+        return failure
+    }
+
+}

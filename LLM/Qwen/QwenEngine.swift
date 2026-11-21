@@ -72,17 +72,20 @@ public final class QwenEngine {
             QB.dequant(model.tokEmbd, row: token, count: cfg.nEmbd,
                        into: ob.baseAddress!)
         }
+        Hadamard.gathered(&out, model.tokEmbd, model.hadamard)
         return out
     }
 
     func ffn(_ x: [Float], _ L: QwenLayer) -> [Float] {
+        let fold = model.hadamard
         var gate = [Float](repeating: 0, count: cfg.nFF)
         var up = [Float](repeating: 0, count: cfg.nFF)
-        QB.matvec(L.ffnGate, x: x, out: &gate)
-        QB.matvec(L.ffnUp, x: x, out: &up)
+        QB.matvec(L.ffnGate, x: Hadamard.input(x, L.ffnGate, fold), out: &gate)
+        QB.matvec(L.ffnUp, x: Hadamard.input(x, L.ffnUp, fold), out: &up)
         for i in 0..<cfg.nFF { gate[i] = silu(gate[i]) * up[i] }
         var out = [Float](repeating: 0, count: cfg.nEmbd)
-        QB.matvec(L.ffnDown, x: gate, out: &out)
+        QB.matvec(L.ffnDown, x: Hadamard.input(gate, L.ffnDown, fold),
+                  out: &out)
         return out
     }
 
@@ -97,9 +100,10 @@ public final class QwenEngine {
             tap?("attn_norm", il, normed)
             let attn: [Float]
             if L.recurrent {
-                attn = GDN.step(normed, L, gdn[il]!, cfg)
+                attn = GDN.step(normed, L, gdn[il]!, cfg, model.hadamard)
             } else {
-                attn = Attn.step(normed, L, kvc[il]!, pos: pos, cfg)
+                attn = Attn.step(normed, L, kvc[il]!, pos: pos, cfg,
+                                 model.hadamard)
             }
             tap?("attn_out", il, attn)
             for i in 0..<cfg.nEmbd { x[i] += attn[i] }
@@ -115,7 +119,9 @@ public final class QwenEngine {
 
     public func logits(_ hidden: [Float]) -> [Float] {
         var out = [Float](repeating: 0, count: cfg.nVocab)
-        QB.matvec(model.output, x: hidden, out: &out)
+        QB.matvec(model.output,
+                  x: Hadamard.input(hidden, model.output, model.hadamard),
+                  out: &out)
         return out
     }
 

@@ -238,7 +238,7 @@ struct Composer: View {
             Spacer()
             HStack(spacing: gap) {
                 if model.speech.available { speakerButton }
-                if model.canAttachAudio { micButton }
+                if model.canHear { micButton }
                 sendButton
             }
         }

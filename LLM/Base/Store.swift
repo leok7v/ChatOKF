@@ -45,6 +45,7 @@ public struct Concept: Sendable {
     public var staleAfter: Date?
     public var generatedBy: String
     public var verifiers: [String]
+    public var generatedAt: Date? = nil
     public var extraFrontmatter: [String]
     public var body: String
     public var links: [String]
@@ -52,6 +53,7 @@ public struct Concept: Sendable {
     public var hash: UInt64
     public var vector: [Float] = []
     public var bodyVector: [Float] = []
+    public var paragraphVectors: [[Float]] = []
 
     public var trust: Trust {
         var result = Trust.unverified
@@ -206,10 +208,10 @@ enum Frontmatter {
         return out
     }
 
-    private static func byValues(_ text: String) -> [String] {
+    private static func values(_ text: String, of key: String) -> [String] {
         var out: [String] = []
         var rest = Substring(text)
-        while let found = rest.range(of: "by:") {
+        while let found = rest.range(of: key + ":") {
             let head = rest[rest.startIndex..<found.lowerBound].last
             let standalone = head == nil || !(head!.isLetter
                 || head! == "-" || head! == "_")
@@ -223,16 +225,27 @@ enum Frontmatter {
         return out
     }
 
-    static func actors(_ lines: [String], under key: String) -> [String] {
+    private static func fields(_ lines: [String], under key: String,
+                               of field: String) -> [String] {
         var out: [String] = []
         var inside = false
         for line in lines {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             let indented = line.hasPrefix(" ") || line.hasPrefix("\t")
             if !indented { inside = trimmed.hasPrefix(key + ":") }
-            if inside { out += byValues(trimmed) }
+            if inside { out += values(trimmed, of: field) }
         }
         return out
+    }
+
+    static func actors(_ lines: [String], under key: String) -> [String] {
+        fields(lines, under: key, of: "by")
+    }
+
+    static func stamps(_ lines: [String], under key: String) -> [Date] {
+        fields(lines, under: key, of: "at").compactMap { text in
+            Store.iso.date(from: text)
+        }
     }
 
     static func dropping(_ lines: [String], keys: [String]) -> [String] {
@@ -403,11 +416,19 @@ public final class Store {
         Store.sidecarPrefix + embedder + ".bin"
     }
 
+    public static func paragraphSidecarName(for embedder: String) -> String {
+        Store.sidecarPrefix + embedder + "-paragraphs.bin"
+    }
+
+    private let paragraphSidecar: URL
+
     public init(root: URL, embedder: Embedder) {
         self.root = root
         self.embedder = embedder
         sidecar = root.appendingPathComponent(
             Store.sidecarName(for: embedder.name))
+        paragraphSidecar = root.appendingPathComponent(
+            Store.paragraphSidecarName(for: embedder.name))
     }
 
     public var owner: Concept? {
@@ -505,6 +526,8 @@ public final class Store {
                                             under: "generated").first ?? "",
             verifiers: Frontmatter.actors(parsed.unknown,
                                           under: "verified"),
+            generatedAt: Frontmatter.stamps(parsed.unknown,
+                                            under: "generated").first,
             extraFrontmatter: parsed.unknown,
             body: parsed.body,
             links: Store.parseLinks(parsed.body, from: id),
@@ -512,8 +535,10 @@ public final class Store {
     }
 
     private func embedded(_ concept: Concept,
-                          _ cache: [String: CacheEntry]) -> Concept {
+                          _ cache: [String: CacheEntry],
+                          _ parts: [String: ParagraphEntry]) -> Concept {
         var out = concept
+        var fresh = false
         let hit = cache[concept.id]
         if let hit = hit, hit.hash == concept.hash,
            hit.vectors.count == embedder.dim * 2 {
@@ -524,7 +549,29 @@ public final class Store {
                 ?? embedder.embedPassage(concept.passage)
             out.bodyVector = concept.body.isEmpty
                 ? out.vector : embedder.embedPassage(concept.bodyPassage)
-            embeddedCount += 1
+            fresh = true
+        }
+        if let kept = parts[concept.id], kept.hash == concept.hash {
+            out.paragraphVectors = kept.vectors
+        } else {
+            out.paragraphVectors = Store.scoredParagraphs(concept.body)
+                .map { text in embedder.embedPassage(text) }
+            fresh = true
+        }
+        if fresh { embeddedCount += 1 }
+        return out
+    }
+
+    static let paragraphsScored = 16
+    static let paragraphMinBytes = 80
+
+    static func scoredParagraphs(_ body: String) -> [String] {
+        let parts = Store.paragraphs(body)
+        var out: [String] = []
+        if parts.count > 1 {
+            out = Array(parts.filter { part in
+                part.to - part.from >= Store.paragraphMinBytes
+            }.prefix(Store.paragraphsScored).map { part in part.text })
         }
         return out
     }
@@ -564,6 +611,7 @@ public final class Store {
     public func load() {
         let started = Date()
         let cache = readCache()
+        let parts = readParagraphCache()
         concepts = []
         byId = [:]
         embeddedCount = 0
@@ -575,12 +623,13 @@ public final class Store {
                 let parsed = parse(text, id: id, path: url,
                                    hash: fnv1a(data))
                 byId[id] = concepts.count
-                concepts.append(embedded(parsed, cache))
+                concepts.append(embedded(parsed, cache, parts))
             }
         }
         deriveBacklinks()
         buildPostings()
         writeCache()
+        writeParagraphCache()
         okfVersion = readVersion()
         loadSeconds = Date().timeIntervalSince(started)
     }
@@ -590,18 +639,21 @@ public final class Store {
         let url = root.appendingPathComponent(id + ".md")
         let data = try? Data(contentsOf: url)
         var kept: [String: CacheEntry] = [:]
+        var keptParts: [String: ParagraphEntry] = [:]
         embeddedCount = 0
         if let index = byId[id] {
             let old = concepts[index]
             kept[id] = CacheEntry(hash: old.hash,
                                   vectors: old.vector + old.bodyVector)
+            keptParts[id] = ParagraphEntry(hash: old.hash,
+                                           vectors: old.paragraphVectors)
             unpost(index)
             concepts.remove(at: index)
         }
         if let data, isConcept(id) {
             let text = String(decoding: data, as: UTF8.self)
             let fresh = embedded(parse(text, id: id, path: url,
-                                       hash: fnv1a(data)), kept)
+                                       hash: fnv1a(data)), kept, keptParts)
             let at = concepts.firstIndex { concept in
                 concept.id + ".md" > id + ".md"
             } ?? concepts.count
@@ -613,7 +665,10 @@ public final class Store {
             byId[concept.id] = index
         }
         deriveBacklinks()
-        if embeddedCount > 0 { writeCache() }
+        if embeddedCount > 0 {
+            writeCache()
+            writeParagraphCache()
+        }
         loadSeconds = Date().timeIntervalSince(started)
     }
 
@@ -803,7 +858,12 @@ public final class Store {
                 where retired || !concepts[i].isDeprecated {
                 let abstract = Store.dot(base, concepts[i].vector, width)
                 let body = Store.dot(base, concepts[i].bodyVector, width)
-                scored.append((i, max(abstract, body * 0.95)))
+                var parts: Float = -1
+                for part in concepts[i].paragraphVectors {
+                    parts = max(parts, Store.dot(base, part, width))
+                }
+                scored.append((i, max(abstract, body * Store.bodyDiscount,
+                                      parts * Store.paragraphDiscount)))
             }
         }
         scored.sort { left, right in
@@ -865,6 +925,7 @@ public final class Store {
     }
 
     static let bodyDiscount: Float = 0.95
+    static let paragraphDiscount: Float = 0.85
     static let relevanceChars = 600
 
     private func tokenStates(_ prefix: String, _ text: String) -> [Float] {
@@ -1518,6 +1579,7 @@ public final class Store {
             generatedBy: Frontmatter.actors(extra,
                                             under: "generated").first ?? "",
             verifiers: Frontmatter.actors(extra, under: "verified"),
+            generatedAt: Frontmatter.stamps(extra, under: "generated").first,
             extraFrontmatter: extra, body: body,
             links: [], hash: 0)
         try FileManager.default.createDirectory(
@@ -1742,6 +1804,72 @@ public final class Store {
             for value in entry.vectors { appendLE(&data, value) }
         }
         try? data.write(to: sidecar)
+    }
+
+    struct ParagraphEntry {
+        let hash: UInt64
+        let vectors: [[Float]]
+    }
+
+    private static let paragraphMagic: UInt32 = 0x5046_4B4F
+
+    private static func paragraphEntry(_ cursor: inout ByteReader,
+                                       width: Int)
+        -> (id: String, entry: ParagraphEntry)? {
+        var out: (id: String, entry: ParagraphEntry)? = nil
+        if cursor.has(12) {
+            let hash = cursor.u64()
+            let length = Int(cursor.u32())
+            if cursor.has(length + 4) {
+                let id = cursor.string(length)
+                let parts = Int(cursor.u32())
+                if cursor.has(parts * width * 4) {
+                    var vectors: [[Float]] = []
+                    for _ in 0..<parts { vectors.append(cursor.floats(width)) }
+                    out = (id, ParagraphEntry(hash: hash, vectors: vectors))
+                }
+            }
+        }
+        return out
+    }
+
+    private func readParagraphCache() -> [String: ParagraphEntry] {
+        var out: [String: ParagraphEntry] = [:]
+        let width = embedder.dim
+        let data = try? Data(contentsOf: paragraphSidecar)
+        if let data = data, data.count >= 12 {
+            var cursor = ByteReader(data: data)
+            let header = cursor.u32() == Store.paragraphMagic
+                && Int(cursor.u32()) == width
+            let count = Int(cursor.u32())
+            var i = 0
+            while header && i < count,
+                  let read = Store.paragraphEntry(&cursor, width: width) {
+                out[read.id] = read.entry
+                i += 1
+            }
+        }
+        return out
+    }
+
+    private func writeParagraphCache() {
+        var data = Data()
+        appendLE(&data, Store.paragraphMagic)
+        appendLE(&data, UInt32(embedder.dim))
+        appendLE(&data, UInt32(concepts.count))
+        for concept in concepts.sorted(by: { left, right in
+            left.id < right.id
+        }) {
+            appendLE(&data, concept.hash)
+            let bytes = Array(concept.id.utf8)
+            appendLE(&data, UInt32(bytes.count))
+            data.append(contentsOf: bytes)
+            appendLE(&data, UInt32(concept.paragraphVectors.count))
+            for vector in concept.paragraphVectors {
+                for value in vector { appendLE(&data, value) }
+            }
+        }
+        try? data.write(to: paragraphSidecar)
     }
 }
 

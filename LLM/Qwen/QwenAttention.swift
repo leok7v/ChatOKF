@@ -55,7 +55,8 @@ final class KVCache {
 }
 
 enum Attn {
-    static func step(_ n: [Float], _ L: QwenLayer, _ kv: KVCache, pos: Int, _ cfg: QwenConfig) -> [Float] {
+    static func step(_ n: [Float], _ L: QwenLayer, _ kv: KVCache, pos: Int,
+                     _ cfg: QwenConfig, _ fold: HadamardFold? = nil) -> [Float] {
         let hd = cfg.headDim, nH = cfg.nHead, nKV = cfg.nHeadKV
         let group = nH / nKV
 
@@ -64,10 +65,10 @@ enum Attn {
         var q = [Float](repeating: 0, count: hd * nH)
         var gate: [Float] = []
         if cfg.dense {
-            QB.matvec(L.wq!, x: n, out: &q)
+            QB.matvec(L.wq!, x: Hadamard.input(n, L.wq!, fold), out: &q)
         } else {
             var qFull = [Float](repeating: 0, count: hd * 2 * nH)
-            QB.matvec(L.wq!, x: n, out: &qFull)
+            QB.matvec(L.wq!, x: Hadamard.input(n, L.wq!, fold), out: &qFull)
             gate = [Float](repeating: 0, count: hd * nH)
             for h in 0..<nH {
                 let src = h * hd * 2
@@ -78,9 +79,9 @@ enum Attn {
             }
         }
         var kCur = [Float](repeating: 0, count: hd * nKV)
-        QB.matvec(L.wk!, x: n, out: &kCur)
+        QB.matvec(L.wk!, x: Hadamard.input(n, L.wk!, fold), out: &kCur)
         var vCur = [Float](repeating: 0, count: hd * nKV)
-        QB.matvec(L.wv!, x: n, out: &vCur)
+        QB.matvec(L.wv!, x: Hadamard.input(n, L.wv!, fold), out: &vCur)
 
         let qn = F32T.ptr(L.qNorm!), kn = F32T.ptr(L.kNorm!)
         Kern.rmsnormRows(&q, d: hd, rows: nH, w: qn, eps: cfg.eps)
@@ -119,7 +120,7 @@ enum Attn {
         }
 
         var out = [Float](repeating: 0, count: cfg.nEmbd)
-        QB.matvec(L.wo!, x: attnOut, out: &out)
+        QB.matvec(L.wo!, x: Hadamard.input(attnOut, L.wo!, fold), out: &out)
         return out
     }
 }

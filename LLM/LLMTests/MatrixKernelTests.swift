@@ -28,7 +28,8 @@ struct MatrixKernelTests {
 
     @Test func everyMatrixKernelIsSkippedWithoutMatrixUnits() throws {
         var names = try emitted(source("Kernels.metal"))
-        names += ["attn_batch_mm", "f16w_gemm_mm", "iq_gemm_mm_h"]
+        names += ["attn_batch_h128_mm", "attn_batch_h256_mm",
+                  "attn_batch_h512_mm", "f16w_gemm_mm", "iq_gemm_mm_h"]
         #expect(names.count > 20)
         for name in names {
             #expect(MetalContext.needsMatrixUnits(name),
@@ -38,7 +39,10 @@ struct MatrixKernelTests {
 
     @Test func plainSimdKernelsAreNotSkipped() {
         for name in ["q2_0_gemv", "rmsnorm", "attn_paged", "gdn_scan_batch",
-                     "silu_mul", "rope", "embed_batch"] {
+                     "silu_mul", "rope", "embed_batch", "hadamard_512",
+                     "rmsnorm_had_512", "add_rmsnorm_had_512",
+                     "hadamard_4096_inv", "q2_64_gemv", "q2_64_embed_batch",
+                     "q2_64_gemm_nb_r3"] {
             #expect(!MetalContext.needsMatrixUnits(name))
         }
     }

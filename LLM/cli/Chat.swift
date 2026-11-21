@@ -23,6 +23,32 @@ final class Acc: @unchecked Sendable {
     var list: [String] { lock.lock(); defer { lock.unlock() }; return items }
 }
 
+final class FirstRow: @unchecked Sendable {
+    private let lock = NSLock()
+    private var row: [Float]?
+    func keep(_ logits: [Float]) {
+        lock.lock()
+        if row == nil { row = logits }
+        lock.unlock()
+    }
+    var value: [Float]? { lock.lock(); defer { lock.unlock() }; return row }
+}
+
+@MainActor func reportLetters(_ loaded: LoadedChat, _ count: Int,
+                              _ row: [Float]) {
+    let judge = Judge(backend: loaded.backend, template: loaded.template,
+                      vocabSize: loaded.vocabCount)
+    let letters = (0 ..< count).map { i in
+        String(UnicodeScalar(UInt8(65 + i)))
+    }
+    let shares = Judge.shares(row, letters.map { l in judge.ids(l) })
+    let best = shares.indices.max { a, b in shares[a] < shares[b] } ?? 0
+    print("LETTERS " + zip(letters, shares).map { l, s in
+        String(format: "%@=%.4f", l, s)
+    }.joined(separator: " ") + " best=" + letters[best]
+        + String(format: " mass=%.4f", shares.reduce(0, +)))
+}
+
 final class Counter: @unchecked Sendable {
     private let lock = NSLock()
     private var n = 0
@@ -437,6 +463,11 @@ func benchIds(_ encode: (String) -> [Int32]) -> [Int32] {
     let t0 = Date()
     let reasoning = Acc()
     let tools = Acc()
+    let letters = lettersVal
+    let first = FirstRow()
+    if letters != nil {
+        await session.setLogitTap { logits in first.keep(logits) }
+    }
     let onReasoning: @Sendable (String) -> Void = { r in
         err(r)
         reasoning.add(r)
@@ -489,6 +520,9 @@ func benchIds(_ encode: (String) -> [Int32]) -> [Int32] {
             m.contentTokens, m.pp, m.tg, m.endReason, outcome.rawValue,
             Date().timeIntervalSince(t0)))
         traceTurn(t0, user, reasoning.text, content, tools.list, m)
+        if let letters, let row = first.value {
+            reportLetters(loaded, letters, row)
+        }
         if let drill = memoryDrill {
             if user.hasPrefix("img:") {
                 let body = user.dropFirst("img:".count)

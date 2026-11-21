@@ -166,6 +166,7 @@ public final class QwenModel {
     let outputNorm: GGUFTensor
     let output: GGUFTensor
     let mtp: QwenMTP?
+    let hadamard: HadamardFold?
 
     public init(path: String) throws {
         gguf = try GGUF(path: path)
@@ -173,6 +174,7 @@ public final class QwenModel {
         tokEmbd = gguf.tensor("token_embd.weight")
         outputNorm = gguf.tensor("output_norm.weight")
         output = gguf.maybe("output.weight") ?? tokEmbd
+        hadamard = try HadamardFold.read(gguf, nV: cfg.nVHead, nK: cfg.nKHead)
         let g = gguf, c = cfg
         layers = (0..<c.nLayer).map { QwenLayer(g, $0, c) }
         mtp = g.maybe("blk.\(c.nLayer).nextn.eh_proj.weight") != nil

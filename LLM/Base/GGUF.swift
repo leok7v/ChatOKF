@@ -11,6 +11,7 @@ enum GGUFType: Int32 {
     case bf16 = 30
     case q1_0 = 41         // PrismML 1-bit, 128/block, 18 bytes
     case q2_0 = 42         // PrismML ternary, 128/block, 34 bytes
+    case q2_64 = 1042
 }
 
 enum GGUFValue {
@@ -139,17 +140,26 @@ final class GGUF {
             raws.append(Raw(name: name, dims: dims, type: type, off: off))
         }
         let dataStart = (c.pos + alignment - 1) / alignment * alignment
+        q2Block = GGUF.q2Block(raws.map { r in (r.off, r.dims.reduce(1, *),
+                                                r.type) },
+                               end: mapped.size - dataStart,
+                               alignment: alignment)
 
         var tensors: [String: GGUFTensor] = [:]
         tensors.reserveCapacity(nTensors)
         for r in raws {
-            let found = GGUFType(rawValue: r.type)
+            let upstream = r.type == GGUFType.q2_0.rawValue && q2Block == 64
+            let found = upstream ? .q2_64 : GGUFType(rawValue: r.type)
             if found == nil {
                 throw GGUFErr.parse("unknown ggml type \(r.type) for \(r.name)")
             }
             let ty = found!
             let n = r.dims.reduce(1, *)
             let bytes = GGUF.rowByteCount(ty, n)
+            if dataStart + r.off + bytes > mapped.size {
+                throw GGUFErr.parse("\(r.name) ends past the end of the "
+                                    + "file, which is cut short")
+            }
             tensors[r.name] = GGUFTensor(
                 name: r.name, dims: r.dims, type: ty,
                 base: map + dataStart + r.off, byteCount: bytes)
@@ -157,11 +167,31 @@ final class GGUF {
         self.tensors = tensors
     }
 
+    let q2Block: Int
+
+    static func q2Block(_ raws: [(off: Int, n: Int, type: Int32)],
+                        end: Int, alignment: Int) -> Int {
+        let sorted = raws.sorted { a, b in a.off < b.off }
+        var out = 128
+        var found = false
+        for (i, r) in sorted.enumerated()
+        where !found && r.type == GGUFType.q2_0.rawValue
+            && r.n / 64 > alignment {
+            let gap = i + 1 < sorted.count ? sorted[i + 1].off - r.off
+                                           : end - r.off
+            let upstream = r.n / 64 * 18
+            out = gap >= upstream && gap < upstream + alignment ? 64 : 128
+            found = true
+        }
+        return out
+    }
+
     static func rowByteCount(_ ty: GGUFType, _ n: Int) -> Int {
         switch ty {
         case .f32:  return n * 4
         case .f16, .bf16: return n * 2
         case .q2_0: return n / 128 * 34
+        case .q2_64: return n / 64 * 18
         case .q2k: return n / 256 * 84
         case .q3k: return n / 256 * 110
         case .q4k: return n / 256 * 144
@@ -183,7 +213,7 @@ final class GGUF {
         case .q5_0: return n / 32 * 22
         case .q5_1: return n / 32 * 24
         case .q8_0: return n / 32 * 34
-        default:    return n
+        case .q8_1: return n / 32 * 36
         }
     }
 

@@ -37,6 +37,15 @@ public enum QwenMetalSelfTest {
         step(try checkGemvTypes(model, ctx))
         step(try checkVisionBlocks(ctx))
         step(try checkDequant(model, ctx))
+        step(checkHadamard(ctx))
+        step(checkGrouping(ctx))
+        step(checkNormHadamard(model, ctx))
+        if let f = model.hadamard {
+            step("hadamard fold: block \(f.block) version \(f.version) tied "
+                + "\(f.tied) rotated \(f.rotated.count) widths "
+                + "\(f.signs.keys.sorted()) grouping "
+                + "\(String(describing: f.grouping))")
+        }
         step(try checkForward(model))
         step(try checkDecode(model))
         step(checkBookmark(model))
@@ -450,7 +459,7 @@ public enum QwenMetalSelfTest {
         var lines: [String] = []
         var failed = 0
         var ran = 0
-        for ty in [GGUFType.q4_0, .q2_0] + gemvTypes {
+        for ty in [GGUFType.q4_0, .q2_0, .q2_64] + gemvTypes {
             if let w = widest(model, ty) {
                 let k = w.dims[0], m = w.dims[1]
                 let off = ctx.window(UInt64(w.base - model.gguf.map))
@@ -606,6 +615,132 @@ public enum QwenMetalSelfTest {
         let rel = mag > 0 ? d / mag : d
         let tag = rel < 1e-4 ? "PASS" : "FAIL"
         return "gemv ffn_gate[\(k),\(m)]  maxAbsDiff=\(d)  rel=\(rel)  \(tag)"
+    }
+
+    private static func checkHadamard(_ ctx: MetalContext) -> String {
+        var lines: [String] = []
+        var failed = 0
+        for block in MetalEnc.hadamardBlocks.sorted() {
+            for rows in [1, 3, 37] {
+                for inverse in [false, true] {
+                    let rel = hadamardCase(ctx, block: block, rows: rows,
+                                           inverse: inverse)
+                    let ok = rel < 1e-5
+                    if !ok { failed += 1 }
+                    lines.append(String(
+                        format: "  block %d rows %d %@  rel %.2e  %@", block,
+                        rows, inverse ? "inverse" : "forward", rel,
+                        ok ? "PASS" : "FAIL"))
+                }
+            }
+        }
+        return "hadamard vs Swift oracle \(lines.count - failed)/\(lines.count)  "
+            + (failed == 0 ? "PASS" : "FAIL") + "\n"
+            + lines.joined(separator: "\n")
+    }
+
+    private static func hadamardCase(_ ctx: MetalContext, block: Int,
+                                     rows: Int, inverse: Bool) -> Float {
+        let K = 2 * block
+        let x = fill(rows * K, seed: UInt64(80 + block + rows))
+        let signs = fill(K, seed: 81).map { v in v < 0 ? Float(-1) : 1 }
+        var want = x
+        Hadamard.rows(&want, width: K, block: block, signs: signs,
+                      inverse: inverse)
+        let xb = ctx.makeF32(x)
+        let ob = ctx.makeF32(rows * K)
+        let sb = ctx.makeF32(signs)
+        let cb = ctx.queue.makeCommandBuffer()!
+        let e = cb.makeComputeCommandEncoder()!
+        MetalEnc(ctx: ctx, e: e).hadamard(x: xb, out: ob, signs: sb, K: K,
+                                          rows: rows, block: block,
+                                          inverse: inverse)
+        e.endEncoding()
+        cb.commit()
+        cb.waitUntilCompleted()
+        precondition(cb.error == nil, "hadamard: \(cb.error!)")
+        return relDiff(Array(ob.f32(rows * K)), want)
+    }
+
+    private static func checkNormHadamard(_ model: QwenModel,
+                                          _ ctx: MetalContext) -> String {
+        let w = model.layers[0].attnNorm
+        var lines: [String] = []
+        var failed = 0
+        if MetalEnc.fusesHadamard(block: 512, K: w.dims[0]) {
+            for rows in [1, 3] {
+                for add in [false, true] {
+                    let rel = normHadamardCase(model, ctx, w, rows: rows,
+                                               add: add)
+                    let ok = rel < 1e-5
+                    if !ok { failed += 1 }
+                    lines.append(String(
+                        format: "  rows %d %@  rel %.2e  %@", rows,
+                        add ? "add+norm" : "norm", rel, ok ? "PASS" : "FAIL"))
+                }
+            }
+        }
+        return "fused norm+hadamard vs the two kernels "
+            + "\(lines.count - failed)/\(lines.count)  "
+            + (failed == 0 ? "PASS" : "FAIL")
+            + (lines.isEmpty ? " (width \(w.dims[0]) not fusable)"
+                             : "\n" + lines.joined(separator: "\n"))
+    }
+
+    private static func normHadamardCase(_ model: QwenModel,
+                                         _ ctx: MetalContext, _ w: GGUFTensor,
+                                         rows: Int, add: Bool) -> Float {
+        let n = w.dims[0]
+        let off = ctx.window(UInt64(w.base - model.gguf.map))
+        let x = fill(rows * n, seed: 86)
+        let r = fill(rows * n, seed: 87)
+        let sb = ctx.makeF32(fill(n, seed: 88).map { v in
+            v < 0 ? Float(-1) : 1
+        })
+        let xa = ctx.makeF32(x), ra = ctx.makeF32(r)
+        let ya = ctx.makeF32(rows * n), ha = ctx.makeF32(rows * n)
+        let xb = ctx.makeF32(x), rb = ctx.makeF32(r)
+        let yb = ctx.makeF32(rows * n), hb = ctx.makeF32(rows * n)
+        let cb = ctx.queue.makeCommandBuffer()!
+        let e = cb.makeComputeCommandEncoder()!
+        let f = MetalEnc(ctx: ctx, e: e)
+        if add { f.add(x: xa, y: ra, n: rows * n) }
+        f.rmsnormBatch(x: xa, weightOff: off, y: ya, n: n, rows: rows,
+                       eps: 1e-6)
+        f.hadamard(x: ya, out: ha, signs: sb, K: n, rows: rows, block: 512,
+                   inverse: false)
+        f.rmsnormHadamard(x: xb, r: add ? rb : nil, weightOff: off, y: yb,
+                          rot: hb, signs: sb, n: n, rows: rows, eps: 1e-6)
+        e.endEncoding()
+        cb.commit()
+        cb.waitUntilCompleted()
+        precondition(cb.error == nil, "rmsnorm_had_512: \(cb.error!)")
+        let count = rows * n
+        return max(relDiff(Array(yb.f32(count)), Array(ya.f32(count))),
+                   relDiff(Array(hb.f32(count)), Array(ha.f32(count))),
+                   relDiff(Array(xb.f32(count)), Array(xa.f32(count))))
+    }
+
+    private static func checkGrouping(_ ctx: MetalContext) -> String {
+        let g = HadamardFold.Grouping(hd: 128, nk: 16, rep: 2)
+        let width = g.hd * g.nk * g.rep
+        let rows = 3
+        let x = fill(rows * width, seed: 85)
+        var want = x
+        Hadamard.grouped(&want, width: width, g)
+        let xb = ctx.makeF32(x)
+        let ob = ctx.makeF32(rows * width)
+        let cb = ctx.queue.makeCommandBuffer()!
+        let e = cb.makeComputeCommandEncoder()!
+        MetalEnc(ctx: ctx, e: e).hadamardGroup(x: xb, out: ob, rows: rows, g)
+        e.endEncoding()
+        cb.commit()
+        cb.waitUntilCompleted()
+        precondition(cb.error == nil, "hadamard_group: \(cb.error!)")
+        let got = Array(ob.f32(rows * width))
+        let ok = got == want && got != x
+        return "hadamard_group vs Swift oracle, \(rows) rows of \(width)  "
+            + (ok ? "PASS" : "FAIL")
     }
 
     private static func checkDequant(_ model: QwenModel,

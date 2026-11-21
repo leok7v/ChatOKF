@@ -56,9 +56,9 @@ actor MemoryStore {
         self.root = root
     }
 
-    func open(excludedFromBackup: Bool) -> Opened? {
+    func open(excludedFromBackup: Bool, encoder: String? = nil) -> Opened? {
         var out: Opened? = nil
-        if embedder == nil, let path = EncoderPack.path {
+        if embedder == nil, let path = encoder ?? EncoderPack.path {
             embedder = ModernBertEmbedder.load(ggufPath: path)
         }
         if embedder == nil {
@@ -69,7 +69,9 @@ actor MemoryStore {
             try? FileManager.default.createDirectory(
                 at: root, withIntermediateDirectories: true)
             Memories.exclude(root, excludedFromBackup)
-            sweepSidecars(keeping: Store.sidecarName(for: embedder.name))
+            sweepSidecars(keeping: [
+                Store.sidecarName(for: embedder.name),
+                Store.paragraphSidecarName(for: embedder.name)])
             let t0 = Date()
             let loaded = Store(root: root, embedder: embedder)
             loaded.load()
@@ -81,11 +83,11 @@ actor MemoryStore {
         return out
     }
 
-    private func sweepSidecars(keeping name: String) {
+    private func sweepSidecars(keeping names: Set<String>) {
         let fm = FileManager.default
         let found = (try? fm.contentsOfDirectory(atPath: root.path)) ?? []
         for file in found
-        where file.hasPrefix(Store.sidecarPrefix) && file != name {
+        where file.hasPrefix(Store.sidecarPrefix) && !names.contains(file) {
             try? fm.removeItem(at: root.appendingPathComponent(file))
             Diag.shared.report(.load, "[memories] removed " + file)
         }
@@ -120,6 +122,15 @@ actor MemoryStore {
         var out = ""
         if let store, !store.concepts.isEmpty {
             out = StoreText.map(store, ids: false)
+        }
+        return out
+    }
+
+    func window(_ id: String, about: String, limit: Int)
+        -> (from: Int, to: Int)? {
+        var out: (from: Int, to: Int)? = nil
+        if let store, let concept = store.concept(id) {
+            out = store.window(concept, about: about, limit: limit)
         }
         return out
     }

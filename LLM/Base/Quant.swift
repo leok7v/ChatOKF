@@ -7,8 +7,13 @@ enum Q2_0 {
     static let qk = 128
     static let blockBytes = 34
 
-    static func dequant(_ base: UnsafeRawPointer, count n: Int, into out: UnsafeMutablePointer<Float>) {
+    static func blockBytes(_ qk: Int) -> Int { 2 + qk / 4 }
+
+    static func dequant(_ base: UnsafeRawPointer, count n: Int,
+                        qk: Int = Q2_0.qk,
+                        into out: UnsafeMutablePointer<Float>) {
         let nb = n / qk
+        let blockBytes = Q2_0.blockBytes(qk)
         var p = base
         var o = 0
         for _ in 0..<nb {
@@ -25,11 +30,13 @@ enum Q2_0 {
     }
 
     // Per block dot = d * (lo + 2 * hi - sumy), which keeps it multiply-light.
-    static func matvec(_ w: GGUFTensor, x: [Float], out: inout [Float]) {
+    static func matvec(_ w: GGUFTensor, x: [Float], out: inout [Float],
+                       qk: Int = Q2_0.qk) {
         let K = w.dims[0]
         let M = w.dims[1]
         precondition(K % qk == 0)
         let nblk = K / qk
+        let blockBytes = Q2_0.blockBytes(qk)
         let rowBytes = nblk * blockBytes
         // Each iteration writes its own row and only reads immutable pointers,
         // which strict concurrency cannot prove for raw pointers; hence unsafe.
@@ -82,7 +89,7 @@ enum Dense {
                                  _ outDim: Int) -> [Float] {
         var flat: [Float]
         switch t.type {
-        case .q2_0, .q4_0:
+        case .q2_0, .q2_64, .q4_0:
             flat = [Float](repeating: 0, count: inDim * outDim)
             var row = [Float](repeating: 0, count: inDim)
             for m in 0..<outDim {

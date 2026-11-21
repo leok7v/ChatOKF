@@ -81,6 +81,45 @@ struct MetalEnc {
 
     static let spanTypes: Set<GGUFType> = [.q8_0, .iq4_nl]
 
+    static let kernelPrefix: [GGUFType: String] = [
+        .q2_0: "q2_0", .q2_64: "q2_64", .q4_0: "q4_0", .q8_0: "q8_0",
+        .iq4_nl: "iq4_nl", .bf16: "bf16", .f16: "f16", .f32: "f32",
+        .q2k: "q2_k", .q3k: "q3_k", .q4k: "q4_k", .q5k: "q5_k", .q6k: "q6_k",
+        .iq1_s: "iq1_s", .iq1_m: "iq1_m", .iq2_xxs: "iq2_xxs",
+        .iq2_xs: "iq2_xs", .iq2_s: "iq2_s", .iq3_xxs: "iq3_xxs",
+        .iq3_s: "iq3_s", .iq4_xs: "iq4_xs",
+    ]
+
+    static let packedGemvTypes: Set<GGUFType> = [
+        .q2_0, .q2_64, .q4_0, .bf16, .f16, .f32,
+    ]
+    static let kqGemvTypes: Set<GGUFType> = [
+        .iq1_s, .iq1_m, .q4k, .q5k, .q6k, .q2k, .q3k, .iq2_xxs, .iq2_xs,
+        .iq2_s, .iq3_xxs, .iq3_s, .iq4_xs, .q8_0, .iq4_nl,
+    ]
+    static let narrowPackedTypes: Set<GGUFType> = [.q4_0, .q2_0, .q2_64]
+    static let narrowKQTypes: Set<GGUFType> = [
+        .q4k, .q5k, .q6k, .iq4_xs, .q8_0, .iq4_nl, .q3k, .iq2_s, .iq3_xxs,
+        .iq3_s, .iq2_xxs, .iq2_xs, .iq1_s, .iq1_m,
+    ]
+    static let packedTileTypes: Set<GGUFType> = [
+        .q2_0, .q2_64, .q4_0, .iq4_nl, .q8_0,
+    ]
+    static let kqTileTypes: Set<GGUFType> = [
+        .q4k, .q5k, .q6k, .iq4_xs, .q3k, .iq2_s, .iq3_xxs, .iq3_s, .iq2_xxs,
+        .iq2_xs, .iq1_s, .iq1_m,
+    ]
+    static let denseTypes: Set<GGUFType> = [.f16, .bf16, .f32]
+    static let kqRowTypes: Set<GGUFType> = [.q2k, .q4k, .q6k]
+    static let packedRowTypes: Set<GGUFType> = [
+        .q2_0, .q2_64, .q4_0, .q8_0, .bf16, .f16, .f32,
+    ]
+
+    static func kernel(_ t: GGUFType, _ family: String,
+                       in types: Set<GGUFType>) -> String? {
+        types.contains(t) ? kernelPrefix[t].map { p in p + family } : nil
+    }
+
     func gemv(_ w: GGUFTensor, x: MTLBuffer, out: MTLBuffer, off: WeightRef,
               xOffBytes: Int = 0, outOffBytes: Int = 0) {
         if Blocks.superBlocked(w.type) || MetalEnc.spanTypes.contains(w.type) {
@@ -98,16 +137,10 @@ struct MetalEnc {
         let k = w.dims[0], m = w.dims[1]
         var a = GemvArgs(woff: off.local, K: UInt32(k), M: UInt32(m))
         let ty = w.type
-        let name: String
-        switch ty {
-        case .q2_0: name = "q2_0_gemv"
-        case .q4_0: name = "q4_0_gemv"
-        case .bf16: name = "bf16_gemv"
-        case .f16: name = "f16_gemv"
-        case .f32: name = "f32_gemv"
-        default:
-            fatalError("MetalEnc.gemv: no kernel for \(ty) (\(w.name))")
-        }
+        let found = MetalEnc.kernel(ty, "_gemv", in: MetalEnc.packedGemvTypes)
+        precondition(found != nil,
+                     "MetalEnc.gemv: no kernel for \(ty) (\(w.name))")
+        let name = found!
         precondition(ty != .f16 && ty != .f32 || k % 4 == 0,
                      "\(name) reads its row and x as float4, so K must be a "
                      + "multiple of 4; \(w.name) has K \(k)")
@@ -124,27 +157,10 @@ struct MetalEnc {
                         off: WeightRef, xOffBytes: Int, outOffBytes: Int) {
         var a = iqArgs(off, w.type, k: w.dims[0], m: w.dims[1])
         let rows = 8
-        let name: String
-        switch w.type {
-        case .iq1_s: name = "iq1_s_gemv"
-        case .iq1_m: name = "iq1_m_gemv"
-        case .q4k: name = "q4_k_gemv"
-        case .q5k: name = "q5_k_gemv"
-        case .q6k: name = "q6_k_gemv"
-        case .q2k: name = "q2_k_gemv"
-        case .q3k: name = "q3_k_gemv"
-        case .iq2_xxs: name = "iq2_xxs_gemv"
-        case .iq2_xs: name = "iq2_xs_gemv"
-        case .iq2_s: name = "iq2_s_gemv"
-        case .iq3_xxs: name = "iq3_xxs_gemv"
-        case .iq3_s: name = "iq3_s_gemv"
-        case .iq4_xs: name = "iq4_xs_gemv"
-        case .q8_0: name = "q8_0_gemv"
-        case .iq4_nl: name = "iq4_nl_gemv"
-        default:
-            fatalError("MetalEnc.gemv: no kernel for \(w.type) (\(w.name))")
-        }
-        groups(name, (w.dims[1] + rows - 1) / rows, tpg: 32) { e in
+        let found = MetalEnc.kernel(w.type, "_gemv", in: MetalEnc.kqGemvTypes)
+        precondition(found != nil,
+                     "MetalEnc.gemv: no kernel for \(w.type) (\(w.name))")
+        groups(found!, (w.dims[1] + rows - 1) / rows, tpg: 32) { e in
             e.setBuffer(off.buf, offset: 0, index: 0)
             e.setBuffer(x, offset: xOffBytes, index: 1)
             e.setBuffer(out, offset: outOffBytes, index: 2)
@@ -188,35 +204,11 @@ struct MetalEnc {
     }
 
     static func narrowPackedName(_ t: GGUFType) -> String? {
-        let out: String?
-        switch t {
-        case .q4_0: out = "q4_0_gemm_nb_r"
-        case .q2_0: out = "q2_0_gemm_nb_r"
-        default: out = nil
-        }
-        return out
+        kernel(t, "_gemm_nb_r", in: narrowPackedTypes)
     }
 
     static func narrowIQName(_ t: GGUFType) -> String? {
-        let out: String?
-        switch t {
-        case .q4k: out = "q4_k_gemm_nb_r"
-        case .q5k: out = "q5_k_gemm_nb_r"
-        case .q6k: out = "q6_k_gemm_nb_r"
-        case .iq4_xs: out = "iq4_xs_gemm_nb_r"
-        case .q8_0: out = "q8_0_gemm_nb_r"
-        case .iq4_nl: out = "iq4_nl_gemm_nb_r"
-        case .q3k: out = "q3_k_gemm_nb_r"
-        case .iq2_s: out = "iq2_s_gemm_nb_r"
-        case .iq3_xxs: out = "iq3_xxs_gemm_nb_r"
-        case .iq3_s: out = "iq3_s_gemm_nb_r"
-        case .iq2_xxs: out = "iq2_xxs_gemm_nb_r"
-        case .iq2_xs: out = "iq2_xs_gemm_nb_r"
-        case .iq1_s: out = "iq1_s_gemm_nb_r"
-        case .iq1_m: out = "iq1_m_gemm_nb_r"
-        default: out = nil
-        }
-        return out
+        kernel(t, "_gemm_nb_r", in: narrowKQTypes)
     }
 
     func gemmNarrowIQ(_ w: GGUFTensor, X: MTLBuffer, out: MTLBuffer,
@@ -253,18 +245,12 @@ struct MetalEnc {
         // 64, N % 32) never spills and 6144 B suffices.
         let fullTile = m % 64 == 0 && N % 32 == 0
         let name: String
-        switch w.type {
-        case .q2_0:
-            name = "q2_0_gemm_mm_h"
-        case .q4_0:
-            name = "q4_0_gemm_mm_h"
-        case .iq4_nl:
-            name = "iq4_nl_gemm_mm_h"
-        case .q8_0:
-            name = "q8_0_gemm_mm_h"
-        case .f16, .bf16, .f32:
+        if let packed = MetalEnc.kernel(w.type, "_gemm_mm_h",
+                                        in: MetalEnc.packedTileTypes) {
+            name = packed
+        } else if MetalEnc.denseTypes.contains(w.type) {
             name = MetalEnc.denseTileName(w.type, K: k, N: N)
-        default:
+        } else {
             precondition(Blocks.superBlocked(w.type),
                          "MetalEnc.gemm: no kernel for \(w.type) (\(w.name))")
             name = MetalEnc.kqTileName(w.type) ?? "iq_gemm_mm_h"
@@ -291,34 +277,13 @@ struct MetalEnc {
     static let fusedTypes: Set<GGUFType> = [.q4k, .q5k, .q6k, .iq4_xs]
 
     static func kqTileName(_ t: GGUFType) -> String? {
-        let out: String?
-        switch t {
-        case .q4k: out = "q4_k_gemm_mm_h"
-        case .q5k: out = "q5_k_gemm_mm_h"
-        case .q6k: out = "q6_k_gemm_mm_h"
-        case .iq4_xs: out = "iq4_xs_gemm_mm_h"
-        case .q3k: out = "q3_k_gemm_mm_h"
-        case .iq2_s: out = "iq2_s_gemm_mm_h"
-        case .iq3_xxs: out = "iq3_xxs_gemm_mm_h"
-        case .iq3_s: out = "iq3_s_gemm_mm_h"
-        case .iq2_xxs: out = "iq2_xxs_gemm_mm_h"
-        case .iq2_xs: out = "iq2_xs_gemm_mm_h"
-        case .iq1_s: out = "iq1_s_gemm_mm_h"
-        case .iq1_m: out = "iq1_m_gemm_mm_h"
-        default: out = nil
-        }
-        return out
+        kernel(t, "_gemm_mm_h", in: kqTileTypes)
     }
 
     static func denseTileName(_ t: GGUFType, K: Int, N: Int) -> String {
         var out = ""
         if N > MetalEnc.narrowMax && K % 32 == 0 {
-            switch t {
-            case .f16: out = "f16_gemm_mm_h"
-            case .bf16: out = "bf16_gemm_mm_h"
-            case .f32: out = "f32_gemm_mm_h"
-            default: out = ""
-            }
+            out = kernel(t, "_gemm_mm_h", in: denseTypes) ?? ""
         }
         return out
     }
@@ -330,15 +295,12 @@ struct MetalEnc {
         var nn = UInt32(N)
         let fullTile = m % 64 == 0 && N % 32 == 0
         let name: String
-        switch w.type {
-        case .q2_0: name = "q2_0_gemm_mm_h"
-        case .q4_0: name = "q4_0_gemm_mm_h"
-        case .iq4_nl:
-            name = "iq4_nl_gemm_mm_h"
-        case .q8_0: name = "q8_0_gemm_mm_h"
-        case .f16, .bf16, .f32:
+        if let packed = MetalEnc.kernel(w.type, "_gemm_mm_h",
+                                        in: MetalEnc.packedTileTypes) {
+            name = packed
+        } else if MetalEnc.denseTypes.contains(w.type) {
             name = MetalEnc.denseTileName(w.type, K: k, N: 32)
-        default:
+        } else {
             name = Blocks.superBlocked(w.type)
                 ? MetalEnc.kqTileName(w.type) ?? "iq_gemm_mm_h" : ""
         }
@@ -416,42 +378,21 @@ struct MetalEnc {
     }
 
     static func dqRowName(_ t: GGUFType) -> String {
-        let out: String
-        switch t {
-        case .q2k: out = "q2_k_dequant_row"
-        case .q4k: out = "q4_k_dequant_row"
-        case .q6k: out = "q6_k_dequant_row"
-        default: out = "iq_dequant_row"
-        }
-        return out
+        kernel(t, "_dequant_row", in: kqRowTypes) ?? "iq_dequant_row"
     }
 
     static func embedName(_ t: GGUFType) -> String {
-        let out: String
-        switch t {
-        case .q2k: out = "q2_k_embed_batch"
-        case .q4k: out = "q4_k_embed_batch"
-        case .q6k: out = "q6_k_embed_batch"
-        default: out = "iq_embed_batch"
-        }
-        return out
+        kernel(t, "_embed_batch", in: kqRowTypes) ?? "iq_embed_batch"
     }
 
     private func packedDequantRow(weightOff: WeightRef, out: MTLBuffer,
                                   n: Int, type: GGUFType, outOffBytes: Int) {
         var a = GemvArgs(woff: weightOff.local, K: UInt32(n), M: UInt32(n))
-        let name: String
-        switch type {
-        case .q2_0: name = "q2_0_dequant_row"
-        case .q4_0: name = "q4_0_dequant_row"
-        case .q8_0: name = "q8_0_dequant_row"
-        case .bf16: name = "bf16_dequant_row"
-        case .f16: name = "f16_dequant_row"
-        case .f32: name = "f32_dequant_row"
-        default:
-            fatalError("MetalEnc.dequantRow: no kernel for \(type)")
-        }
-        grid1D(name, n) { e in
+        let found = MetalEnc.kernel(type, "_dequant_row",
+                                    in: MetalEnc.packedRowTypes)
+        precondition(found != nil,
+                     "MetalEnc.dequantRow: no kernel for \(type)")
+        grid1D(found!, n) { e in
             e.setBuffer(weightOff.buf, offset: 0, index: 0)
             e.setBuffer(out, offset: outOffBytes, index: 1)
             e.setBytes(&a, length: MemoryLayout<GemvArgs>.stride, index: 2)
@@ -584,6 +525,68 @@ struct MetalEnc {
             e in
             e.setBuffer(x, offset: 0, index: 0)
             e.setBytes(&a, length: MemoryLayout<RowBatchArgs>.stride, index: 1)
+        }
+    }
+
+    static let hadamardBlocks: Set<Int> = [512, 1024, 4096]
+
+    func hadamard(x: MTLBuffer, out: MTLBuffer, signs: MTLBuffer, K: Int,
+                  rows: Int, block: Int, inverse: Bool, xOffBytes: Int = 0,
+                  outOffBytes: Int = 0) {
+        precondition(MetalEnc.hadamardBlocks.contains(block)
+                     && K % block == 0,
+                     "hadamard: the block \(block) must be 512, 1024 or 4096 "
+                     + "and divide K \(K)")
+        let blocks = rows * (K / block)
+        var a = HadArgs(K: UInt32(K), blocks: UInt32(blocks),
+                        scale: 1 / Float(block).squareRoot())
+        let name = "hadamard_\(block)" + (inverse ? "_inv" : "")
+        let per = block == 512 ? 4 : 1
+        let tpg = block == 512 ? 128 : 256
+        let tgmem = block == 512 ? 0 : block * MemoryLayout<Float>.stride
+        groups(name, (blocks + per - 1) / per, tpg: tpg, tgmem: tgmem) { e in
+            e.setBuffer(x, offset: xOffBytes, index: 0)
+            e.setBuffer(out, offset: outOffBytes, index: 1)
+            e.setBuffer(signs, offset: 0, index: 2)
+            e.setBytes(&a, length: MemoryLayout<HadArgs>.stride, index: 3)
+        }
+    }
+
+    func hadamardGroup(x: MTLBuffer, out: MTLBuffer, rows: Int,
+                       _ g: HadamardFold.Grouping) {
+        precondition(x !== out, "hadamard_group permutes across a row, so "
+                     + "it cannot run in place")
+        var a = GroupArgs(hd: UInt32(g.hd), nk: UInt32(g.nk),
+                          rep: UInt32(g.rep), rows: UInt32(rows))
+        grid1D("hadamard_group", rows * g.hd * g.nk * g.rep) { e in
+            e.setBuffer(x, offset: 0, index: 0)
+            e.setBuffer(out, offset: 0, index: 1)
+            e.setBytes(&a, length: MemoryLayout<GroupArgs>.stride, index: 2)
+        }
+    }
+
+    static func fusesHadamard(block: Int, K: Int) -> Bool {
+        block == 512 && K % 512 == 0 && K >= 512 && K / 16 <= 1024
+    }
+
+    func rmsnormHadamard(x: MTLBuffer, r: MTLBuffer?, weightOff: WeightRef,
+                         y: MTLBuffer, rot: MTLBuffer, signs: MTLBuffer,
+                         n: Int, rows: Int, eps: Float) {
+        precondition(MetalEnc.fusesHadamard(block: 512, K: n),
+                     "rmsnorm_had_512: the width \(n) must be a multiple of "
+                     + "512 and at most 16384")
+        var a = NormHadArgs(woff: weightOff.local, n: UInt32(n), eps: eps,
+                            xStride: UInt32(n), yStride: UInt32(n),
+                            scale: 1 / Float(512).squareRoot())
+        let name = r == nil ? "rmsnorm_had_512" : "add_rmsnorm_had_512"
+        groups(name, rows, tpg: n / 16, tgmem: 128) { e in
+            e.setBuffer(x, offset: 0, index: 0)
+            e.setBuffer(r ?? x, offset: 0, index: 1)
+            e.setBuffer(weightOff.buf, offset: 0, index: 2)
+            e.setBuffer(y, offset: 0, index: 3)
+            e.setBuffer(rot, offset: 0, index: 4)
+            e.setBuffer(signs, offset: 0, index: 5)
+            e.setBytes(&a, length: MemoryLayout<NormHadArgs>.stride, index: 6)
         }
     }
 
@@ -1061,6 +1064,8 @@ struct MetalEnc {
 
     static let attnSplits = 8
 
+    static let attnTileHeadDims: Set<Int> = [128, 256, 512]
+
     private func attnSplit(q: MTLBuffer, kAddr: MTLBuffer, vAddr: MTLBuffer,
                            gate: MTLBuffer, out: MTLBuffer, hd: Int, nH: Int,
                            nKV: Int, T: Int, kvDim: Int, P: Int, scale: Float,
@@ -1127,18 +1132,13 @@ struct MetalEnc {
         var a = EmbedArgs(woff: weightOff.local, K: UInt32(nEmbd),
                           M: UInt32(N),
                           rowBytes: UInt32(GGUF.rowByteCount(type, nEmbd)))
-        let name: String
-        switch type {
-        case .q2_0: name = "embed_batch"
-        case .q4_0: name = "q4_0_embed_batch"
-        case .q8_0: name = "q8_0_embed_batch"
-        case .bf16: name = "bf16_embed_batch"
-        case .f16: name = "f16_embed_batch"
-        case .f32: name = "f32_embed_batch"
-        default:
-            fatalError("MetalEnc.embedBatch: no kernel for \(type)")
-        }
-        grid1D(name, N * nEmbd) { e in
+        let found = type == .q2_0
+            ? "embed_batch"
+            : MetalEnc.kernel(type, "_embed_batch",
+                              in: MetalEnc.packedRowTypes)
+        precondition(found != nil,
+                     "MetalEnc.embedBatch: no kernel for \(type)")
+        grid1D(found!, N * nEmbd) { e in
             e.setBuffer(weightOff.buf, offset: 0, index: 0)
             e.setBuffer(ids, offset: 0, index: 1)
             e.setBuffer(out, offset: 0, index: 2)
@@ -1382,13 +1382,14 @@ struct MetalEnc {
         // An 8-key block is ONE strided simdgroup_load, contiguous only inside
         // a page, so P is a multiple of 8; the P=4 self-test pool proves it.
         let mm = matrix && ctx.matrixUnits
-            && hd % 8 == 0 && (hd / 4) % 8 == 0 && P % 8 == 0
+            && MetalEnc.attnTileHeadDims.contains(hd) && P % 8 == 0
         if mm {
             // qs[8*hd half] | s[8*32 f32] | p[8*32 half] | m[8] | l[8] |
             // corr[64 half]
             let tgmem = 8 * hd * 2 + 256 * 4 + 256 * 2 + 8 * 4 + 8 * 4 + 64 * 2
             let tiles = (N + 7) / 8
-            groups("attn_batch_mm", tiles * nH, tpg: 128, tgmem: tgmem) { e in
+            groups("attn_batch_h\(hd)_mm", tiles * nH, tpg: 128,
+                   tgmem: tgmem) { e in
                 e.setBuffer(qN, offset: 0, index: 0)
                 e.setBuffer(kAddr, offset: 0, index: 1)
                 e.setBuffer(vAddr, offset: 0, index: 2)
@@ -1467,6 +1468,12 @@ struct NormAddArgs {
     var s: Float; var pre: UInt32
 }
 struct GluArgs { var n: UInt32; var e: UInt32 }
+struct HadArgs { var K: UInt32; var blocks: UInt32; var scale: Float }
+struct NormHadArgs {
+    var woff: UInt64; var n: UInt32; var eps: Float
+    var xStride: UInt32; var yStride: UInt32; var scale: Float
+}
+struct GroupArgs { var hd: UInt32; var nk: UInt32; var rep: UInt32; var rows: UInt32 }
 struct DwArgs { var n: UInt32; var e: UInt32; var k: UInt32 }
 struct HeadScaleArgs { var n: UInt32; var e: UInt32; var hd: UInt32 }
 struct AAttnArgs {

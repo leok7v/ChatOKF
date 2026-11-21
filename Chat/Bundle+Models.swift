@@ -62,12 +62,16 @@ public enum Models {
     public static var every: [String] {
         isOS
             ? ["gemma-4-E2B", "gemma-4-E4B",
-               "Qwen3.5-2B", "Qwen3.5-4B", "Ternary-Bonsai-1.7B"]
+               "Qwen3.5-2B", "Qwen3.5-4B", "Ternary-Bonsai-1.7B",
+               "Ternary-Bonsai-2-2B", "Ternary-Bonsai-2-4B",
+               "Ternary-Bonsai-2-9B"]
             : ["Qwen3.5-4B", "Qwen3.5-9B",
                "Qwen3.8-27B-IQ1_S", "Qwen3.8-27B-IQ2_XXS",
                "Qwen3.8-27B-IQ3_XXS", "Qwen3.8-27B-IQ4_XS",
                "Qwen3.8-27B-Q4_K_S",
                "Ternary-Bonsai-27B", "Ternary-Bonsai-1.7B",
+               "Ternary-Bonsai-2-2B", "Ternary-Bonsai-2-4B",
+               "Ternary-Bonsai-2-9B",
                "gemma-4-E2B", "gemma-4-E4B", "gemma-4-12B"]
     }
 
@@ -88,8 +92,10 @@ public enum Models {
         if isOS {
             if let rung = gemmaRung(gb) { band.insert(rung) }
             if gb >= 7 { band.insert("Qwen3.5-4B") }
+            if gb >= 7 { band.insert("Ternary-Bonsai-2-4B") }
+            if gb >= 7 { band.insert("Ternary-Bonsai-2-9B") }
             if gb == 4 { band.insert("Qwen3.5-2B") }
-            if gb <= 3 { band.insert("Ternary-Bonsai-1.7B") }
+            if gb <= 4 { band.insert("Ternary-Bonsai-2-2B") }
         } else {
             if gb >= 8 { band.insert("Qwen3.5-4B") }
             if gb >= 16 { band.insert("Qwen3.5-9B") }
@@ -111,11 +117,12 @@ public enum Models {
         !all.isEmpty && MetalContext.supported
     }
 
-    public static let fallback = "Ternary-Bonsai-1.7B"
+    public static let fallback = "Ternary-Bonsai-2-2B"
 
     static let simple: Set<String> = ["Ternary-Bonsai-1.7B"]
 
-    static let unjudged: Set<String> = ["Ternary-Bonsai-1.7B", "Qwen3.5-2B"]
+    static let unjudged: Set<String> = ["Ternary-Bonsai-1.7B", "Qwen3.5-2B",
+                                        "Ternary-Bonsai-2-2B"]
 
     public static var offersNoteTools: Bool { Flags.on("note-tools") }
 
@@ -175,6 +182,9 @@ public enum Models {
                  "Qwen3.8-27B-Q4_K_S": out = "Qwen3.8 27B"
             case "Ternary-Bonsai-27B": out = "Bonsai 27B"
             case "Ternary-Bonsai-1.7B": out = "Bonsai 1.7B"
+            case "Ternary-Bonsai-2-2B": out = "Bonsai2 2B"
+            case "Ternary-Bonsai-2-4B": out = "Bonsai2 4B"
+            case "Ternary-Bonsai-2-9B": out = "Bonsai2 9B"
             case "gemma-4-E2B", "gemma-4-E2B-MTP": out = "Gemma E2B"
             case "gemma-4-E4B", "gemma-4-E4B-MTP": out = "Gemma E4B"
             case "gemma-4-12B", "gemma-4-12B-MTP": out = "Gemma 12B"

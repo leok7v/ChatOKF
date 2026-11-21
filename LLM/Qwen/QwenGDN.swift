@@ -12,15 +12,17 @@ final class GDNState {
 }
 
 enum GDN {
-    static func step(_ n: [Float], _ L: QwenLayer, _ st: GDNState, _ cfg: QwenConfig) -> [Float] {
+    static func step(_ n: [Float], _ L: QwenLayer, _ st: GDNState,
+                     _ cfg: QwenConfig, _ fold: HadamardFold? = nil) -> [Float] {
         let dS = cfg.dState, nK = cfg.nKHead, nV = cfg.nVHead
         let keyDim = cfg.keyDim, valDim = cfg.valueDim, convDim = cfg.convDim
         let kc = cfg.dConv
 
         var qkvMix = [Float](repeating: 0, count: convDim)
-        QB.matvec(L.wqkv!, x: n, out: &qkvMix)
+        QB.matvec(L.wqkv!, x: Hadamard.input(n, L.wqkv!, fold), out: &qkvMix)
         var z = [Float](repeating: 0, count: valDim)
-        QB.matvec(L.wqkvGate!, x: n, out: &z)
+        QB.matvec(L.wqkvGate!, x: Hadamard.input(n, L.wqkvGate!, fold),
+                  out: &z)
 
         var betaPre = [Float](repeating: 0, count: nV)
         QB.matvec(L.ssmBeta!, x: n, out: &betaPre)
@@ -103,7 +105,7 @@ enum GDN {
         for i in 0..<valDim { o[i] *= silu(z[i]) }
 
         var out = [Float](repeating: 0, count: cfg.nEmbd)
-        QB.matvec(L.ssmOut!, x: o, out: &out)
+        QB.matvec(L.ssmOut!, x: Hadamard.input(o, L.ssmOut!, fold), out: &out)
         return out
     }
 }

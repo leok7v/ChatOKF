@@ -42,6 +42,7 @@ struct ContentView: View {
     @State private var calloutSize: CGSize = .zero
     @ScaledMetric(relativeTo: .body) private var popScale: CGFloat = 1
     @State private var follow = true
+    @State private var userScrolling = false
     @State private var tailInset: CGFloat = 0
     @State private var tailCollapse: Task<Void, Never>?
     @ScaledMetric(relativeTo: .body) private var tailInsetSize: CGFloat = 64
@@ -1041,8 +1042,11 @@ struct ContentView: View {
                     }
                 }
             }
-            .onScrollPhaseChange { _, phase, context in
-                if phase == .interacting || phase == .decelerating {
+            .onScrollPhaseChange { old, phase, context in
+                let moved = old == .interacting || old == .decelerating
+                userScrolling = phase == .interacting
+                    || phase == .decelerating
+                if moved || userScrolling {
                     let g = context.geometry
                     follow = g.contentSize.height - g.visibleRect.maxY < 60
                 }
@@ -1052,9 +1056,9 @@ struct ContentView: View {
                             bottom: g.visibleRect.maxY,
                             height: g.contentSize.height)
             }, action: { was, now in
-                if now.top < was.top - 1, now.height >= was.height {
+                if userScrolling, now.top < was.top - 1 {
                     follow = false
-                } else if now.height - now.bottom < 60 {
+                } else if userScrolling, now.height - now.bottom < 60 {
                     follow = true
                 }
             })
@@ -1088,7 +1092,7 @@ struct ContentView: View {
             })
             .coordinateSpace(.named(transcriptSpace))
             .overlay { toolCallout }
-            .safeAreaInset(edge: .bottom, spacing: 0) {
+            .overlay(alignment: .bottom) {
                 VStack(spacing: 8) {
                     if isReasoningLive { quickAnswerButton }
                     if !follow { toBottomButton(proxy) }
