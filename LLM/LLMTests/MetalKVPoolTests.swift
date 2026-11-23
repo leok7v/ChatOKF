@@ -243,6 +243,8 @@ final class MetalKVPoolTests: XCTestCase {
     }
 
     func testAShiftTurnsTheMovedKeysToTheirNewPositions() throws {
+        try XCTSkipUnless(MetalContext.supported,
+                          "the shift runs Metal kernels, and this GPU cannot")
         let ctx = try context()
         let rope = KVRope(kvDim: 1024, headDim: 256, nRot: 64,
                           base: 10_000_000)
