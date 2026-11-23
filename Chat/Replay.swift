@@ -132,23 +132,41 @@ extension Session {
         var out = false
         if ggufBackend != nil {
             await newChatEngine(config, onEvent: onEvent)
-            await awaitPrimed()
-            if let session {
-                let t0 = Date()
-                let encoder = media
-                do {
-                    let laid = try await Task.detached {
-                        try Session.materialized(turns, encoder, budget)
-                    }.value
-                    let tokens = try await session.replay(laid)
-                    Diag.shared.report(.load, String(
-                        format: "[replay] %d turn(s), %d tokens in %.1fs",
-                        turns.count, tokens, Date().timeIntervalSince(t0)))
-                    out = true
-                } catch {
-                    Diag.shared.report("[replay] not resumed after "
-                                       + "\(turns.count) turn(s): \(error)")
+            let chat = session
+            let lane = inLane { await self.replayed(turns, budget) }
+            out = await withTaskCancellationHandler {
+                await lane.value
+            } onCancel: {
+                lane.cancel()
+                chat?.requestStop()
+            }
+        }
+        return out
+    }
+
+    private func replayed(_ turns: [PlannedTurn], _ budget: Int) async
+        -> Bool {
+        var out = false
+        if let session {
+            let t0 = Date()
+            let encoder = media
+            do {
+                let job = Task.detached {
+                    try Session.materialized(turns, encoder, budget)
                 }
+                let laid = try await withTaskCancellationHandler {
+                    try await job.value
+                } onCancel: {
+                    job.cancel()
+                }
+                let tokens = try await session.replay(laid)
+                Diag.shared.report(.load, String(
+                    format: "[replay] %d turn(s), %d tokens in %.1fs",
+                    turns.count, tokens, Date().timeIntervalSince(t0)))
+                out = true
+            } catch {
+                Diag.shared.report("[replay] not resumed after "
+                                   + "\(turns.count) turn(s): \(error)")
             }
         }
         return out

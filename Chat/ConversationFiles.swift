@@ -314,13 +314,15 @@ actor ConversationFiles {
             },
             posters: m.posters.compactMap { cg in jpeg(cg) },
             soft: m.soft?.lastPathComponent,
-            prompt: m.prompt.isEmpty || m.prompt == m.text ? nil : m.prompt)
+            prompt: m.prompt.isEmpty || m.prompt == m.text ? nil : m.prompt,
+            cut: m.cut.isEmpty ? nil : m.cut)
     }
 
     private func restored(_ s: ConversationStore.Msg) -> Message {
         var m = Message(fromUser: s.fromUser, text: s.text)
         m.reasoning = s.reasoning
         m.loopStopped = s.loopStopped
+        m.cut = s.cut ?? ""
         m.prompt = s.prompt ?? ""
         m.soft = s.soft.map { name in SoftFile.url(name) }
         m.images = s.images.compactMap { data in decoded(data) }

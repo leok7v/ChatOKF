@@ -77,10 +77,28 @@ actor MemoryStore {
             loaded.load()
             store = loaded
             purgeExpired()
+            unpage(loaded)
             out = Opened(snapshot: snapshot(), embedded: loaded.embeddedCount,
                          seconds: Date().timeIntervalSince(t0))
         }
         return out
+    }
+
+    private func unpage(_ store: Store) {
+        let pages = store.concepts.filter { concept in
+            concept.type == MemoryStore.pageType
+        }
+        for page in pages {
+            let clean = MemoryTools.unpaged(page.body)
+            if clean != page.body, (try? store.write(
+                id: page.id, type: page.type, title: page.title,
+                description: page.description, tags: page.tags,
+                body: clean, status: page.status,
+                staleAfter: page.staleAfter)) != nil {
+                store.reload(id: page.id)
+                Diag.shared.report(.load, "[memories] unpaged " + page.id)
+            }
+        }
     }
 
     private func sweepSidecars(keeping names: Set<String>) {
@@ -430,8 +448,10 @@ actor MemoryStore {
            let at = MemoryStore.fetchedAt(concept),
            Date().timeIntervalSince(at) < MemoryStore.freshDays * 86400 {
             let day = String(Store.iso.string(from: at).prefix(10))
+            let asked = Int(MemoryTools.arg(args, "limit") ?? "") ?? 0
+            let limit = asked > 0 ? asked : ReadBudget.shared.articleChars
             out = "From the user's notes, fetched on \(day) (note \(id)):"
-                + "\n" + concept.body + "\n"
+                + "\n" + Tools.deliverText(concept.body, limit, 0) + "\n"
         }
         return out
     }
@@ -441,12 +461,12 @@ actor MemoryStore {
          "sources:", "  - resource: " + source]
     }
 
-    func keepPage(_ name: String, _ args: [ToolArg], text: String)
-        -> MemorySnapshot? {
+    func keepPage(_ name: String, _ args: [ToolArg], text: String,
+                  body: String) -> MemorySnapshot? {
         var out: MemorySnapshot? = nil
         if let store, !MemoryTools.pageFailed(text),
            let id = MemoryTools.pageId(name, args) {
-            let lines = text.components(separatedBy: "\n")
+            let lines = body.components(separatedBy: "\n")
             let source = MemoryTools.arg(args, "url")
                 ?? "wikipedia:" + (MemoryTools.arg(args, "query") ?? "")
             let wrote = try? store.write(
@@ -455,7 +475,7 @@ actor MemoryStore {
                 description: NoteFind.cut(
                     lines.dropFirst().joined(separator: "\n"),
                     limit: MemoryStore.descriptionLimit),
-                tags: ["pages"], body: text, adding: stamped(source))
+                tags: ["pages"], body: body, adding: stamped(source))
             if wrote != nil {
                 store.reload(id: id)
                 out = snapshot()

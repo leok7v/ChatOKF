@@ -21,6 +21,9 @@ struct ViewCommands: Commands {
     @Bindable var model: ChatModel
 
     var body: some Commands {
+        CommandGroup(replacing: .appInfo) {
+            Button("About \(Bundle.appName)") { showAbout() }
+        }
         CommandGroup(replacing: .appSettings) {
             Button {
                 model.openSettings()
@@ -55,6 +58,19 @@ struct ViewCommands: Commands {
 
 }
 
+@MainActor func showAbout() {
+    let line = "\u{00A9} Dmitry \u{201C}Leo\u{201D} Kuznetsov"
+    let centred = NSMutableParagraphStyle()
+    centred.alignment = .center
+    let credits = NSAttributedString(string: line, attributes: [
+        .link: URL(string: "https://leok7v.github.io/ChatOKF/") as Any,
+        .font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize),
+        .paragraphStyle: centred,
+    ])
+    NSApp.orderFrontStandardAboutPanel(options: [.credits: credits])
+    NSApp.activate()
+}
+
 @MainActor func quitApp() { NSApp.terminate(nil) }
 
 func setClipboard(_ plain: String, html: String? = nil) {
@@ -64,3 +80,25 @@ func setClipboard(_ plain: String, html: String? = nil) {
 }
 
 var isOS: Bool { return false }
+
+@MainActor func applyAppearance(_ scheme: ColorScheme?) {
+    let appearance: NSAppearance?
+    switch scheme {
+    case .dark: appearance = NSAppearance(named: .darkAqua)
+    case .light: appearance = NSAppearance(named: .aqua)
+    default: appearance = nil
+    }
+    NSApp.appearance = appearance
+    for window in NSApp.windows {
+        window.appearance = appearance
+        if let root = window.contentView { markDirty(root) }
+        window.invalidateShadow()
+        window.display()
+    }
+}
+
+@MainActor private func markDirty(_ view: NSView) {
+    view.needsLayout = true
+    view.needsDisplay = true
+    for child in view.subviews { markDirty(child) }
+}

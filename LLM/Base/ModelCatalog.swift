@@ -82,6 +82,11 @@ public enum ModelCatalog {
             revision: "f04260b62dc4ec34cd79504aae7b2f46cdacea29",
             bytes: 3_186_049_024,
             files: ["Ternary-Bonsai-2-9B-Q2_0.ggxf"]),
+        "Ternary-Bonsai-2-27B": Source(
+            repo: "leok7v/Ternary-Bonsai-2-27B-gguf",
+            revision: "6dd1d6eda9b11954e68721efc0780fb60b054409",
+            bytes: 8_263_434_240,
+            files: ["Ternary-Bonsai-2-27B-Q2_0.ggxf"]),
         "gemma-4-E2B": Source(
             repo: "leok7v/gemma-4-e2b-it-qat",
             revision: "a98d8daed9141ec98f68f54fafa7a08efa8ca580",
@@ -132,6 +137,7 @@ public enum ModelCatalog {
         "Ternary-Bonsai-2-2B": "Ternary-Bonsai-2-2B-Q2_0.ggxf",
         "Ternary-Bonsai-2-4B": "Ternary-Bonsai-2-4B-Q2_0.ggxf",
         "Ternary-Bonsai-2-9B": "Ternary-Bonsai-2-9B-Q2_0.ggxf",
+        "Ternary-Bonsai-2-27B": "Ternary-Bonsai-2-27B-Q2_0.ggxf",
         "gemma-4-E2B": "gemma-4-e2b-it-qat.ggxf",
         "gemma-4-E4B": "gemma-4-e4b-it-qat.ggxf",
         "gemma-4-12B": "gemma-4-12b-it-qat.ggxf",

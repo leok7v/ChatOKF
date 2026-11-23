@@ -34,6 +34,57 @@ final class ModelNamingTests: XCTestCase {
         XCTAssertEqual(Models.display("gemma-4-E4B-MTP"), "Gemma E4B")
     }
 
+    func testTheSpeechFloorFallbackIsTheKnobDefault() {
+        let knob = Flags.registry.first { k in k.name == "speech-floor" }
+        XCTAssertEqual(knob?.defaultValue,
+                       String(VoicePlayer.speechFloorDefault))
+    }
+
+    func testOnlyTheHybridsOf4BAndUpShiftAFullContext() {
+        for name in ["Qwen3.5-4B", "Qwen3.5-9B", "Ternary-Bonsai-2-4B",
+                     "Ternary-Bonsai-2-9B", "Ternary-Bonsai-2-27B"] {
+            XCTAssertEqual(Models.shift(name), .soft, name)
+        }
+        for name in ["Qwen3.5-2B", "Ternary-Bonsai-2-2B", "gemma-4-E2B",
+                     "gemma-4-E4B", "gemma-4-12B", "Qwen3.8-27B-IQ1_S",
+                     "Ternary-Bonsai-1.7B", "Ternary-Bonsai-27B"] {
+            XCTAssertEqual(Models.shift(name), .off, name)
+        }
+    }
+
+}
+
+private final class Calls: @unchecked Sendable {
+    private let lock = NSLock()
+    private var n = 0
+    var count: Int { lock.withLock { n } }
+    func bump() { lock.withLock { n += 1 } }
+}
+
+@MainActor final class WarmedTests: XCTestCase {
+
+    func testAWarmThatMadeNothingIsTriedAgain() async {
+        let warmed = Warmed<Int>()
+        let calls = Calls()
+        let first = await warmed.take {
+            calls.bump()
+            return nil
+        }.value
+        XCTAssertNil(first)
+        var second: Int? = nil
+        let deadline = Date().addingTimeInterval(2)
+        while second == nil && Date() < deadline {
+            second = await warmed.take {
+                calls.bump()
+                return 7
+            }.value
+            await Task.yield()
+        }
+        XCTAssertEqual(second, 7, "a failed load stayed cached")
+        let kept = await warmed.take { 9 }.value
+        XCTAssertEqual(kept, 7, "a good load was not kept")
+    }
+
 }
 
 final class AttachmentRefsTests: XCTestCase {
@@ -77,6 +128,33 @@ final class AttachmentRefsTests: XCTestCase {
             let scale = ChatModel.zoomScale(notch)
             XCTAssertEqual(ChatModel.zoomNotch(nearest: scale), notch)
         }
+    }
+
+}
+
+@MainActor final class DownloadBarTests: XCTestCase {
+
+    func testThePlanIsTheModelBytesOnly() throws {
+        let bytes = try XCTUnwrap(ModelCatalog.source(Models.start)?.bytes)
+        XCTAssertEqual(ChatModel.plannedBytes(Models.start), bytes)
+        XCTAssertEqual(ChatModel.plannedBytes("no-such-model"), 0)
+    }
+
+    func testTheBarFillsWhenTheModelLands() throws {
+        let bytes = try XCTUnwrap(ModelCatalog.source(Models.start)?.bytes)
+        let first = ChatModel.barProgress(done: 0, total: 0, planned: bytes)
+        XCTAssertEqual(first.total, bytes)
+        let last = ChatModel.barProgress(done: bytes, total: bytes,
+                                         planned: bytes)
+        XCTAssertEqual(last.done, last.total)
+    }
+
+    func testTheMissingPacksComeBeforeTheModel() {
+        let steps = ChatModel.downloadSteps(
+            "m", packs: [.encoder, .voice, .hearing])
+        XCTAssertEqual(steps, [.pack(.encoder), .pack(.voice),
+                               .pack(.hearing), .model("m")])
+        XCTAssertEqual(ChatModel.downloadSteps("m", packs: []), [.model("m")])
     }
 
 }
@@ -175,6 +253,386 @@ final class AttachmentRefsTests: XCTestCase {
         ])
         XCTAssertFalse(label.contains("turn"))
         XCTAssertTrue(label.hasPrefix("\u{21C4} 160"))
+    }
+
+}
+
+private final class TalkBackend: AgentBackend, @unchecked Sendable {
+    let eos: Int32 = -1
+    private let lock = NSLock()
+    private var pos = 0
+    private var marked = 0
+
+    func encode(_ text: String) -> [Int32] {
+        text.utf8.map { byte in Int32(byte) }
+    }
+
+    func tokenBytes(_ id: Int32) -> [UInt8] {
+        id >= 0 && id < 256 ? [UInt8(id)] : []
+    }
+
+    func text(_ ids: [Int32]) -> String {
+        String(decoding: ids.flatMap { id in tokenBytes(id) }, as: UTF8.self)
+    }
+
+    var position: Int { get async { lock.withLock { pos } } }
+
+    func reset() async { lock.withLock { pos = 0 } }
+
+    func useSampler(_ s: Sampler?) async {}
+
+    func extend(_ ids: [Int32]) async throws -> Int32 {
+        await Task.yield()
+        lock.withLock { pos += ids.count }
+        return 111
+    }
+
+    func decode(_ token: Int32) async throws -> Int32 {
+        await Task.yield()
+        lock.withLock { pos += 1 }
+        return token == 111 ? 107 : eos
+    }
+
+    func mark() async throws { lock.withLock { marked = pos } }
+
+    func rewind() async throws { lock.withLock { pos = marked } }
+
+    struct State: BackendState { let pos: Int; let mark: Int }
+
+    func saveState() async throws -> any BackendState {
+        lock.withLock { State(pos: pos, mark: marked) }
+    }
+
+    func loadState(_ state: any BackendState) async throws {
+        if let s = state as? State {
+            lock.withLock {
+                pos = s.pos
+                marked = s.mark
+            }
+        }
+    }
+
+    func attach(_ dir: URL) async throws {
+        throw EngineError.missingModel("talk")
+    }
+}
+
+private final class ParkBackend: AgentBackend, @unchecked Sendable {
+    let eos: Int32 = -1
+    private let lock = NSLock()
+    private var pos = 0
+    private var marked = 0
+    private var dir: URL?
+    private var hold = false
+    private var gate: CheckedContinuation<Void, Never>?
+
+    var held: Bool { lock.withLock { gate != nil } }
+
+    func holdNextResume() { lock.withLock { hold = true } }
+
+    func release() {
+        let waiting = lock.withLock {
+            let out = gate
+            gate = nil
+            return out
+        }
+        waiting?.resume()
+    }
+
+    func encode(_ text: String) -> [Int32] {
+        text.utf8.map { byte in Int32(byte) }
+    }
+
+    func tokenBytes(_ id: Int32) -> [UInt8] {
+        id >= 0 && id < 256 ? [UInt8(id)] : []
+    }
+
+    func text(_ ids: [Int32]) -> String {
+        String(decoding: ids.flatMap { id in tokenBytes(id) }, as: UTF8.self)
+    }
+
+    var position: Int { get async { lock.withLock { pos } } }
+
+    func reset() async { lock.withLock { pos = 0 } }
+
+    func useSampler(_ s: Sampler?) async {}
+
+    func extend(_ ids: [Int32]) async throws -> Int32 {
+        await Task.yield()
+        lock.withLock { pos += ids.count }
+        return 111
+    }
+
+    func decode(_ token: Int32) async throws -> Int32 {
+        await Task.yield()
+        lock.withLock { pos += 1 }
+        return token == 111 ? 107 : eos
+    }
+
+    func mark() async throws { lock.withLock { marked = pos } }
+
+    func rewind() async throws { lock.withLock { pos = marked } }
+
+    struct State: BackendState { let pos: Int; let mark: Int }
+
+    func saveState() async throws -> any BackendState {
+        lock.withLock { State(pos: pos, mark: marked) }
+    }
+
+    func loadState(_ state: any BackendState) async throws {
+        if let s = state as? State {
+            lock.withLock {
+                pos = s.pos
+                marked = s.mark
+            }
+        }
+    }
+
+    func attach(_ dir: URL) async throws {
+        try FileManager.default.createDirectory(
+            at: dir, withIntermediateDirectories: true)
+        lock.withLock { self.dir = dir }
+    }
+
+    func detach() async { lock.withLock { dir = nil } }
+
+    func park(to dir: URL, meta: Data) async throws {
+        let from = lock.withLock { self.dir }
+        if let from {
+            try meta.write(to: from.appendingPathComponent("meta.json"))
+            if from.standardizedFileURL != dir.standardizedFileURL {
+                try? FileManager.default.removeItem(at: dir)
+                try FileManager.default.moveItem(at: from, to: dir)
+            }
+            lock.withLock { self.dir = nil }
+        }
+    }
+
+    func resume(from dir: URL) async throws -> Data {
+        let waits = lock.withLock {
+            let out = hold
+            hold = false
+            return out
+        }
+        if waits {
+            await withCheckedContinuation {
+                (k: CheckedContinuation<Void, Never>) in
+                lock.withLock { gate = k }
+            }
+        }
+        let meta = try Data(contentsOf: dir.appendingPathComponent(
+            "meta.json"))
+        try await attach(dir)
+        return meta
+    }
+}
+
+@MainActor final class ChatModelOrderTests: XCTestCase {
+
+    private let template = "{%- if messages[0].role == 'system' -%}"
+        + "<|im_start|>system\n{{ messages[0].content }}<|im_end|>\n"
+        + "{%- endif -%}"
+        + "{%- for m in messages -%}"
+        + "{%- if m.role != 'system' -%}"
+        + "<|im_start|>{{ m.role }}\n{{ m.content }}<|im_end|>\n"
+        + "{%- endif -%}{%- endfor -%}"
+        + "{%- if add_generation_prompt -%}<|im_start|>assistant\n"
+        + "{%- endif -%}"
+
+    private func talking(_ backend: any AgentBackend = TalkBackend())
+        -> ChatModel {
+        let model = ChatModel()
+        model.session.modelName = "ui-order-test"
+        model.session.installBackend(backend, template: template,
+                                     vocabSize: 256, presets: .greedy)
+        model.session.makeSession(model.sessionConfig()) { _ in }
+        model.session.primeSession()
+        return model
+    }
+
+    private func settle(_ model: ChatModel) async {
+        let deadline = Date().addingTimeInterval(10)
+        while (model.busy || model.pendingSend != nil) && Date() < deadline {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        await model.session.awaitPrimed()
+        await model.session.awaitMeta()
+        XCTAssertFalse(model.busy, "the model is stuck busy")
+    }
+
+    private func say(_ model: ChatModel, _ text: String) {
+        model.input = text
+        model.caret = text.utf16.count
+        model.send()
+    }
+
+    func testAStopBeforeTheTurnStartsCancelsTheTurn() async {
+        let model = talking()
+        await settle(model)
+        say(model, "hi")
+        XCTAssertTrue(model.showsStop)
+        model.stop()
+        await settle(model)
+        XCTAssertTrue(model.messages.isEmpty,
+                      "the stopped ask ran as a turn: \(model.messages.count)")
+    }
+
+    func testAStopOutsideATurnDoesNotOutliveIt() async {
+        let model = talking()
+        await settle(model)
+        model.newChat()
+        model.stop()
+        await settle(model)
+        say(model, "hi")
+        XCTAssertTrue(model.showsStop, "the next turn shows no Stop")
+        XCTAssertFalse(model.canSend, "Send is live beside a turn")
+        await settle(model)
+        XCTAssertEqual(model.messages.count, 2)
+    }
+
+    func testAReadOnlyConversationTakesNoTurn() async {
+        let model = talking()
+        await settle(model)
+        model.messages = [Message(fromUser: true, text: "kept"),
+                          Message(fromUser: false, text: "answer")]
+        model.readOnly = true
+        say(model, "hi")
+        await settle(model)
+        XCTAssertEqual(model.messages.count, 2,
+                       "a turn ran in a read-only conversation")
+    }
+
+    func testANewChatTakesNothingFromTheTurnItCut() async {
+        var faults: [String] = []
+        for run in 0 ..< 4 {
+            let model = talking()
+            await settle(model)
+            UserDefaults.standard.removeObject(forKey: "tg.ui-order-test")
+            say(model, "hi")
+            let deadline = Date().addingTimeInterval(5)
+            while Session.storedTG("ui-order-test") == 0
+                    && Date() < deadline {
+                await Task.yield()
+            }
+            model.newChat()
+            let settled = model.settledTurns
+            await settle(model)
+            if !model.messages.isEmpty || !model.statsLabel.isEmpty
+                || model.settledTurns != settled {
+                faults.append("run \(run): \(model.messages.count) "
+                    + "message(s), stats \(model.statsLabel.debugDescription)"
+                    + ", \(model.settledTurns - settled) turn(s) settled")
+            }
+        }
+        XCTAssertEqual(faults, [])
+    }
+
+    func testAnOpenGivesWayToANewChatTappedDuringItsRead() async {
+        let model = talking()
+        await settle(model)
+        let id = UUID()
+        let said = String(repeating: "an exchange long enough to keep ",
+                          count: 8)
+        let store = ConversationStore.shared
+        await store.commit(
+            id: id, title: "ui-order-test", fallbackTitle: "ui-order-test",
+            messages: [Message(fromUser: true, text: said),
+                       Message(fromUser: false, text: said)],
+            trace: [], extracted: nil).value
+        var landed: [Int] = []
+        for gap in 0 ..< 16 {
+            model.openConversation(id)
+            for _ in 0 ..< gap { await Task.yield() }
+            model.newChat()
+            let deadline = Date().addingTimeInterval(0.3)
+            while model.currentConversationId != id && Date() < deadline {
+                try? await Task.sleep(for: .milliseconds(10))
+            }
+            await settle(model)
+            if model.currentConversationId == id { landed.append(gap) }
+            model.newChat()
+            await settle(model)
+        }
+        await store.trash(id)
+        await store.deleteForever(id)
+        XCTAssertEqual(landed, [], "the open landed over the new chat")
+    }
+
+    private static let said = String(
+        repeating: "an exchange long enough to keep ", count: 8)
+
+    private static func parkDir(_ id: UUID) -> URL {
+        Session.parked.appendingPathComponent(
+            id.uuidString + ".ui-order-test.local", isDirectory: true)
+    }
+
+    private func forget(_ id: UUID, _ model: ChatModel) async {
+        model.session.dropParked(id)
+        try? FileManager.default.removeItem(at: Session.parked
+            .appendingPathComponent("live.ui-order-test.local"))
+        await ConversationStore.shared.trash(id)
+        await ConversationStore.shared.deleteForever(id)
+    }
+
+    func testAParkThatDoesNotResumeFallsBackToTheReplay() async throws {
+        let model = talking()
+        await settle(model)
+        let id = UUID()
+        await ConversationStore.shared.commit(
+            id: id, title: "ui-order-test", fallbackTitle: "ui-order-test",
+            messages: [Message(fromUser: true, text: ChatModelOrderTests.said),
+                       Message(fromUser: false, text: "kept")],
+            trace: [], extracted: nil).value
+        try FileManager.default.createDirectory(
+            at: ChatModelOrderTests.parkDir(id),
+            withIntermediateDirectories: true)
+        XCTAssertTrue(model.session.hasParked(id))
+        model.openConversation(id)
+        let deadline = Date().addingTimeInterval(5)
+        while model.currentConversationId != id && Date() < deadline {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        await settle(model)
+        XCTAssertEqual(model.currentConversationId, id)
+        XCTAssertFalse(model.readOnly, "a park that failed left the "
+            + "conversation read only with no word: \(model.savedLabel)")
+        await forget(id, model)
+    }
+
+    func testAResumeTheUserLeftWritesNothingOnTheNewChat() async throws {
+        let defaults = UserDefaults.standard
+        let resumable = defaults.object(forKey: "flag.resumable")
+        let pp = defaults.object(forKey: "pp.ui-order-test")
+        defer {
+            defaults.set(resumable, forKey: "flag.resumable")
+            defaults.set(pp, forKey: "pp.ui-order-test")
+        }
+        Flags.store("resumable", true)
+        let backend = ParkBackend()
+        let model = talking(backend)
+        await settle(model)
+        say(model, ChatModelOrderTests.said)
+        await settle(model)
+        let id = try XCTUnwrap(model.currentConversationId)
+        defaults.set(0.001, forKey: "pp.ui-order-test")
+        model.newChat()
+        await settle(model)
+        XCTAssertTrue(model.session.hasParked(id), "the chat did not park")
+        backend.holdNextResume()
+        model.openConversation(id)
+        let deadline = Date().addingTimeInterval(5)
+        while !backend.held && Date() < deadline {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertTrue(backend.held, "the resume never started")
+        model.newChat()
+        backend.release()
+        await settle(model)
+        XCTAssertNil(model.currentConversationId)
+        XCTAssertNil(model.generatedTitle,
+                     "the left chat's title landed on the new chat")
+        XCTAssertEqual(model.statsLabel, "")
+        await forget(id, model)
     }
 
 }

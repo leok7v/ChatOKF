@@ -11,10 +11,7 @@ func monoFont(at size: CGFloat) -> PlatformFont {
 }
 
 func boldFont(of f: PlatformFont) -> PlatformFont {
-    var traits = f.fontDescriptor.symbolicTraits
-    traits.insert(.bold)
-    let d = f.fontDescriptor.withSymbolicTraits(traits)
-    return NSFont(descriptor: d, size: f.pointSize) ?? f
+    platformBoldItalicFont(of: f, bold: true, italic: false)
 }
 
 func platformResizedFont(_ f: PlatformFont, to size: CGFloat)
@@ -83,6 +80,27 @@ func platformDecodeCGImage(_ data: Data) -> CGImage? {
 func platformSetClipboardString(_ s: String) {
     NSPasteboard.general.clearContents()
     NSPasteboard.general.setString(s, forType: .string)
+}
+
+func platformSetClipboard(_ plain: String, html: String?) {
+    let board = NSPasteboard.general
+    board.clearContents()
+    if let html {
+        board.setString(html, forType: .html)
+        let options: [NSAttributedString.DocumentReadingOptionKey: Any] = [
+            .documentType: NSAttributedString.DocumentType.html,
+            .characterEncoding: String.Encoding.utf8.rawValue,
+        ]
+        if let rich = try? NSAttributedString(
+            data: Data(html.utf8), options: options,
+            documentAttributes: nil),
+           let rtf = rich.rtf(
+            from: NSRange(location: 0, length: rich.length),
+            documentAttributes: [:]) {
+            board.setData(rtf, forType: .rtf)
+        }
+    }
+    board.setString(plain, forType: .string)
 }
 
 // PDF is rendered in a forced-light appearance so an app in dark mode

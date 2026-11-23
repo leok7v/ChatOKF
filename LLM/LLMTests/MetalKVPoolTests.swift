@@ -166,4 +166,119 @@ final class MetalKVPoolTests: XCTestCase {
         XCTAssertEqual(p.pageCount, 2, "a restore past a reset remaps")
         XCTAssertEqual(Float(row(p.kPages[1], 1, 8)[0]), 1)
     }
+
+    private func context() throws -> MetalContext {
+        let path = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString + ".gguf").path
+        let w = try GGUFWriter(path: path, alignment: 32)
+        w.meta("general.architecture", .string("qwen35"))
+        w.declare("token_embd.weight", dims: [32, 4], type: .f32)
+        w.finishHeader()
+        let zeros = [Float](repeating: 0, count: 128)
+        try zeros.withUnsafeBytes { raw in
+            try w.append(raw, expecting: "token_embd.weight")
+        }
+        try w.close()
+        return try MetalContext(GGUF(path: path))
+    }
+
+    private func run(_ ctx: MetalContext, _ body: (MetalEnc) -> Void) {
+        let cb = ctx.queue.makeCommandBuffer()!
+        let e = cb.makeComputeCommandEncoder()!
+        body(MetalEnc(ctx: ctx, e: e))
+        e.endEncoding()
+        cb.commit()
+        cb.waitUntilCompleted()
+        XCTAssertNil(cb.error)
+    }
+
+    private func fill(_ n: Int, seed: UInt64) -> [Float] {
+        var s = seed &* 0x9E37_79B9_7F4A_7C15
+        return (0 ..< n).map { _ in
+            s = s &* 6364136223846793005 &+ 1442695040888963407
+            return Float(UInt32(truncatingIfNeeded: s >> 33))
+                / Float(UInt32.max) * 2 - 1
+        }
+    }
+
+    private func roped(_ ctx: MetalContext, _ raw: [Float], _ r: KVRope,
+                       at: Int) -> MTLBuffer {
+        let x = ctx.makeF32(raw)
+        run(ctx) { f in
+            f.ropeBatch(x: x, headDim: r.headDim, nHead: r.kvDim / r.headDim,
+                        nRot: r.nRot, base: r.base, basePos: at,
+                        N: raw.count / r.kvDim)
+        }
+        return x
+    }
+
+    private struct Drift {
+        var k: Float = 0
+        var v: Float = 0
+        var head: Float = 0
+    }
+
+    private func drift(_ p: MetalKVPool, keep: Int, kept: [Float],
+                       fresh: MTLBuffer, v: [Float], from: Int) -> Drift {
+        let d = p.kvDim
+        let want = fresh.f32(fresh.length / 4)
+        var out = Drift()
+        for r in 0 ..< p.len {
+            let k = row(p.kPages[r / p.P], r % p.P, d)
+            let vr = row(p.vPages[r / p.P], r % p.P, d)
+            for c in 0 ..< d {
+                let moved = r - keep + from
+                if r < keep {
+                    out.head = max(out.head,
+                                   abs(Float(k[c]) - kept[r * d + c]))
+                } else {
+                    let w = Float(Float16(want[(r - keep) * d + c]))
+                    out.k = max(out.k, abs(Float(k[c]) - w))
+                    out.v = max(out.v, abs(Float(vr[c])
+                        - Float(Float16(v[moved * d + c]))))
+                }
+            }
+        }
+        return out
+    }
+
+    func testAShiftTurnsTheMovedKeysToTheirNewPositions() throws {
+        let ctx = try context()
+        let rope = KVRope(kvDim: 1024, headDim: 256, nRot: 64,
+                          base: 10_000_000)
+        let d = rope.kvDim
+        let len = 700, keep = 37, count = 450
+        let k = fill(len * d, seed: 1)
+        let v = fill(len * d, seed: 2)
+        let p = MetalKVPool(device: ctx.device, P: 16, kvDim: d,
+                            capacity: 64)
+        try p.attachTemp()
+        p.appendBatch(len)
+        let kb = roped(ctx, k, rope, at: 0)
+        let vb = ctx.makeF32(v)
+        run(ctx) { f in
+            f.kvAppendBatch(kCurN: kb, vCurN: vb, kAddr: p.kAddr,
+                            vAddr: p.vAddr, pages: p.residentPages,
+                            kvDim: d, basePos: 0, P: p.P, N: len)
+        }
+        let kept = (0 ..< keep * d).map { i in
+            Float(Float16(kb.f32(keep * d)[i]))
+        }
+        let scratch = p.shiftScratch(rows: len - keep - count)
+        run(ctx) { f in
+            p.encodeShift(f, keep: keep, count: count, rope: rope,
+                          scratch: scratch)
+        }
+        p.truncate(to: len - count)
+        let fresh = roped(ctx, Array(k[((keep + count) * d)...]), rope,
+                          at: keep)
+        let got = drift(p, keep: keep, kept: kept, fresh: fresh, v: v,
+                        from: keep + count)
+        print("kv shift drift: k \(got.k) v \(got.v) head \(got.head)")
+        XCTAssertEqual(p.len, len - count)
+        XCTAssertEqual(got.head, 0, "a row before the cut moved")
+        XCTAssertEqual(got.v, 0, "a moved value row changed")
+        XCTAssertLessThan(got.k, 2e-3,
+                          "a moved key is not the key at its new position")
+    }
 }

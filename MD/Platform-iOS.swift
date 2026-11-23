@@ -11,13 +11,7 @@ func monoFont(at size: CGFloat) -> PlatformFont {
 }
 
 func boldFont(of f: PlatformFont) -> PlatformFont {
-    var traits = f.fontDescriptor.symbolicTraits
-    traits.insert(.traitBold)
-    var result = f
-    if let d = f.fontDescriptor.withSymbolicTraits(traits) {
-        result = UIFont(descriptor: d, size: f.pointSize)
-    }
-    return result
+    platformBoldItalicFont(of: f, bold: true, italic: false)
 }
 
 func platformResizedFont(_ f: PlatformFont, to size: CGFloat)
@@ -82,6 +76,12 @@ func platformDecodeCGImage(_ data: Data) -> CGImage? {
 
 func platformSetClipboardString(_ s: String) {
     UIPasteboard.general.string = s
+}
+
+func platformSetClipboard(_ plain: String, html: String?) {
+    var item: [String: Any] = ["public.utf8-plain-text": plain]
+    if let html { item["public.html"] = html }
+    UIPasteboard.general.items = [item]
 }
 
 func platformPerformLightAppearance(_ body: () -> Void) {

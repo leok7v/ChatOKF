@@ -17,6 +17,10 @@ public struct Modalities: Sendable {
     public var any: Bool { images || audio || video }
 }
 
+public enum SoftTokens {
+    public static let widest = 1120
+}
+
 public struct Attached: Sendable {
     public var parts: [ContentPart]
     public var spans: [SoftSpan]

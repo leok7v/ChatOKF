@@ -42,6 +42,22 @@ enum TableMetrics {
         return result
     }
 
+    static let trailingAir: CGFloat = 1.04
+
+    static func trailingShares(naturals: [CGFloat], width: CGFloat,
+                               budget: CGFloat) -> [CGFloat]? {
+        var out: [CGFloat]? = nil
+        if width > 0, naturals.count > 1 {
+            let lead = naturals.dropLast().map { n in
+                n * trailingAir * 100 / width
+            }
+            let used = lead.reduce(0, +)
+            let last = (naturals.last ?? 0) * trailingAir * 100 / width
+            if used + last <= budget { out = Array(lead) + [budget - used] }
+        }
+        return out
+    }
+
     static func columnLayout(headers: [String], rows: [[String]],
                              natural: [CGFloat], minimums: [CGFloat],
                              available: CGFloat)
@@ -184,6 +200,43 @@ enum TableMetrics {
         }
         for row in r { lines.append(monoRow(row, n: n, widths: widths)) }
         return lines.joined(separator: "\n") + "\n"
+    }
+
+    static func serializeReadable(headers: [String],
+                                  rows: [[String]]) -> String {
+        let n = columnCount(headers: headers, rows: rows)
+        let split = ([headers] + rows).map { row in
+            (0..<n).map { i in cellLines(i < row.count ? row[i] : "") }
+        }
+        var widths = [Int](repeating: 3, count: n)
+        for row in split {
+            for (i, cell) in row.enumerated() {
+                for line in cell { widths[i] = max(widths[i], line.count) }
+            }
+        }
+        var lines: [String] = []
+        for (r, row) in split.enumerated() where r > 0 || !headers.isEmpty {
+            let tall = row.map { cell in cell.count }.max() ?? 1
+            for k in 0..<tall {
+                let cells = row.map { cell in k < cell.count ? cell[k] : "" }
+                lines.append(monoRow(cells, n: n, widths: widths))
+            }
+            if r == 0 {
+                let dashes = widths.map { w in
+                    String(repeating: "-", count: w)
+                }
+                lines.append("| " + dashes.joined(separator: " | ") + " |")
+            }
+        }
+        return lines.joined(separator: "\n") + "\n"
+    }
+
+    private static func cellLines(_ cell: String) -> [String] {
+        let marked = cell.replacingOccurrences(
+            of: #"<br\s*/?>"#, with: Markdown.lineBreak,
+            options: [.regularExpression, .caseInsensitive])
+        return marked.components(separatedBy: Markdown.lineBreak)
+            .map { line in line.trimmingCharacters(in: .whitespaces) }
     }
 
     private static func delimiter(width: Int,

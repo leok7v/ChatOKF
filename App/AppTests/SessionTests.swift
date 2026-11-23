@@ -508,6 +508,33 @@ private final class TestRunner: ToolRunner, @unchecked Sendable {
                        Session.towerFamily("Qwen3.8-27B-Q4_K_S"))
     }
 
+    func testACancelledReplayStopsInsteadOfLayingOn() async throws {
+        let backend = MockBackend(scripts: [], vocab: [:])
+        let session = Session(modelName: "test", systemPrompt: "You are a bot.")
+        session.installBackend(backend, template: template, vocabSize: 256,
+                               presets: .greedy)
+        let turns = (1 ... 3).map { i in
+            PlannedTurn(prompt: "ask \(i)", answer: "answer \(i)",
+                        soft: nil, images: [])
+        }
+        backend.pauseOnExtend = true
+        let config = config
+        let job = Task { @MainActor in
+            await session.replay(turns, budget: 280, config) { _ in }
+        }
+        while !backend.isPaused { await Task.yield() }
+        job.cancel()
+        backend.release()
+        let ok = await job.value
+        XCTAssertFalse(ok, "a cancelled replay laid every turn and resumed")
+    }
+
+    func testAProcessWithNoMemoryLimitHasNoHeadroom() {
+        XCTAssertNil(Footprint.headroom(0),
+                     "0 is no limit, not 0 bytes left")
+        XCTAssertEqual(Footprint.headroom(300 << 20), 300 << 20)
+    }
+
     func testWhatWasNotKeptReadsOnly() {
         let missing = URL(fileURLWithPath: "/tmp/gone.soft")
         let gone = Session.plan([user("look", soft: missing), answer("A.")],
@@ -523,6 +550,297 @@ private final class TestRunner: ToolRunner, @unchecked Sendable {
         let empty = Session.plan([user("a"), answer("")],
                                  loaded: "gemma-4-E4B", sees: true, stamps: [:])
         if case .readOnly = empty {} else { XCTFail("nothing to lay") }
+    }
+
+}
+
+private final class LaneBackend: AgentBackend, @unchecked Sendable {
+    let eos: Int32 = -1
+    private let lock = NSLock()
+    private var inside = 0
+    private var overlaps = 0
+    private var pos = 0
+    private var marked = 0
+    private var fed: [UInt8] = []
+    private var holding = false
+    private var held: CheckedContinuation<Void, Never>?
+    private var heard: (@Sendable (String) -> Void)?
+
+    var crossed: Int { lock.withLock { overlaps } }
+
+    var isHeld: Bool { lock.withLock { held != nil } }
+
+    func holdNextExtend() { lock.withLock { holding = true } }
+
+    func onFeed(_ hook: @escaping @Sendable (String) -> Void) {
+        lock.withLock { heard = hook }
+    }
+
+    func release() {
+        let waiting = lock.withLock {
+            () -> CheckedContinuation<Void, Never>? in
+            let k = held
+            held = nil
+            return k
+        }
+        waiting?.resume()
+    }
+
+    private func hold() async {
+        let wanted = lock.withLock { () -> Bool in
+            let w = holding
+            holding = false
+            return w
+        }
+        if wanted {
+            await withCheckedContinuation {
+                (k: CheckedContinuation<Void, Never>) in
+                lock.withLock { held = k }
+            }
+        }
+    }
+
+    var fedText: String {
+        lock.withLock { String(decoding: fed, as: UTF8.self) }
+    }
+
+    func forget() { lock.withLock { fed = [] } }
+
+    private func guarded<T>(_ body: () throws -> T) async rethrows -> T {
+        lock.withLock {
+            inside += 1
+            if inside > 1 { overlaps += 1 }
+        }
+        for _ in 0 ..< 3 { await Task.yield() }
+        defer { lock.withLock { inside -= 1 } }
+        return try body()
+    }
+
+    func encode(_ text: String) -> [Int32] {
+        text.utf8.map { byte in Int32(byte) }
+    }
+
+    func tokenBytes(_ id: Int32) -> [UInt8] {
+        id >= 0 && id < 256 ? [UInt8(id)] : []
+    }
+
+    func text(_ ids: [Int32]) -> String {
+        String(decoding: ids.flatMap { id in tokenBytes(id) }, as: UTF8.self)
+    }
+
+    var position: Int {
+        get async { await guarded { lock.withLock { pos } } }
+    }
+
+    func reset() async {
+        await guarded { lock.withLock { pos = 0 } }
+    }
+
+    func useSampler(_ s: Sampler?) async {}
+
+    func extend(_ ids: [Int32]) async throws -> Int32 {
+        await hold()
+        await guarded {
+            lock.withLock {
+                pos += ids.count
+                fed += ids.map { id in UInt8(truncatingIfNeeded: id) }
+            }
+        }
+        let hook = lock.withLock { heard }
+        hook?(text(ids))
+        return eos
+    }
+
+    func decode(_ token: Int32) async throws -> Int32 {
+        await guarded { lock.withLock { pos += 1 } }
+        return eos
+    }
+
+    func mark() async throws {
+        await guarded { lock.withLock { marked = pos } }
+    }
+
+    func rewind() async throws {
+        await guarded { lock.withLock { pos = marked } }
+    }
+
+    struct State: BackendState { let pos: Int; let mark: Int }
+
+    func saveState() async throws -> any BackendState {
+        await guarded { lock.withLock { State(pos: pos, mark: marked) } }
+    }
+
+    func loadState(_ state: any BackendState) async throws {
+        await guarded {
+            if let s = state as? State {
+                lock.withLock {
+                    pos = s.pos
+                    marked = s.mark
+                }
+            }
+        }
+    }
+
+    func attach(_ dir: URL) async throws {
+        try await guarded { throw EngineError.missingModel("lane") }
+    }
+
+    func detach() async { await guarded {} }
+
+    func park(to dir: URL, meta: Data) async throws { await guarded {} }
+
+    func resume(from dir: URL) async throws -> Data {
+        try await guarded { throw EngineError.missingModel("lane") }
+    }
+
+    func prime(from cooked: URL, into live: URL) async throws -> Data {
+        try await guarded { throw EngineError.missingModel("lane") }
+    }
+
+    func precook(to cooked: URL, meta: Data) async throws { await guarded {} }
+}
+
+private struct SplitMix {
+    private var state: UInt64
+
+    init(_ seed: UInt64) { state = seed }
+
+    mutating func below(_ n: Int) -> Int {
+        state &+= 0x9E37_79B9_7F4A_7C15
+        var z = state
+        z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
+        z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
+        return Int((z ^ (z >> 31)) % UInt64(n))
+    }
+}
+
+@MainActor final class SessionLaneTests: XCTestCase {
+
+    private let template = "{%- if messages[0].role == 'system' -%}"
+        + "<|im_start|>system\n{{ messages[0].content }}<|im_end|>\n"
+        + "{%- endif -%}"
+        + "{%- for m in messages -%}"
+        + "{%- if m.role != 'system' -%}"
+        + "<|im_start|>{{ m.role }}\n{{ m.content }}<|im_end|>\n"
+        + "{%- endif -%}{%- endfor -%}"
+        + "{%- if add_generation_prompt -%}<|im_start|>assistant\n"
+        + "{%- if enable_thinking -%}[T]{%- endif -%}"
+        + "{%- endif -%}"
+
+    private func config(_ thinking: Bool) -> Session.SessionConfig {
+        Session.SessionConfig(thinking: thinking, reasoningEffortRaw: "medium",
+                              reasoningEffortSlot: 1, thinkTokenCap: 200)
+    }
+
+    private func turn(_ session: Session) -> Task<Void, Never> {
+        let sent = session.sendText(prompt: "hi", display: "hi", docs: [],
+                                    thinkTokenCap: 200, thinkingActive: false)
+        let events = sent?.events ?? AsyncStream { k in k.finish() }
+        return Task { @MainActor in
+            for await _ in events {}
+        }
+    }
+
+    private func fire(_ op: Int, _ session: Session, _ rng: inout SplitMix,
+                      _ want: inout Bool, _ waits: inout [Task<Void, Never>]) {
+        switch op {
+        case 0:
+            let asked = rng.below(2) == 1
+            let leaving = rng.below(2) == 1 ? UUID() : nil
+            waits.append(session.newChat(parking: leaving, config(asked)) {
+                _ in
+            })
+            want = asked && session.modelSupportsThinking
+        case 1:
+            want = rng.below(2) == 1
+            session.pushThinking(want, resetIfFresh: rng.below(2) == 1)
+        case 2:
+            session.pushReasoningEffort(rng.below(2) == 1 ? "high" : "low")
+        case 3:
+            session.pushTools()
+        case 4:
+            session.primeSession(resetFirst: true)
+        case 5:
+            waits.append(turn(session))
+        case 6:
+            session.runMetaTurns(titled: true, wantsFollowup: true,
+                                 extraction: nil, onTitle: { _ in },
+                                 onFollowup: { _ in }, onRemembered: { _ in })
+        case 7:
+            session.stop()
+        case 8:
+            let on = rng.below(2) == 1
+            waits.append(Task { await session.pushSpeculation(on) })
+        default:
+            let id = UUID()
+            waits.append(Task { await session.parkCurrent(id) })
+        }
+    }
+
+    private func shuffled(_ seed: UInt64) async {
+        let backend = LaneBackend()
+        let session = Session(modelName: "lane-test",
+                              systemPrompt: "You are a bot.")
+        session.installBackend(backend, template: template, vocabSize: 256,
+                               presets: .greedy)
+        session.makeSession(config(false)) { _ in }
+        session.primeSession()
+        var rng = SplitMix(seed)
+        var want = false
+        var waits: [Task<Void, Never>] = []
+        for _ in 0 ..< 48 {
+            fire(rng.below(10), session, &rng, &want, &waits)
+            for _ in 0 ..< rng.below(4) { await Task.yield() }
+        }
+        for wait in waits { await wait.value }
+        await session.awaitPrimed()
+        await session.awaitMeta()
+        backend.forget()
+        await turn(session).value
+        XCTAssertEqual(backend.crossed, 0, "seed \(seed): the engine was "
+            + "driven by two operations at once")
+        XCTAssertEqual(backend.fedText.contains("[T]"), want,
+                       "seed \(seed): the last thinking setting lost")
+    }
+
+    func testEveryEngineChangeRunsInOneLaneAndTheLastSettingWins() async {
+        for seed in UInt64(1) ... 16 {
+            await shuffled(seed)
+        }
+    }
+
+    func testATurnStoppedBeforeItEntersTheEngineNeverEntersIt() async throws {
+        let backend = LaneBackend()
+        let session = Session(modelName: "lane-test",
+                              systemPrompt: "You are a bot.")
+        session.installBackend(backend, template: template, vocabSize: 256,
+                               presets: .greedy)
+        session.makeSession(config(false)) { _ in }
+        let chat = try XCTUnwrap(session.session)
+        let late = expectation(description: "the stopped turn fed the engine")
+        late.isInverted = true
+        backend.onFeed { text in
+            if text.contains("user\nhi") { late.fulfill() }
+        }
+        backend.holdNextExtend()
+        await chat.primeOrCook(at: FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString))
+        while !backend.isHeld { await Task.yield() }
+        let sent = try XCTUnwrap(session.sendText(
+            prompt: "hi", display: "hi", docs: [], thinkTokenCap: 200,
+            thinkingActive: false))
+        var collected: [TurnEvent] = []
+        let consumer = Task { @MainActor in
+            for await event in sent.events { collected.append(event) }
+        }
+        session.stop()
+        backend.release()
+        await consumer.value
+        await fulfillment(of: [late], timeout: 1)
+        var outcome: ChatSession.TurnOutcome? = nil
+        if case .finished(let found, _) = collected.last { outcome = found }
+        XCTAssertEqual(outcome, .stopped)
+        XCTAssertEqual(backend.crossed, 0)
     }
 
 }

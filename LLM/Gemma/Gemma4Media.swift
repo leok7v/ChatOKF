@@ -121,6 +121,7 @@ public final class Gemma4Media: MediaEncoder, @unchecked Sendable {
             i += 1
         }
         if i < frames.count {
+            try Task.checkCancellation()
             throw MediaError("Frame \(i) of that video could not be read.")
         }
         return try strip.span(bracket: .template)
@@ -186,6 +187,7 @@ public final class Gemma4Media: MediaEncoder, @unchecked Sendable {
                 strip.add(stamp: stamp(at), rows: got.proj, count: got.count)
                 read += 1
             } else {
+                try Task.checkCancellation()
                 throw MediaError("Frame \(read) of that video could not be read.")
             }
         }

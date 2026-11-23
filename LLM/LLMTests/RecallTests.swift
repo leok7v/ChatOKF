@@ -106,6 +106,62 @@ import XCTest
         try? FileManager.default.removeItem(at: store.root)
     }
 
+    func testAKeptPageLosesThePagingFooterAndServesAWindow() async throws {
+        let url = "https://example.com/river"
+        let args = [ToolArg(name: "url", value: url)]
+        let id = try XCTUnwrap(MemoryTools.pageId("fetch_url", args))
+        let page = String(repeating: "The river runs north. ", count: 900)
+        let stale = page + "\n...[truncated: bytes 0-500 of 722 shown; "
+            + "re-call with offset=500 for more]"
+        XCTAssertEqual(MemoryTools.unpaged(stale), page)
+        XCTAssertEqual(MemoryTools.unpaged(page), page)
+        let root = try plant([])
+        let file = root.appendingPathComponent(id + ".md")
+        try FileManager.default.createDirectory(
+            at: file.deletingLastPathComponent(),
+            withIntermediateDirectories: true)
+        try ("---\ntype: Page\ntitle: River\ndescription: A river.\n"
+            + "tags: [pages]\nfetched: " + Store.iso.string(from: Date())
+            + "\n---\n\n" + stale + "\n")
+            .write(to: file, atomically: true, encoding: .utf8)
+        let weights = try EncoderTests.cloned(EncoderTests.a25mRepo,
+                                              EncoderTests.a25mFile)
+        let memories = Memories(root: root)
+        memories.open(encoder: weights)
+        await memories.awaitOpen()
+        let kept = try XCTUnwrap(memories.concepts[id])
+        XCTAssertFalse(kept.body.contains("truncated"), kept.body)
+        let got = await memories.page("fetch_url", args)
+        let served = try XCTUnwrap(got)
+        XCTAssertTrue(served.contains("re-call with offset=")
+                      || served.contains("Re-call with offset="), served)
+        XCTAssertLessThan(served.utf8.count, page.utf8.count)
+        try? FileManager.default.removeItem(at: root)
+    }
+
+    func testAWindowOverOneLongParagraphKeepsTheCap() async throws {
+        let long = String(repeating: "To keep the basil alive over the "
+            + "winter, cut the flower spikes and give it a lamp. ", count: 30)
+        let note = Planted(
+            id: "garden/basil", title: "Basil in the window box",
+            description: "The basil on the kitchen sill, and what it needs "
+                + "through the year.",
+            body: "The box is a terracotta trough on the sill.\n\n" + long)
+        let store = try await opened([note] + RecallTests.neighbours)
+        let recall = await store.memories.recall(
+            "how do I keep basil alive over the winter", also: [],
+            pp: 100, excluding: [])
+        let block = recall?.block ?? ""
+        XCTAssertEqual(recall?.ids.first, "garden/basil")
+        let shown = block.components(separatedBy: "\n")
+            .filter { line in line.hasPrefix("  ") }
+            .map { line in line.utf8.count }
+        XCTAssertFalse(shown.isEmpty, block)
+        XCTAssertLessThanOrEqual(shown.max() ?? 0, Memories.bodyCap + 16,
+                                 "a window ran past the cap: \(shown)")
+        try? FileManager.default.removeItem(at: store.root)
+    }
+
     func testLineWindowsTheBodyOnUTF8Boundaries() {
         let body = String(repeating: "\u{65E5}", count: 10)
         let concept = Concept(

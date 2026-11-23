@@ -95,6 +95,24 @@ extension Session {
         }
     }
 
+    nonisolated static func sameDir(_ a: URL, _ b: URL?) -> Bool {
+        a.resolvingSymlinksInPath().path == b?.resolvingSymlinksInPath().path
+    }
+
+    nonisolated static func strangers(_ found: [URL],
+                                      keeping kept: [URL?]) -> [URL] {
+        found.filter { url in
+            !kept.contains { other in Session.sameDir(url, other) }
+        }
+    }
+
+    nonisolated static func parkDrops(_ found: [URL], parking url: URL,
+                                      live: URL?, opening: URL?,
+                                      resumable: Bool) -> [URL] {
+        resumable ? []
+            : Session.strangers(found, keeping: [url, live, opening])
+    }
+
     public func hasParked(_ id: UUID) -> Bool {
         FileManager.default.fileExists(
             atPath: Session.parkURL(id, modelName).path)
@@ -150,7 +168,8 @@ extension Session {
         return why
     }
 
-    func park(_ chat: ChatSession, as id: UUID, model name: String) async {
+    func park(_ chat: ChatSession, as id: UUID, model name: String,
+              opening: UUID? = nil) async {
         let tokens = await chat.committedCount
         let live = await chat.liveDir
         let bytes = await chat.allocatedLive()
@@ -171,8 +190,10 @@ extension Session {
             await chat.detach()
             if let live { try? FileManager.default.removeItem(at: live) }
         } else {
-            for other in Session.parkedURLs()
-            where !resumable && other != url && other != live {
+            for other in Session.parkDrops(
+                Session.parkedURLs(), parking: url, live: live,
+                opening: opening.map { o in Session.parkURL(o, name) },
+                resumable: resumable) {
                 try? FileManager.default.removeItem(at: other)
                 Diag.shared.report(.load, "[park] dropped "
                                    + other.lastPathComponent
@@ -194,22 +215,40 @@ extension Session {
         }
     }
 
-    public func parkCurrent(_ id: UUID) async {
-        if let session {
-            await drainMeta()
-            await park(session, as: id, model: modelName)
-            refreshStorage()
+    public func parkCurrent(_ id: UUID, opening: UUID? = nil) async {
+        await parked(id, opening: opening).value
+    }
+
+    @discardableResult
+    func parked(_ id: UUID, opening: UUID? = nil) -> Task<Void, Never> {
+        cutMeta()
+        return inLane {
+            if let session = self.session {
+                await session.quiesce()
+                await self.park(session, as: id, model: self.modelName,
+                                opening: opening)
+                self.refreshStorage()
+            }
         }
     }
 
     public func resumeParked(_ id: UUID, _ config: SessionConfig,
                              onEvent: @escaping @MainActor (TraceEvent) -> Void
     ) async -> Bool {
+        cutMeta()
+        return await inLane {
+            await self.resumed(id, config, onEvent: onEvent)
+        }.value
+    }
+
+    private func resumed(_ id: UUID, _ config: SessionConfig,
+                         onEvent: @escaping @MainActor (TraceEvent) -> Void
+    ) async -> Bool {
         var out = false
         let url = Session.parkURL(id, modelName)
         if ggufBackend != nil,
            FileManager.default.fileExists(atPath: url.path) {
-            await drainMeta()
+            await session?.quiesce()
             await session?.endPriming()
             Footprint.report(.load, "resume outgoing released")
             forgetRecalled()

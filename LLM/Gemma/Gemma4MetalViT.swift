@@ -36,7 +36,8 @@ public final class Gemma4MetalViT {
         ctx.window(UInt64(t.base - map))
     }
 
-    public func forward(pixels: [Float], pos: [(Int, Int)]) throws
+    public func forward(pixels: [Float], pos: [(Int, Int)],
+                        stop: () -> Bool = { Task.isCancelled }) throws
         -> (tower: [Float], proj: [Float], count: Int) {
         let n = pos.count
         let e = cfg.embd
@@ -64,22 +65,17 @@ public final class Gemma4MetalViT {
         let bMask = ctx.makeF32(padded.map { p in p ? Float(1) : Float(0) })
         let bClamp = ctx.makeF32(n * max(e, cfg.ff))
 
-        let seed = Array(bX.f32(n * e))
-        let ran = GPUGate.shared.run("gemma vit") {
-            seed.withUnsafeBytes { raw in
-                _ = memcpy(bX.contents(), raw.baseAddress!, raw.count)
-            }
+        try GPUGate.shared.layers(
+            "gemma vit", what: "the vision tower", count: cfg.layers,
+            state: bX, floats: n * e, stop: stop) { il in
             let cb = ctx.queue.makeCommandBuffer()!
             let enc = cb.makeComputeCommandEncoder()!
             let f = MetalEnc(ctx: ctx, e: enc)
-            for il in 0..<cfg.layers {
-                encodeBlock(f, il, n: n, bX, bNorm, bTmp, bQ, bK, bV, bCtx,
-                            bFF, bUp, bCos, bSin, bMask, bClamp)
-            }
+            encodeBlock(f, il, n: n, bX, bNorm, bTmp, bQ, bK, bV, bCtx,
+                        bFF, bUp, bCos, bSin, bMask, bClamp)
             enc.endEncoding()
             return cb
         }
-        if !ran { throw GPUFault(description: "the vision tower did not run") }
         return cpu.poolAndProject(Array(bX.f32(n * e)), pos: pos,
                                   padded: padded)
     }

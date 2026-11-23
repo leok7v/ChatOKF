@@ -70,3 +70,5 @@ func setClipboard(_ plain: String, html: String? = nil) {
 }
 
 var isOS: Bool { return true }
+
+@MainActor func applyAppearance(_ scheme: ColorScheme?) {}

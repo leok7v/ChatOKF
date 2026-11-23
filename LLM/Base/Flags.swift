@@ -82,6 +82,10 @@ public enum Flags {
             "megabytes of jetsam headroom under which a document read stops "
             + "and answers from what was read (iOS)", scope: .engine,
             defaultValue: "300"),
+        Knob(name: "chat-floor-mb", takesValue: true, help:
+            "megabytes of jetsam headroom under which a chat turn ends and "
+            + "keeps what it answered (iOS); empty is 50 a gigabyte of RAM, "
+            + "250 at most", scope: .engine, defaultValue: ""),
         Knob(name: "search-parallel", takesValue: false, help:
             "use the Parallel web search service", scope: .engine,
             defaultValue: "1"),
@@ -183,6 +187,18 @@ public enum Flags {
             "the most content tokens an answer may run to, as the CLI's "
             + "-n; a scripted run with thinking off ends before the "
             + "universe does", scope: .diagnostic, defaultValue: ""),
+        Knob(name: "context", takesValue: true, help:
+            "the tokens a chat may hold; past three quarters of it the "
+            + "oldest exchanges drop and the rest is laid again; empty is "
+            + "the model's trained context", scope: .diagnostic,
+            defaultValue: ""),
+        Knob(name: "shift", takesValue: true, help:
+            "exact | soft | off: how a full context drops its oldest "
+            + "exchanges; soft keeps the recurrent state of a hybrid model "
+            + "and moves the attention rows down in place, exact lays the "
+            + "rest again, off drops nothing and ends the turn before its "
+            + "prompt; empty is the model's own", scope: .experiment,
+            defaultValue: ""),
         Knob(name: "judged-recall", takesValue: false, help:
             "when recall finds nothing, read yes or no off the prefill: is "
             + "the message about the memory itself, and does a near note "

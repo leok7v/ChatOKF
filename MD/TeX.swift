@@ -58,6 +58,44 @@ enum TeX {
         (try? Parser.parse(tex)) != nil
     }
 
+    static func readsAsProse(_ raw: String) -> Bool {
+        var depth = 0
+        var run = 0
+        var found = false
+        var inCommand = false
+        for ch in raw {
+            let namesCommand = inCommand && ch.isLetter
+            if ch == "\\" {
+                inCommand = true
+                run = 0
+            } else if !namesCommand {
+                inCommand = false
+                if ch == "{" {
+                    depth += 1
+                    run = 0
+                } else if ch == "}" {
+                    depth = max(depth - 1, 0)
+                    run = 0
+                } else if ch.isLetter, ch.isASCII, depth == 0 {
+                    run += 1
+                    if run >= 3 { found = true }
+                } else {
+                    run = 0
+                }
+            }
+        }
+        return found
+    }
+
+    static func bracketsMaths(_ body: String, display: Bool) -> Bool {
+        let bare = body.contains { ch in "\\^_=<>|".contains(ch) }
+        let algebra = body.contains { ch in "+-*/".contains(ch) } &&
+                      body.contains { ch in ch.isLetter }
+        let signed = !display || bare || algebra
+        return signed && !body.trimmingCharacters(in: .whitespaces).isEmpty &&
+               !readsAsProse(body) && parses(body)
+    }
+
     enum Segment {
         case text(String)
         case math(String, display: Bool)
@@ -77,7 +115,9 @@ enum TeX {
                     buf.append("$")
                     i = s.index(after: next)
                     consumed = true
-                } else if s[next] == "(" || s[next] == "[" {
+                } else if s[next] == "(" || s[next] == "[",
+                          buf.reversed().prefix(while: { ch in ch == "\\" })
+                              .count % 2 == 0 {
                     let taken = takeBracketMath(s, from: i, open: s[next],
                                                 into: &out, buf: &buf)
                     if let end = taken { i = end; consumed = true }
@@ -163,10 +203,12 @@ enum TeX {
         if searchStart <= s.endIndex,
            let endRange = s.range(of: closer,
                                   range: searchStart..<s.endIndex) {
-            if !buf.isEmpty { out.append(.text(buf)); buf.removeAll() }
             let body = String(s[searchStart..<endRange.lowerBound])
-            out.append(.math(body, display: display))
-            result = endRange.upperBound
+            if bracketsMaths(body, display: display) {
+                if !buf.isEmpty { out.append(.text(buf)); buf.removeAll() }
+                out.append(.math(body, display: display))
+                result = endRange.upperBound
+            }
         }
         return result
     }

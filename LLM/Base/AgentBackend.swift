@@ -95,6 +95,7 @@ public protocol AgentBackend: Sendable {
     func extend(_ ids: [Int32]) async throws -> Int32
     func mark() async throws
     func rewind() async throws
+    func shift(keep: Int, count: Int) async -> Bool
     var position: Int { get async }
     func decode(_ token: Int32) async throws -> Int32
     func requestStop()
@@ -137,6 +138,7 @@ public extension AgentBackend {
     func drainGPUSeconds() -> Double { 0 }
     var gpuSeconds: Double { 0 }
     func useSpeculation(_ on: Bool) {}
+    func shift(keep: Int, count: Int) async -> Bool { false }
     func supportsVision() async -> Bool { false }
     func supportsSoftTokens() async -> Bool { false }
     var bosToken: String { "" }

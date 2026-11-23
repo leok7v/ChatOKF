@@ -17,6 +17,8 @@ public protocol TextEngine: AnyObject {
     func bookmark() -> Bookmark
     func restore(_ b: Bookmark)
     func retain(from position: Int)
+    func shift(keep: Int, count: Int) -> Bool
+    func shifted(_ b: Bookmark, keep: Int, count: Int) -> Bookmark?
     func attach(_ dir: URL) throws
     func flush(_ dir: URL) throws
     func export(_ dir: URL) throws
@@ -27,6 +29,8 @@ public protocol TextEngine: AnyObject {
 public extension TextEngine {
     var queued: Int { 0 }
     func retain(from position: Int) {}
+    func shift(keep: Int, count: Int) -> Bool { false }
+    func shifted(_ b: Bookmark, keep: Int, count: Int) -> Bookmark? { nil }
     func requestStop() {}
     func shouldStop() -> Bool { false }
     func drainSpecTurn() -> SpecTurn? { nil }
@@ -120,6 +124,16 @@ public class EngineBackend<E: TextEngine, T: Tokenizing>: AgentBackend,
 
     public func rewind() async throws {
         if let m = savedMark { engine.restore(m) }
+    }
+
+    public func shift(keep: Int, count: Int) async -> Bool {
+        let moved = engine.shift(keep: keep, count: count)
+        if moved {
+            savedMark = savedMark.flatMap { m in
+                engine.shifted(m, keep: keep, count: count)
+            }
+        }
+        return moved
     }
 
     public struct State: BackendState { let bookmark: E.Bookmark }

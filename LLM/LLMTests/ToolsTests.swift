@@ -539,6 +539,120 @@ final class ToolsTests: XCTestCase {
         XCTAssertFalse(t2.contains("Ad slot"), t2)
     }
 
+    func testHtmlDropsMarkedElementsAndKeepsTheirNeighbours() {
+        let page = "<p>Lead.</p><div class=\"navbox\" role=\"navigation\">"
+            + "<div><div>v</div><div>t</div></div><div>e</div></div>"
+            + "<p>Kept after the box.</p><meta data-mw='{\"a\":\"<b>\"}'>"
+            + "<h2>History<span class=\"mw-editsection\">[edit]</span></h2>"
+            + "<p>Body <button>Save</button>text.</p>"
+            + "<img class=\"noprint\" src=\"x.png\"><p hidden>Gone</p>"
+            + "<div role=\"search\"/><p>Tail stays.</p>"
+        let text = Tools.htmlToText(page)
+        let lines = text.components(separatedBy: "\n")
+        XCTAssertTrue(text.contains("Lead."), text)
+        XCTAssertTrue(text.contains("Kept after the box."), text)
+        XCTAssertTrue(lines.contains("History"), text)
+        XCTAssertTrue(text.contains("Body text."), text)
+        XCTAssertTrue(text.contains("Tail stays."), text)
+        for gone in ["v", "t", "e"] {
+            XCTAssertFalse(lines.contains(gone), text)
+        }
+        for gone in ["[edit]", "Save", "Gone", "\"a\"", "<b>"] {
+            XCTAssertFalse(text.contains(gone), text)
+        }
+    }
+
+    func testAnUnclosedMarkedElementDropsOnlyItsTag() {
+        let page = "<p>Lead.</p><div class=\"noprint\">"
+            + "<p>The article goes on.</p><p>And ends here.</p>"
+        let text = Tools.htmlToText(page)
+        XCTAssertTrue(text.contains("Lead."), text)
+        XCTAssertTrue(text.contains("The article goes on."), text)
+        XCTAssertTrue(text.contains("And ends here."), text)
+        let named = Tools.htmlToText("<p>Kept.</p><nav><p>Menu</p>")
+        XCTAssertFalse(named.contains("Menu"), named)
+    }
+
+    private struct PageFixture {
+        let file: String
+        let kept: [String]
+        let dropped: [String]
+    }
+
+    private static let pageFixtures = [
+        PageFixture(
+            file: "wikipedia-bartin-river",
+            kept: ["Its source is in the Ilgaz Mountains",
+                   "between Bart\u{131}n and the Black Sea coast",
+                   "Dictionary of Greek and Roman Geography"],
+            dropped: ["Rivers of Turkey by drainage basin", "[edit]",
+                      "Retrieved from", "Hidden categories", "parsoid",
+                      "is a stub", "From Wikipedia, the free encyclopedia",
+                      "Pleiades"]),
+        PageFixture(
+            file: "wikipedia-bartin-town",
+            kept: ["Bart\u{131}n was conquered by the Ottoman sultan",
+                   "The city of Bart\u{131}n consists of 22 quarters",
+                   "Mean daily sunshine hours", "Encyclop\u{e6}dia"],
+            dropped: ["Hasankad\u{131}", "Villages", "[edit]",
+                      "population_total", "{{cite web", "Retrieved from",
+                      "Categories:", "parsoid"]),
+        PageFixture(
+            file: "bbc-news-benghazi-ship",
+            kept: ["An explosion on a Russian ship docked at Benghazi",
+                   "Benghazi is more than 2,000 km (1,243 miles) away"],
+            dropped: ["ShareSave", "Add as preferred on Google"]),
+        PageFixture(
+            file: "timeout-gymkhana-review",
+            kept: ["Since opening in 2013 Gymkhana has been charming",
+                   "Time Out tip The basement area"],
+            dropped: ["Copy Link", "Discover Time Out original video",
+                      "[title]"]),
+        PageFixture(
+            file: "bonappetit-carbonara-recipe",
+            kept: ["The trick is temperature control.",
+                   "What is guanciale, and what can I substitute for it?",
+                   "Mix in pork and divide pasta among bowls."],
+            dropped: ["Save Recipe", "AccordionItemContainerButton",
+                      "LargeChevron", "Play/Pause Button", "Ask AI"]),
+    ]
+
+    private static let pagesFolder = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .appendingPathComponent("fixtures/quoted/pages")
+
+    private static func page(_ name: String) throws -> String {
+        let url = pagesFolder.appendingPathComponent(name + ".html")
+        return try String(contentsOf: url, encoding: .utf8)
+    }
+
+    func testAFetchedPageKeepsTheArticleAndDropsTheSiteAroundIt() throws {
+        try XCTSkipUnless(
+            FileManager.default.fileExists(
+                atPath: ToolsTests.pagesFolder.path),
+            "LLM/fixtures/quoted/pages is absent: the fetched pages are "
+                + "third-party HTML kept out of the public mirror")
+        for fixture in ToolsTests.pageFixtures {
+            let text = Tools.htmlToText(try ToolsTests.page(fixture.file))
+            let lines = Set(text.components(separatedBy: "\n").map { line in
+                line.trimmingCharacters(in: .whitespaces)
+            })
+            for sentence in fixture.kept {
+                XCTAssertTrue(text.contains(sentence),
+                              fixture.file + " lost: " + sentence)
+            }
+            for clutter in fixture.dropped {
+                XCTAssertFalse(text.contains(clutter),
+                               fixture.file + " kept: " + clutter)
+            }
+            for link in ["v", "t", "e", "Save", "Like 0"] {
+                XCTAssertFalse(lines.contains(link),
+                               fixture.file + " kept the line: " + link)
+            }
+        }
+    }
+
     func testDeliverTextCapAndOffset() {
         let full = Tools.deliverText("abcdefghij", -1, 0)
         XCTAssertEqual(full, "abcdefghij")

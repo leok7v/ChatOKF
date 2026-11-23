@@ -46,6 +46,7 @@ public final class Gemma4MetalEngine {
         return Flags.int("gemma-batch") ?? (gb <= 4 ? 32 : 128)
     }()
     private let capacity: Int
+    public var chunkCapacity: Int { capacity }
     public var batch: Int {
         get { batchStore }
         set {
@@ -124,7 +125,8 @@ public final class Gemma4MetalEngine {
         // A blockwise-vision checkpoint must fit its widest image in ONE chunk:
         // a block that does not fit cannot be attended correctly at all.
         let widest = cfg.blockwiseVision
-            ? (model.gguf.int("gemma4.vision.max_soft_tokens") ?? 0) : 0
+            ? max(model.gguf.int("gemma4.vision.max_soft_tokens") ?? 0,
+                  SoftTokens.widest) : 0
         specN = max(1, drafts ?? Flags.int("spec-n")
                        ?? Gemma4MetalEngine.draftWidth(model.gguf))
         let B = ctx.matrixUnits

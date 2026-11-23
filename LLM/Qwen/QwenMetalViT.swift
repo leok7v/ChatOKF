@@ -129,22 +129,25 @@ public final class QwenMetalViT {
         try forward(pixels: pixels, gridH: cfg.side, gridW: cfg.side)
     }
 
-    public func forward(pixels: [Float], gridH: Int,
-                        gridW: Int) throws -> [Float] {
+    public func forward(pixels: [Float], gridH: Int, gridW: Int,
+                        stop: () -> Bool = { Task.isCancelled })
+        throws -> [Float] {
         let t = prepare(h: gridH, w: gridW)
         return try run(QwenViT.patchRows(pixels, cfg, t.order, w: gridW),
-                       cfg.patchDim, patchW, t)
+                       cfg.patchDim, patchW, t, stop)
     }
 
     public func forward(pair a: [Float], _ b: [Float], gridH: Int,
-                        gridW: Int) throws -> [Float] {
+                        gridW: Int,
+                        stop: () -> Bool = { Task.isCancelled })
+        throws -> [Float] {
         let t = prepare(h: gridH, w: gridW)
         return try run(QwenViT.pairRows(a, b, cfg, t.order, w: gridW),
-                       2 * cfg.patchDim, patchWPair, t)
+                       2 * cfg.patchDim, patchWPair, t, stop)
     }
 
     private func run(_ rows: [Float], _ k: Int, _ weight: MTLBuffer,
-                     _ t: Tables) throws -> [Float] {
+                     _ t: Tables, _ stop: () -> Bool) throws -> [Float] {
         let n = t.order.count
         ensure(n)
         let m2 = cfg.merge * cfg.merge
@@ -152,47 +155,69 @@ public final class QwenMetalViT {
         rows.withUnsafeBytes { src in
             _ = memcpy(bRows.contents(), src.baseAddress!, src.count)
         }
-        let ran = GPUGate.shared.run("qwen vit") { encode(k, weight, t) }
-        if !ran { throw GPUFault(description: "the vision tower did not run") }
+        try pass { f in embed(f, k, weight, t) }
+        try GPUGate.shared.layers(
+            "qwen vit", what: "the vision tower", count: blocks.count,
+            state: bX, floats: n * cfg.embd, stop: stop) { il in
+            encoded { f in block(f, blocks[il], t) }
+        }
+        try pass { f in merge(f, n) }
         return Array(bOut.f32(mTok * cfg.projDim))
     }
 
-    private func encode(_ k: Int, _ weight: MTLBuffer,
-                        _ t: Tables) -> MTLCommandBuffer {
+    private func encoded(_ body: (MetalEnc) -> Void) -> MTLCommandBuffer {
+        let cb = ctx.queue.makeCommandBuffer()!
+        let enc = cb.makeComputeCommandEncoder()!
+        body(MetalEnc(ctx: ctx, e: enc))
+        enc.endEncoding()
+        return cb
+    }
+
+    private func pass(_ body: (MetalEnc) -> Void) throws {
+        if !GPUGate.shared.run("qwen vit", { encoded(body) }) {
+            throw GPUFault(description: "the vision tower did not run")
+        }
+    }
+
+    private func embed(_ f: MetalEnc, _ k: Int, _ weight: MTLBuffer,
+                       _ t: Tables) {
+        let n = t.order.count
+        f.f16Gemm(weight, X: bRows, out: bX, K: k, M: cfg.embd, N: n)
+        f.add(x: bX, y: t.posBias, n: n * cfg.embd)
+    }
+
+    private func block(_ f: MetalEnc, _ l: Layer, _ t: Tables) {
         let n = t.order.count
         let embd = cfg.embd
         let hd = cfg.headDim
         let scale = 1 / Float(hd).squareRoot()
-        let cb = ctx.queue.makeCommandBuffer()!
-        let enc = cb.makeComputeCommandEncoder()!
-        let f = MetalEnc(ctx: ctx, e: enc)
-        f.f16Gemm(weight, X: bRows, out: bX, K: k, M: embd, N: n)
-        f.add(x: bX, y: t.posBias, n: n * embd)
-        for l in blocks {
-            f.layerNorm(x: bX, w: l.ln1w, b: l.ln1b, y: bNorm, n: embd,
-                        rows: n, eps: cfg.eps)
-            f.f16Gemm(l.qkvW, X: bNorm, out: bQkv, K: embd, M: 3 * embd, N: n)
-            f.addBiasRows(x: bQkv, bias: l.qkvB, m: 3 * embd, rows: n)
-            f.visionRope(x: bQkv, cos: t.ropeCos, sin: t.ropeSin,
-                         rowStride: 3 * embd, off: 0, headDim: hd,
-                         nHead: cfg.heads, N: n)
-            f.visionRope(x: bQkv, cos: t.ropeCos, sin: t.ropeSin,
-                         rowStride: 3 * embd, off: embd, headDim: hd,
-                         nHead: cfg.heads, N: n)
-            f.visionAttn(qkv: bQkv, out: bCtx, n: n, embd: embd, hd: hd,
-                         nHead: cfg.heads, scale: scale)
-            f.f16Gemm(l.outW, X: bCtx, out: bTmp, K: embd, M: embd, N: n)
-            f.addBiasRows(x: bTmp, bias: l.outB, m: embd, rows: n)
-            f.add(x: bX, y: bTmp, n: n * embd)
-            f.layerNorm(x: bX, w: l.ln2w, b: l.ln2b, y: bNorm, n: embd,
-                        rows: n, eps: cfg.eps)
-            f.f16Gemm(l.upW, X: bNorm, out: bFF, K: embd, M: cfg.ff, N: n)
-            f.addBiasRows(x: bFF, bias: l.upB, m: cfg.ff, rows: n)
-            f.gelu(x: bFF, n: n * cfg.ff)
-            f.f16Gemm(l.downW, X: bFF, out: bTmp, K: cfg.ff, M: embd, N: n)
-            f.addBiasRows(x: bTmp, bias: l.downB, m: embd, rows: n)
-            f.add(x: bX, y: bTmp, n: n * embd)
-        }
+        f.layerNorm(x: bX, w: l.ln1w, b: l.ln1b, y: bNorm, n: embd,
+                    rows: n, eps: cfg.eps)
+        f.f16Gemm(l.qkvW, X: bNorm, out: bQkv, K: embd, M: 3 * embd, N: n)
+        f.addBiasRows(x: bQkv, bias: l.qkvB, m: 3 * embd, rows: n)
+        f.visionRope(x: bQkv, cos: t.ropeCos, sin: t.ropeSin,
+                     rowStride: 3 * embd, off: 0, headDim: hd,
+                     nHead: cfg.heads, N: n)
+        f.visionRope(x: bQkv, cos: t.ropeCos, sin: t.ropeSin,
+                     rowStride: 3 * embd, off: embd, headDim: hd,
+                     nHead: cfg.heads, N: n)
+        f.visionAttn(qkv: bQkv, out: bCtx, n: n, embd: embd, hd: hd,
+                     nHead: cfg.heads, scale: scale)
+        f.f16Gemm(l.outW, X: bCtx, out: bTmp, K: embd, M: embd, N: n)
+        f.addBiasRows(x: bTmp, bias: l.outB, m: embd, rows: n)
+        f.add(x: bX, y: bTmp, n: n * embd)
+        f.layerNorm(x: bX, w: l.ln2w, b: l.ln2b, y: bNorm, n: embd,
+                    rows: n, eps: cfg.eps)
+        f.f16Gemm(l.upW, X: bNorm, out: bFF, K: embd, M: cfg.ff, N: n)
+        f.addBiasRows(x: bFF, bias: l.upB, m: cfg.ff, rows: n)
+        f.gelu(x: bFF, n: n * cfg.ff)
+        f.f16Gemm(l.downW, X: bFF, out: bTmp, K: cfg.ff, M: embd, N: n)
+        f.addBiasRows(x: bTmp, bias: l.downB, m: embd, rows: n)
+        f.add(x: bX, y: bTmp, n: n * embd)
+    }
+
+    private func merge(_ f: MetalEnc, _ n: Int) {
+        let embd = cfg.embd
         f.layerNorm(x: bX, w: postW, b: postB, y: bNorm, n: embd, rows: n,
                     eps: cfg.eps)
         // The merger's concat is a pure reshape over merge-ordered rows.
@@ -204,8 +229,6 @@ public final class QwenMetalViT {
         f.gelu(x: bTmp, n: mTok * mIn)
         f.f16Gemm(mm2W, X: bTmp, out: bOut, K: mIn, M: cfg.projDim, N: mTok)
         f.addBiasRows(x: bOut, bias: mm2B, m: cfg.projDim, rows: mTok)
-        enc.endEncoding()
-        return cb
     }
 
     // One vectorized vImage pass: a scalar loop over ~250M params is seconds.

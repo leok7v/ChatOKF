@@ -225,6 +225,9 @@ final class StreamTests: XCTestCase {
         "In the year\n1984. Things changed.\n- a bullet\n- two",
         "[Note]: not a definition.\n\n[^1]: nor a footnote",
         "    # indented code\n    ---\n\nwords\n    still words",
+        "The formula:\n\\[\nE = mc^2\n\\]\nholds.\n\n\\[sic\\] and \\[1\\]",
+        "\\[\nx = 1\n- y\nz \\]\n\nso \\[ a+b \\] inline",
+        "\\[ \\alpha \\]\n- item\n\n  \\[\n  x^2\n  \\]",
     ]
 
     static let pieceSeeds: [UInt64] = [0, 7, 20260926]

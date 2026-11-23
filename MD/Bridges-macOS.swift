@@ -21,12 +21,8 @@ extension NativeText: NSViewRepresentable {
             var url: URL? = nil
             if let u = link as? URL { url = u }
             else if let s = link as? String { url = URL(string: s) }
-            var handled = false
-            if let url {
-                NSWorkspace.shared.open(url)
-                handled = true
-            }
-            return handled
+            if let url { NSWorkspace.shared.open(url) }
+            return url != nil
         }
 
         func textView(_ textView: NSTextView,
@@ -443,47 +439,40 @@ extension NativeText: NSViewRepresentable {
             if let lm = layoutManager, let tc = textContainer,
                let ts = textStorage {
                 lm.ensureLayout(for: tc)
-                let origin = textContainerOrigin
-                ts.enumerateAttribute(
-                    atomicIdKey,
-                    in: NSRange(location: 0, length: ts.length),
-                    options: []) { value, range, _ in
-                    let id = value as? String
-                    let hasCopy = id != nil && ts.attribute(
-                        atomicCopyKey, at: range.location,
-                        effectiveRange: nil) != nil
-                    let kind = id == nil ? nil : ts.attribute(
-                        atomicKindKey, at: range.location,
-                        effectiveRange: nil) as? String
-                    if let id, hasCopy {
-                        let gr = lm.glyphRange(forCharacterRange: range,
-                                               actualCharacterRange: nil)
-                        let block = lm.boundingRect(forGlyphRange: gr, in: tc)
-                        // Centred on the FIRST line fragment, not the block
-                        // top, or it reads as sitting on the baseline.
-                        let line = lm.lineFragmentUsedRect(
-                            forGlyphAt: gr.location, effectiveRange: nil)
-                        // A display is CENTRED, so its button goes out to
-                        // the margin rather than onto the formula.
-                        let right = kind == AtomicKind.math.rawValue
-                            ? lm.lineFragmentRect(forGlyphAt: gr.location,
-                                                  effectiveRange: nil).maxX
-                            : block.maxX
-                        let x = right + origin.x - copyButtonGutter
-                        let y = line.minY + origin.y + (line.height - 22) / 2
-                        let frame = NSRect(x: x, y: y, width: 22, height: 22)
-                        let btn = copyButtons[id] ?? makeCopyButton(id)
-                        btn.frame = frame
-                        copyButtons[id] = btn
-                        live.insert(id)
-                        copyRects.append((id, frame))
-                    }
+                for run in atomicRuns(in: ts) {
+                    let frame = copyFrame(of: run, layoutManager: lm,
+                                          container: tc)
+                    let btn = copyButtons[run.id] ?? makeCopyButton(run.id)
+                    btn.frame = frame
+                    copyButtons[run.id] = btn
+                    live.insert(run.id)
+                    copyRects.append((run.id, frame))
                 }
             }
             for (id, btn) in copyButtons where !live.contains(id) {
                 btn.removeFromSuperview()
                 copyButtons[id] = nil
             }
+        }
+
+        private func copyFrame(of run: AtomicRun,
+                               layoutManager lm: NSLayoutManager,
+                               container tc: NSTextContainer) -> NSRect {
+            let origin = textContainerOrigin
+            let gr = lm.glyphRange(forCharacterRange: run.range,
+                                   actualCharacterRange: nil)
+            let block = lm.boundingRect(forGlyphRange: gr, in: tc)
+            let line = lm.lineFragmentUsedRect(forGlyphAt: gr.location,
+                                               effectiveRange: nil)
+            let right = run.kind == AtomicKind.math.rawValue
+                ? lm.lineFragmentRect(forGlyphAt: gr.location,
+                                      effectiveRange: nil).maxX
+                : block.maxX
+            let x = right + origin.x - copyButtonGutter
+            let y = line.minY + origin.y +
+                    (line.height - copyButtonSide) / 2
+            return NSRect(x: x, y: y, width: copyButtonSide,
+                          height: copyButtonSide)
         }
 
         private func makeCopyButton(_ id: String) -> CopyRunButton {
@@ -506,21 +495,11 @@ extension NativeText: NSViewRepresentable {
         // The block's CURRENT source by atomic id: ranges shift as tokens
         // stream, the id is stable.
         private func copyBlock(_ id: String) {
-            var copy: String? = nil
-            if let ts = textStorage {
-                ts.enumerateAttribute(
-                    atomicIdKey,
-                    in: NSRange(location: 0, length: ts.length),
-                    options: []) { value, range, stop in
-                    if value as? String == id {
-                        copy = ts.attribute(atomicCopyKey, at: range.location,
-                                            effectiveRange: nil) as? String
-                        stop.pointee = true
-                    }
-                }
+            let run = textStorage.flatMap { ts in
+                atomicRuns(in: ts).first { run in run.id == id }
             }
-            if let copy {
-                platformSetClipboardString(copy)
+            if let run {
+                copyRun(run)
                 copyButtons[id]?.flashDone()
             }
         }

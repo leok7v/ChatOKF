@@ -58,8 +58,9 @@ public final class GPUGate: @unchecked Sendable {
     public static let shared = GPUGate()
     public static let retries = 3
     static let criticalWait = 30.0
+    static let defaultSeed: UInt64 = 0
     private let lock = NSLock()
-    private var dice = SplitMix(Flags.uint64("seed") ?? 0x9E37_79B9_7F4A_7C15)
+    private var dice = SplitMix(Flags.uint64("seed") ?? GPUGate.defaultSeed)
     private var faultRate = Flags.double("gpu-fault-rate") ?? 0
     private var forced = GPUGate.parse(Flags.value("thermal") ?? "")
 
@@ -161,6 +162,28 @@ public final class GPUGate: @unchecked Sendable {
             attempt += 1
         }
         return ok
+    }
+
+    func layers(_ tag: String, what: String, count: Int, state: MTLBuffer,
+                floats: Int, stop: () -> Bool,
+                _ encode: (Int) -> MTLCommandBuffer) throws {
+        var il = 0
+        var ran = true
+        while ran && il < count && !stop() {
+            let seed = Array(state.f32(floats))
+            ran = run(tag) {
+                seed.withUnsafeBytes { raw in
+                    _ = memcpy(state.contents(), raw.baseAddress!, raw.count)
+                }
+                return encode(il)
+            }
+            il += 1
+        }
+        if !ran {
+            throw GPUFault(description: what + " did not run")
+        } else if il < count {
+            throw CancellationError()
+        }
     }
 }
 

@@ -4381,6 +4381,57 @@ kernel void kv_append_batch(
     }
 }
 
+struct KVShiftArgs {
+    uint kvDim; uint headDim; uint nRot; float base;
+    uint from; uint rows; uint delta; uint P;
+};
+
+kernel void kv_shift_gather(
+        device const KVTable & kT [[buffer(0)]],
+        device const KVTable & vT [[buffer(1)]],
+        device       half    * kS [[buffer(2)]],
+        device       half    * vS [[buffer(3)]],
+        constant KVShiftArgs & a  [[buffer(4)]],
+        uint gid [[thread_position_in_grid]]) {
+    if (gid < a.rows * a.kvDim) {
+        const uint t = a.from + gid / a.kvDim;
+        const uint c = gid % a.kvDim;
+        device const half * K = kv_row(kT, t, a.P, a.kvDim, 0, 0);
+        device const half * V = kv_row(vT, t, a.P, a.kvDim, 0, 0);
+        const uint hf = a.nRot / 2;
+        const uint d = c % a.headDim;
+        const uint i = d % hf;
+        const bool first = d < hf;
+        const uint mate = first ? c + hf : c - hf;
+        const float freq = pow(a.base, -2.0f * (float) i / (float) a.nRot);
+        const float ang = -(float) a.delta * freq;
+        const float co = precise::cos(ang);
+        const float si = precise::sin(ang);
+        const float x = (float) K[c];
+        const float y = (float) K[mate];
+        const float turned = first ? x * co - y * si : y * si + x * co;
+        kS[gid] = d < a.nRot ? (half) turned : K[c];
+        vS[gid] = V[c];
+    }
+}
+
+kernel void kv_shift_scatter(
+        device const half    * kS [[buffer(0)]],
+        device const half    * vS [[buffer(1)]],
+        device const KVTable & kT [[buffer(2)]],
+        device const KVTable & vT [[buffer(3)]],
+        constant KVShiftArgs & a  [[buffer(4)]],
+        uint gid [[thread_position_in_grid]]) {
+    if (gid < a.rows * a.kvDim) {
+        const uint t = a.from - a.delta + gid / a.kvDim;
+        const uint c = gid % a.kvDim;
+        device half * K = (device half *) kT.pages[t / a.P];
+        device half * V = (device half *) vT.pages[t / a.P];
+        K[(t % a.P) * a.kvDim + c] = kS[gid];
+        V[(t % a.P) * a.kvDim + c] = vS[gid];
+    }
+}
+
 // `blk` holds each chunk ROW's vision block as absolute (lo, hi), 0/0 for
 // none, read up to FA_Q rows past N, so the host sizes it past the batch.
 struct AttnBatchArgs {

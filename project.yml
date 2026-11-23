@@ -236,6 +236,7 @@ targets:
       - path: LLM/cli
         excludes:
           - Info.plist
+          - words
       - path: LLM/metal
     dependencies:
       - target: LLM
@@ -266,7 +267,9 @@ targets:
     dependencies:
       - target: ChatOKF
       - target: Chat
+        link: false
       - target: LLM
+        link: false
     settings:
       base:
         SWIFT_VERSION: "6.0"

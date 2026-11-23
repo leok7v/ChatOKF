@@ -21,6 +21,8 @@ private final class MockBackend: AgentBackend, @unchecked Sendable {
     var stopNextExtend = false
     var stopBetweenChunks = false
     var stopOnExtendCall = 0
+    var deadFromCall = 0
+    var stopAfterLaying = 0
     private(set) var extendCalls = 0
 
     func shouldStop() -> Bool {
@@ -69,8 +71,16 @@ private final class MockBackend: AgentBackend, @unchecked Sendable {
 
     func extend(_ ids: [Int32]) async throws -> Int32 {
         extendCalls += 1
-        if stopNextExtend || extendCalls == stopOnExtendCall {
+        let dead = deadFromCall > 0 && extendCalls >= deadFromCall
+            && extendCalls < deadFromCall + 64
+        if stopNextExtend || extendCalls == stopOnExtendCall || dead {
             stopNextExtend = false
+            throw EngineError.stopped
+        }
+        if stopAfterLaying > 0 {
+            pos += min(stopAfterLaying, ids.count)
+            extendedTokens += min(stopAfterLaying, ids.count)
+            stopAfterLaying = 0
             throw EngineError.stopped
         }
         if freshTurn {
@@ -129,6 +139,7 @@ private final class TapeBackend: AgentBackend, @unchecked Sendable {
     private var freshTurn = false
     private(set) var rewinds = 0
     private(set) var longest: [Int32] = []
+    private var log: [String] = []
 
     private static let imagePad: Int32 = 999
     private static let junk: Int32 = 998
@@ -191,6 +202,30 @@ private final class TapeBackend: AgentBackend, @unchecked Sendable {
 
     var kvText: String { text(tape) }
 
+    var kvIds: [Int32] { tape }
+
+    func drainLog() -> [String] {
+        let out = log
+        log = []
+        return out
+    }
+
+    static func show(_ ids: [Int32]) -> String {
+        var out = ""
+        for id in ids {
+            if id >= 0x20 && id < 0x7F && id != 0x5C && id != 0x7B {
+                out.append(Character(Unicode.Scalar(UInt8(id))))
+            } else if id == 0x0A {
+                out += "\\n"
+            } else if id >= 0 && id < 256 {
+                out += String(format: "\\x%02x", id)
+            } else {
+                out += "{\(id)}"
+            }
+        }
+        return out
+    }
+
     var longestText: String { text(longest) }
 
     var position: Int { get async { tape.count } }
@@ -205,9 +240,16 @@ private final class TapeBackend: AgentBackend, @unchecked Sendable {
         cursor = 1
         decoding = false
         freshTurn = false
+        log.append("reset")
     }
 
-    func useSampler(_ s: Sampler?) async {}
+    func useSampler(_ s: Sampler?) async {
+        log.append(s.map { s in
+            "sampler banned=\(s.banned.count) dry=\(s.dryBreakers.count) "
+                + "verbatim=\(s.verbatim) mask=\(s.logitMask != nil) "
+                + "overthink=\(s.overthinkLambda)"
+        } ?? "sampler nil")
+    }
 
     private func script() -> [Int32] {
         round >= 0 && round < scripts.count ? scripts[round] : []
@@ -233,10 +275,16 @@ private final class TapeBackend: AgentBackend, @unchecked Sendable {
         tape.append(contentsOf: ids)
         grew()
         let s = script()
-        return decoding ? nextScripted() : (s.isEmpty ? eos : s[0])
+        let out = decoding ? nextScripted() : (s.isEmpty ? eos : s[0])
+        log.append("extend " + TapeBackend.show(ids) + " -> "
+                   + TapeBackend.show([out]))
+        return out
     }
 
-    func mark() async throws { marked = tape.count }
+    func mark() async throws {
+        marked = tape.count
+        log.append("mark \(marked)")
+    }
 
     func rewind() async throws {
         rewinds += 1
@@ -245,6 +293,17 @@ private final class TapeBackend: AgentBackend, @unchecked Sendable {
         cursor = 1
         decoding = false
         freshTurn = false
+        log.append("rewind \(tape.count)")
+    }
+
+    private(set) var shifts = 0
+
+    func shift(keep: Int, count: Int) async -> Bool {
+        tape.removeSubrange(keep ..< keep + count)
+        marked = marked >= keep + count ? marked - count : marked
+        shifts += 1
+        log.append("shift \(keep) \(count)")
+        return true
     }
 
     func decode(_ token: Int32) async throws -> Int32 {
@@ -256,12 +315,15 @@ private final class TapeBackend: AgentBackend, @unchecked Sendable {
             for _ in 1 ..< max(commits, 1) { tape.append(TapeBackend.junk) }
         }
         grew()
+        log.append("decode " + TapeBackend.show([token]) + " -> "
+                   + TapeBackend.show([out]))
         return out
     }
 
     struct State: BackendState { let tape: [Int32]; let marked: Int }
     func saveState() async throws -> any BackendState {
         freshTurn = true
+        log.append("save \(tape.count)")
         return State(tape: tape, marked: marked)
     }
     func loadState(_ state: any BackendState) async throws {
@@ -269,6 +331,7 @@ private final class TapeBackend: AgentBackend, @unchecked Sendable {
             tape = s.tape
             marked = s.marked
         }
+        log.append("load \(tape.count)")
     }
 
     private struct Blob: Codable { let tape: [Int32]; let marked: Int }
@@ -286,11 +349,13 @@ private final class TapeBackend: AgentBackend, @unchecked Sendable {
     func park(to dir: URL, meta: Data) async throws {
         freshTurn = true
         try write(dir, meta)
+        log.append("park \(tape.count)")
     }
 
     func precook(to cooked: URL, meta: Data) async throws {
         freshTurn = true
         try write(cooked, meta)
+        log.append("precook \(tape.count)")
     }
 
     func resume(from dir: URL) async throws -> Data {
@@ -298,6 +363,7 @@ private final class TapeBackend: AgentBackend, @unchecked Sendable {
             contentsOf: dir.appendingPathComponent("state.bin")))
         tape = b.tape
         marked = b.marked
+        log.append("resume \(tape.count)")
         return try Data(contentsOf: dir.appendingPathComponent("meta.json"))
     }
 
@@ -335,6 +401,19 @@ private final class RecordingRunner: ToolRunner, @unchecked Sendable {
 }
 
 final class ChatSessionTests: XCTestCase {
+    private var seamsBefore = 0
+
+    override func setUp() {
+        super.setUp()
+        seamsBefore = ChatSession.seamFaults.count
+    }
+
+    override func tearDown() {
+        XCTAssertEqual(ChatSession.seamFaults.count, seamsBefore,
+                       "fed left committed or pending, see the Diag seam line")
+        super.tearDown()
+    }
+
     private func vocab(_ pairs: [(Int32, String)]) -> [Int32: [UInt8]] {
         var out: [Int32: [UInt8]] = [:]
         for (id, s) in pairs { out[id] = Array(s.utf8) }
@@ -469,6 +548,129 @@ final class ChatSessionTests: XCTestCase {
         XCTAssertEqual(title, "Sky Color Question")
         XCTAssertEqual(backend.rewinds, 1,
                        "a KV that ran past the answer must be rewound")
+    }
+
+    func testATitleAfterAResumeLaysTheLastAnswer() async throws {
+        let url = stateDir("meta")
+        let voc = vocab([(1001, "The sky scatters blue light."),
+                         (1002, "Sky Color Question")])
+        let saver = TapeBackend(scripts: [[1001]], vocab: voc)
+        let s1 = ChatSession(backend: saver, template: chatml,
+                             system: "You are a bot.", vocabSize: 256)
+        _ = await drain(s1.reply("why is the sky blue"))
+        try await s1.park(to: url, stamp: "v1")
+        let loader = TapeBackend(scripts: [[1002]], vocab: voc)
+        let s2 = ChatSession(backend: loader, template: chatml,
+                             system: "You are a bot.", vocabSize: 256)
+        let hit = try await s2.resume(from: url, stamp: "v1")
+        XCTAssertTrue(hit)
+        let title = await s2.makeTitle()
+        XCTAssertEqual(title, "Sky Color Question")
+        let peak = loader.longestText
+        XCTAssertTrue(peak.contains(
+            "<|im_start|>assistant\nThe sky scatters blue light.<|im_end|>\n"
+            + "<|im_start|>user\n" + ChatSession.titleInstruction), peak)
+        XCTAssertFalse(peak.contains("<|im_end|>\n<|im_end|>"), peak)
+        try? FileManager.default.removeItem(at: url)
+    }
+
+    func testAFullContextDropsTheOldestExchanges() async throws {
+        let backend = TapeBackend(
+            scripts: [[1001], [1002], [1003], [], [1004]],
+            vocab: vocab([(1001, "One."), (1002, "Two."), (1003, "Three."),
+                          (1004, "Four.")]))
+        let session = ChatSession(
+            backend: backend, template: chatml, system: "You are a bot.",
+            vocabSize: 256, context: 300)
+        var answers: [String] = []
+        for ask in ["q1", "q2", "q3", "q4"] {
+            answers.append(await drain(session.reply(ask)))
+        }
+        XCTAssertEqual(answers, ["One.", "Two.", "Three.", "Four."])
+        XCTAssertEqual(backend.kvText,
+            "<|im_start|>system\nYou are a bot.<|im_end|>\n"
+            + "<|im_start|>user\nq3<|im_end|>\n"
+            + "<|im_start|>assistant\nThree.<|im_end|>\n"
+            + "<|im_start|>user\nq4<|im_end|>\n"
+            + "<|im_start|>assistant\nFour.")
+        let committed = await session.committedCount
+        XCTAssertEqual(committed, backend.kvText.utf8.count - 27,
+                       "the mark is not after the last user turn")
+        let title = await session.makeTitle()
+        XCTAssertEqual(title, "", "a meta turn after the shift decoded")
+        XCTAssertTrue(backend.longestText.contains(
+            "assistant\nFour.<|im_end|>\n<|im_start|>user\n"
+            + ChatSession.titleInstruction), backend.longestText)
+    }
+
+    func testASoftShiftCutsTheRowsInPlaceAndLaysNothingAgain() async throws {
+        let backend = TapeBackend(
+            scripts: [[1001], [1002], [1003], [1004]],
+            vocab: vocab([(1001, "One."), (1002, "Two."), (1003, "Three."),
+                          (1004, "Four.")]))
+        let session = ChatSession(
+            backend: backend, template: chatml, system: "You are a bot.",
+            vocabSize: 256, context: 300, shift: .soft)
+        var answers: [String] = []
+        for ask in ["q1", "q2", "q3", "q4"] {
+            answers.append(await drain(session.reply(ask)))
+        }
+        XCTAssertEqual(answers, ["One.", "Two.", "Three.", "Four."])
+        XCTAssertEqual(backend.shifts, 1, "the soft shift did not run")
+        let resets = backend.drainLog().filter { line in line == "reset" }
+        XCTAssertEqual(resets.count, 1, "the soft shift laid the kept again")
+        XCTAssertEqual(backend.kvText,
+            "<|im_start|>system\nYou are a bot.<|im_end|>\n"
+            + "<|im_start|>user\nq3<|im_end|>\n"
+            + "<|im_start|>assistant\nThree.<|im_end|>\n"
+            + "<|im_start|>user\nq4<|im_end|>\n"
+            + "<|im_start|>assistant\nFour.")
+        let committed = await session.committedCount
+        XCTAssertEqual(committed, backend.kvText.utf8.count - 27,
+                       "the mark is not after the last user turn")
+        let title = await session.makeTitle()
+        XCTAssertEqual(title, "", "a meta turn after the shift decoded")
+        XCTAssertTrue(backend.longestText.contains(
+            "assistant\nFour.<|im_end|>\n<|im_start|>user\n"
+            + ChatSession.titleInstruction), backend.longestText)
+    }
+
+    func testAFullContextUnderOffEndsTheTurnBeforeThePrompt() async throws {
+        let backend = TapeBackend(
+            scripts: [[1001], [1002], [1003], [1004]],
+            vocab: vocab([(1001, "One."), (1002, "Two."), (1003, "Three."),
+                          (1004, "Four.")]))
+        let session = ChatSession(
+            backend: backend, template: chatml, system: "You are a bot.",
+            vocabSize: 256, context: 300, shift: .off)
+        let box = TraceBox()
+        await session.setTrace { e in box.add(e) }
+        var answers: [String] = []
+        for ask in ["q1", "q2", "q3"] {
+            answers.append(await drain(session.reply(ask)))
+        }
+        XCTAssertEqual(answers, ["One.", "Two.", "Three."])
+        let laid = backend.kvText
+        let messages = await session.messageCount
+        for ask in ["q4", "q5"] {
+            let refused = await drain(session.reply(ask))
+            XCTAssertEqual(refused, "", "a full context answered \(ask)")
+            let outcome = await session.turnOutcome
+            XCTAssertEqual(outcome, .memory, "a full context is not a Stop")
+            let m = await session.lastMetrics
+            XCTAssertEqual(m.endReason, ChatSession.memoryEnd)
+            XCTAssertEqual(backend.kvText, laid,
+                           "the turn laid its prompt or dropped an exchange")
+            let kept = await session.messageCount
+            XCTAssertEqual(kept, messages, "the history changed")
+        }
+        XCTAssertEqual(backend.shifts, 0, "the off mode shifted")
+        XCTAssertTrue(laid.contains("user\nq1<|im_end|>\n"
+            + "<|im_start|>assistant\nOne.<|im_end|>"), laid)
+        let said = box.list.map { e in e.summary }
+        XCTAssertTrue(said.contains(
+            "chat starved: the conversation reached the context of 300 "
+            + "tokens"), "\(said)")
     }
 
     func testMakeTitleAppendsAfterAnInjectedClose() async throws {
@@ -1121,10 +1323,12 @@ final class ChatSessionTests: XCTestCase {
         let miss = try await s2.resume(from: url, stamp: "v2")
         XCTAssertFalse(miss, "changed stamp loaded a stale context")
 
-        let before = loader.rewinds
         _ = await drain(s2.reply("again"))
-        XCTAssertGreaterThan(loader.rewinds, before,
-            "loaded context did not continue its conversation")
+        XCTAssertTrue(loader.kvText.contains(
+            "user\nhello<|im_end|><|im_start|>assistant\na-one<|im_end|>"
+            + "<|im_start|>user\nagain<|im_end|>"),
+            "loaded context did not continue its conversation:\n"
+            + loader.kvText)
         try? fm.removeItem(at: url)
     }
 
@@ -1204,6 +1408,153 @@ final class ChatSessionTests: XCTestCase {
         XCTAssertEqual(full.readStop, "")
         XCTAssertEqual(full.readFraction, 1, "a guard that stays quiet "
                        + "must not cut")
+    }
+
+    func testAStopInTheFirstChunkAnswersFromWhatWasRead() async throws {
+        let trimming = template.replacingOccurrences(
+            of: "{{ m.content }}", with: "{{ m.content | trim }}")
+        let backend = MockBackend(scripts: [[1]],
+                                  vocab: vocab([(1, "Read it.")]))
+        let session = ChatSession(
+            backend: backend, template: trimming, system: "You are a bot.",
+            vocabSize: 256)
+        let doc = String(repeating: "x", count: 3000)
+        let block = "\n\npaper.txt:\n```\n" + doc + "\n```\n\n"
+        backend.stopAfterLaying = 480
+        let answer = await drain(session.reply(block + "Summarize it.",
+                                               stoppable: block))
+        XCTAssertEqual(answer, "Read it.")
+        let outcome = await session.turnOutcome
+        XCTAssertEqual(outcome, .answered, "a Stop in the first chunk of a "
+                       + "document rolled the turn back")
+        let m = await session.lastMetrics
+        XCTAssertEqual(m.readStop, "user")
+        XCTAssertGreaterThan(m.readFraction, 0.1)
+        XCTAssertLessThan(m.readFraction, 0.3)
+        let kept = await session.messageCount
+        XCTAssertEqual(kept, 3, "the document left the history")
+    }
+
+    func testADeadEngineEndsTheLayInsteadOfSpinning() async throws {
+        let backend = MockBackend(scripts: [[1]],
+                                  vocab: vocab([(1, "Read it.")]))
+        let session = ChatSession(
+            backend: backend, template: template, system: "You are a bot.",
+            vocabSize: 256)
+        let doc = String(repeating: "x", count: 3000)
+        let prompt = "paper.txt:\n```\n" + doc + "\n```\n\nSummarize it."
+        backend.stopBetweenChunks = true
+        backend.deadFromCall = 2
+        let answer = await drain(session.reply(prompt, stoppable: doc))
+        XCTAssertEqual(answer, "")
+        XCTAssertLessThan(backend.extendCalls, 4,
+                          "the lay retried an engine that lays nothing")
+        let outcome = await session.turnOutcome
+        XCTAssertEqual(outcome, .stopped)
+    }
+
+    private func replayTurns(_ n: Int) -> [ChatSession.ReplayTurn] {
+        (1 ... n).map { i in
+            ChatSession.ReplayTurn(prompt: "q\(i)", answer: "Answer \(i).",
+                                   parts: [], spans: [], labelled: true)
+        }
+    }
+
+    func testAReplayPastTheContextUnderOffThrows() async throws {
+        let backend = TapeBackend(scripts: [], vocab: vocab([]))
+        let session = ChatSession(
+            backend: backend, template: chatml, system: "You are a bot.",
+            vocabSize: 256, context: 300, shift: .off)
+        do {
+            _ = try await session.replay(replayTurns(6))
+            XCTFail("a replay past the context resumed")
+        } catch {
+            XCTAssertLessThanOrEqual(backend.kvText.utf8.count, 300,
+                                     "the replay laid past the context")
+        }
+    }
+
+    func testAReplayUnderTheMemoryFloorThrows() async throws {
+        let backend = TapeBackend(scripts: [], vocab: vocab([]))
+        let starve = Starve(on: [2])
+        let session = ChatSession(
+            backend: backend, template: chatml, system: "You are a bot.",
+            vocabSize: 256, chatGuard: { starve.check() })
+        do {
+            _ = try await session.replay(replayTurns(3))
+            XCTFail("a replay under the memory floor resumed")
+        } catch {
+            XCTAssertFalse(backend.kvText.contains("q2"),
+                           "the replay laid a turn under the floor")
+        }
+    }
+
+    private final class Starve: @unchecked Sendable {
+        private let lock = NSLock()
+        private let on: Set<Int>
+        private var n = 0
+        init(on: Set<Int>) { self.on = on }
+        func check() -> String? {
+            lock.lock(); n += 1; let at = n; lock.unlock()
+            return on.contains(at) ? "12 MB left" : nil
+        }
+    }
+
+    func testMemoryFloorEndsAChatTurnBeforeThePrompt() async throws {
+        let backend = MockBackend(scripts: [[1]], vocab: vocab([(1, "one")]))
+        let starve = Starve(on: [1])
+        let session = ChatSession(
+            backend: backend, template: template, system: "You are a bot.",
+            vocabSize: 256, chatGuard: { starve.check() })
+        let starved = await drain(session.reply("first"))
+        XCTAssertEqual(starved, "")
+        let outcome = await session.turnOutcome
+        XCTAssertEqual(outcome, .memory, "a starved turn is not a Stop")
+        let m = await session.lastMetrics
+        XCTAssertEqual(m.endReason, ChatSession.memoryEnd)
+        XCTAssertEqual(backend.extendedTokens, 0,
+                       "the prompt was laid under the floor")
+        let next = await drain(session.reply("second"))
+        XCTAssertEqual(next, "one", "the chat did not go on once memory freed")
+    }
+
+    func testMemoryFloorEndsADecodeAndKeepsTheAnswer() async throws {
+        let words = (0 ..< 40).map { i in (Int32(100 + i), "w\(i) ") }
+        let backend = MockBackend(
+            scripts: [words.map { w in w.0 }, [2]],
+            vocab: vocab(words + [(2, "Two.")]))
+        let session = ChatSession(
+            backend: backend, template: template, system: "You are a bot.",
+            vocabSize: 256, chatGuard: Starve(on: [2]).check)
+        let answer = await drain(session.reply("count"))
+        let kept = words.prefix(ChatSession.memoryEvery)
+            .map { w in w.1 }.joined()
+        XCTAssertEqual(answer.trimmingCharacters(in: .whitespaces),
+                       kept.trimmingCharacters(in: .whitespaces))
+        let outcome = await session.turnOutcome
+        XCTAssertEqual(outcome, .answered, "the partial answer was dropped")
+        let m = await session.lastMetrics
+        XCTAssertEqual(m.endReason, ChatSession.memoryEnd)
+        XCTAssertEqual(m.contentTokens, ChatSession.memoryEvery)
+        let next = await drain(session.reply("go on"))
+        XCTAssertEqual(next, "Two.")
+    }
+
+    func testMemoryFloorInsideReasoningRollsBack() async throws {
+        let think = (0 ..< 40).map { i in (Int32(100 + i), "r\(i) ") }
+        let backend = MockBackend(scripts: [think.map { w in w.0 }],
+                                  vocab: vocab(think))
+        let session = ChatSession(
+            backend: backend, template: template, system: "You are a bot.",
+            vocabSize: 256, enableThinking: true,
+            chatGuard: Starve(on: [2]).check)
+        let answer = await drain(session.reply("think"))
+        XCTAssertEqual(answer, "")
+        let outcome = await session.turnOutcome
+        XCTAssertEqual(outcome, .memory)
+        XCTAssertEqual(ChatSession.emptyOutcome("stop", 1), .stopped)
+        XCTAssertEqual(ChatSession.emptyOutcome("stop", 0.5), .answerless)
+        XCTAssertEqual(ChatSession.emptyOutcome("eos", 1), .answerless)
     }
 
     func testParkToFileSavesAtTheMarkAndResumes() async throws {
@@ -2298,5 +2649,149 @@ final class ChatSessionTests: XCTestCase {
         XCTAssertTrue(reasoning.text.contains("reasoning here"),
                       "open-think prompt lost its reasoning: \(reasoning.text)")
         XCTAssertEqual(content, "The answer.")
+    }
+
+    private let thinkChatml = "{% for m in messages %}"
+        + "{% if m.role == 'tool' %}"
+        + "<|im_start|>user\n<tool_response>\n{{ m.content }}\n"
+        + "</tool_response><|im_end|>\n"
+        + "{% else %}"
+        + "<|im_start|>{{ m.role }}\n{{ m.content }}"
+        + "{% for tc in m.tool_calls %}"
+        + "<tool_call><function={{ tc.name }}></function></tool_call>"
+        + "{% endfor %}"
+        + "<|im_end|>\n"
+        + "{% endif %}"
+        + "{% endfor %}"
+        + "{% if add_generation_prompt %}<|im_start|>assistant\n"
+        + "{% if enable_thinking %}<think>\n{% endif %}{% endif %}"
+
+    private func baselineVocab() -> [Int32: [UInt8]] {
+        let call = "<tool_call><function=calculator>"
+            + "<parameter=expression>2 + 2</parameter></function></tool_call>"
+        return vocab([(1001, "Hello there."), (1002, call),
+                      (1003, "The answer is 4."),
+                      (1004, "Rayleigh scattering."),
+                      (1005, "Sky Color Question"), (1006, "Red light wins."),
+                      (1007, "You are welcome."), (1008, "Sure."),
+                      (1009, "Why is the sunset red?"),
+                      (2001, "Greet back.\n"), (2002, "</think>"),
+                      (2003, "Need the calculator.\n"), (2004, "a\n"),
+                      (2005, "b\n")])
+    }
+
+    private func baselineScripts(think: Bool)
+        -> (a: [[Int32]], b: [[Int32]]) {
+        let open: [Int32] = think ? [2001, 2002] : []
+        let a: [[Int32]] = [
+            open + [1001], (think ? [2003] : []) + [1002],
+            (think ? [2002] : []) + [1003],
+            (think ? [2004, 2005] : []) + [1004], [1005], open + [1006], [],
+        ]
+        return (a, [open + [1007], open + [1008], [1009]])
+    }
+
+    private func baselineStep(_ name: String, _ answer: String,
+                              _ backend: TapeBackend,
+                              _ session: ChatSession) async -> String {
+        let m = await session.lastMetrics
+        let committed = await session.committedCount
+        let replay = await session.replayTokens
+        let outcome = await session.turnOutcome
+        var lines = ["== " + name, "answer: " + answer.debugDescription]
+        lines += backend.drainLog()
+        lines.append("kv: " + TapeBackend.show(backend.kvIds))
+        lines.append("metrics: ctx=\(m.ctx) think=\(m.thinkTokens) "
+            + "content=\(m.contentTokens) end=\(m.endReason) "
+            + "overrun=\(m.overrun) outcome=\(outcome.rawValue)")
+        lines.append("committed: \(committed) replay: \(replay)")
+        return lines.joined(separator: "\n")
+    }
+
+    private func baselineRun(think: Bool) async throws -> [String] {
+        let voc = baselineVocab()
+        let scripts = baselineScripts(think: think)
+        let tmpl = think ? thinkChatml : chatml
+        func open(_ b: TapeBackend) -> ChatSession {
+            ChatSession(backend: b, template: tmpl, system: "You are a bot.",
+                        vocabSize: 256, enableThinking: think,
+                        softReasoningCap: think ? 2 : 0,
+                        runner: RecordingRunner(reply: "4"))
+        }
+        let a = TapeBackend(scripts: scripts.a, vocab: voc)
+        let first = open(a)
+        var steps: [String] = []
+        let asks = ["hello", "what is 2 + 2?", "why is the sky blue"]
+        for (i, ask) in asks.enumerated() {
+            let answer = await drain(first.reply(ask))
+            steps.append(await baselineStep("turn \(i + 1)", answer, a,
+                                            first))
+        }
+        let title = await first.makeTitle()
+        steps.append(await baselineStep("title", title, a, first))
+        let fourth = await drain(first.reply("and at sunset?"))
+        steps.append(await baselineStep("turn 4", fourth, a, first))
+        let dir = stateDir("baseline")
+        try await first.park(to: dir, stamp: "b1")
+        steps.append(await baselineStep("park", "", a, first))
+        let b = TapeBackend(scripts: scripts.b, vocab: voc)
+        let second = open(b)
+        let hit = try await second.resume(from: dir, stamp: "b1")
+        XCTAssertTrue(hit, "the parked conversation did not resume")
+        steps.append(await baselineStep("resume", "", b, second))
+        for (i, ask) in ["thanks", "one more"].enumerated() {
+            let answer = await drain(second.reply(ask))
+            steps.append(await baselineStep("turn \(i + 5)", answer, b,
+                                            second))
+        }
+        let hint = await second.makeFollowup()
+        steps.append(await baselineStep("follow-up", hint, b, second))
+        try? FileManager.default.removeItem(at: dir)
+        return steps
+    }
+
+    private static func pinURL(_ name: String) -> URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("fixtures/chatsession-baseline/"
+                                    + name + ".txt")
+    }
+
+    private static func firstDiffer(_ old: String, _ got: String) -> String {
+        let was = old.components(separatedBy: "\n")
+        let now = got.components(separatedBy: "\n")
+        var step = ""
+        var at = 0
+        while at < min(was.count, now.count) && was[at] == now[at] {
+            if was[at].hasPrefix("== ") { step = was[at] }
+            at += 1
+        }
+        let pinned = at < was.count ? was[at] : "(end)"
+        let ran = at < now.count ? now[at] : "(end)"
+        return "line \(at + 1) after \(step)\n pin: \(pinned)\n run: \(ran)"
+    }
+
+    private func checkPin(_ name: String, _ steps: [String]) throws {
+        let url = ChatSessionTests.pinURL(name)
+        let got = steps.joined(separator: "\n") + "\n"
+        if let old = try? String(contentsOf: url, encoding: .utf8) {
+            XCTAssertTrue(old == got, "DIFFER \(name): "
+                          + ChatSessionTests.firstDiffer(old, got))
+        } else {
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true)
+            try Data(got.utf8).write(to: url)
+            XCTFail("WROTE \(url.path), run again to compare")
+        }
+    }
+
+    func testBaselineFedIdsMatchThePins() async throws {
+        for think in [false, true] {
+            let steps = try await baselineRun(think: think)
+            XCTAssertEqual(steps.count, 10)
+            try checkPin(think ? "think" : "plain", steps)
+        }
     }
 }

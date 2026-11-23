@@ -412,7 +412,8 @@ func benchIds(_ encode: (String) -> [Int32]) -> [Int32] {
         enableThinking: enableThinking, reasoningEffort: reasoningEffort,
         maxTokens: maxTokens,
         maxReasoning: maxReasoning, softReasoningCap: softReasoning,
-        overthink: overthink, seed: seedVal, runner: toolRunner)
+        overthink: overthink, seed: seedVal, runner: toolRunner,
+        context: contextVal)
     await session.setSuppressReasoning(suppressReasoning)
     let live = FileManager.default.temporaryDirectory
         .appendingPathComponent("chatokf-live-\(UUID().uuidString)")
@@ -468,9 +469,14 @@ func benchIds(_ encode: (String) -> [Int32]) -> [Int32] {
     if letters != nil {
         await session.setLogitTap { logits in first.keep(logits) }
     }
+    let quickAt = quickAfterVal
     let onReasoning: @Sendable (String) -> Void = { r in
         err(r)
         reasoning.add(r)
+        if let quickAt, reasoning.list.count == quickAt {
+            err("\n[quick] Quick Answer pressed\n")
+            Task { await session.requestQuickAnswer() }
+        }
     }
     var stream: AsyncStream<String>? = nil
     var shown = user

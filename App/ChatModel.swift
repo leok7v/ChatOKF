@@ -19,7 +19,7 @@ import UniformTypeIdentifiers
             case .S: return 140
             case .M: return 280
             case .L: return 560
-            case .XL: return 1120
+            case .XL: return SoftTokens.widest
             }
         }
     }
@@ -274,32 +274,106 @@ import UniformTypeIdentifiers
         Sidecar.allCases.filter { pack in !pack.onDisk }
     }
 
-    var downloadStage = ""
-    @ObservationIgnored private var landedBytes: Int64 = 0
+    private(set) var packFetch: Sidecar?
+    private(set) var packFraction = 0.0
     @ObservationIgnored private var plannedBytes: Int64 = 0
     @ObservationIgnored private var sidecarTask: Task<Void, Never>?
 
-    func observeDownload(_ s: HubFetch.Status) {
-        if downloadBase < 0 {
-            downloadBase = landedBytes + s.done
+    var packNote: String? {
+        packFetch.map { pack in
+            "Downloading \(pack.label), \(Int(packFraction * 100))%"
         }
-        downloadDone = landedBytes + s.done
-        downloadTotal = max(plannedBytes, landedBytes + s.total)
     }
 
-    private func fetchSidecars(shown: Bool) async {
-        for pack in sidecarsMissing where !Task.isCancelled {
-            if shown { downloadStage = pack.label }
-            let pace = Paced(milliseconds: 100)
-            let failure = await pack.fetch { s in
-                if shown, pace.due(final: s.done >= s.total) {
-                    Task { @MainActor in self.observeDownload(s) }
-                }
-            }
-            if shown { landedBytes += pack.bytes }
-            Diag.shared.report(.net, "[sidecar] \(pack.label): "
-                + (failure ?? "landed"))
+    static func barProgress(done: Int64, total: Int64, planned: Int64)
+        -> (done: Int64, total: Int64) {
+        (done, max(planned, total))
+    }
+
+    static func plannedBytes(_ name: String) -> Int64 {
+        ModelCatalog.source(name)?.bytes ?? 0
+    }
+
+    func observeDownload(_ s: HubFetch.Status) {
+        if downloadBase < 0 {
+            downloadBase = s.done
         }
+        let bar = ChatModel.barProgress(done: s.done, total: s.total,
+                                        planned: plannedBytes)
+        downloadDone = bar.done
+        downloadTotal = bar.total
+    }
+
+    private func fetchable(_ pack: Sidecar) -> Bool {
+        !pack.onDisk && !(pack == .voice && speech.pack == .fetching)
+    }
+
+    enum DownloadStep: Equatable {
+        case pack(Sidecar)
+        case model(String)
+    }
+
+    static func downloadSteps(_ name: String, packs: [Sidecar])
+        -> [DownloadStep] {
+        packs.map { pack in DownloadStep.pack(pack) } + [.model(name)]
+    }
+
+    private func fetchSidecars() async {
+        for pack in sidecarsMissing
+        where !Task.isCancelled && fetchable(pack) {
+            await fetchPack(pack)
+        }
+    }
+
+    private func fetchPack(_ pack: Sidecar) async {
+        packFetch = pack
+        packFraction = 0
+        let pace = Paced(milliseconds: 100)
+        let failure = await pack.fetch { s in
+            if pace.due(final: s.done >= s.total), s.total > 0 {
+                let fraction = Double(s.done) / Double(s.total)
+                Task { @MainActor in self.carry(pack, fraction) }
+            }
+        }
+        packFetch = nil
+        Diag.shared.report(.net, "[sidecar] \(pack.label): "
+            + (failure ?? "landed"))
+        adoptSidecars()
+    }
+
+    private func fetchSteps(_ steps: [DownloadStep]) async -> String? {
+        var failure: String? = "cancelled"
+        for step in steps where !Task.isCancelled {
+            switch step {
+            case .pack(let pack): await fetchPack(pack)
+            case .model(let name): failure = await fetchModel(name)
+            }
+        }
+        return failure
+    }
+
+    private func fetchModel(_ name: String) async -> String? {
+        phaseStart = Date()
+        downloadBegan = phaseStart
+        downloadBase = -1
+        parkedSeconds = 0
+        parkedAt = parkedAt.map { _ in phaseStart }
+        let pace = Paced(milliseconds: 100)
+        return await session.fetch(name: name) { s in
+            if pace.due(final: s.done >= s.total) {
+                Task { @MainActor in self.observeDownload(s) }
+            }
+        }
+    }
+
+    private func carry(_ pack: Sidecar, _ fraction: Double) {
+        if packFetch == pack {
+            packFraction = fraction
+            if pack == .voice { speech.carrying(fraction) }
+        }
+    }
+
+    private func adoptSidecars() {
         speech.adoptPack()
         hearingOnDisk = HearingPack.onDisk
         session.memories.open()
@@ -308,7 +382,7 @@ import UniformTypeIdentifiers
     private func ensureSidecars() {
         if sidecarTask == nil, !downloading, !sidecarsMissing.isEmpty {
             sidecarTask = Task { @MainActor in
-                await fetchSidecars(shown: false)
+                await fetchSidecars()
                 sidecarTask = nil
             }
         }
@@ -356,6 +430,22 @@ import UniformTypeIdentifiers
             out = "about \(Int((seconds / 60).rounded())) minutes to read"
         } else if seconds >= 1.5 {
             out = "about \(Int(seconds.rounded())) seconds to read"
+        }
+        return out
+    }
+
+    var pictureSeconds: Double? {
+        session.pictureSeconds(imageBudget.tokens)
+    }
+
+    static func lookCost(_ seconds: Double) -> String {
+        var out = "under a second"
+        if seconds >= 90 {
+            out = "about \(Int((seconds / 60).rounded())) minutes"
+        } else if seconds >= 1.5 {
+            out = "about \(Int(seconds.rounded())) seconds"
+        } else if seconds >= 1 {
+            out = "about a second"
         }
         return out
     }
@@ -450,10 +540,8 @@ import UniformTypeIdentifiers
             if messages.isEmpty, !busy {
                 newChat()
             } else {
-                let on = thinking && !speech.enabled
-                Task { @MainActor in
-                    await session.pushThinking(on, resetIfFresh: false)
-                }
+                session.pushThinking(thinking && !speech.enabled,
+                                     resetIfFresh: false)
                 flashNote(speech.enabled
                           ? "Voice rules from the next new chat"
                           : "Voice rules off from the next new chat")
@@ -499,10 +587,6 @@ import UniformTypeIdentifiers
     }
 
     var memoriesSupported: Bool { Memories.supported }
-
-    var hasMemories: Bool {
-        !session.memories.list.isEmpty || !session.memories.trashed.isEmpty
-    }
 
     func forgetAllMemories() {
         session.memories.forgetAll()
@@ -596,6 +680,21 @@ import UniformTypeIdentifiers
     var working: Bool { waiting || replaying || converting > 0 }
 
     private(set) var recalling = false
+    var priming: Bool { session.priming }
+
+    var primingNote: String {
+        let mode: String
+        if voiceMode {
+            mode = "voice mode"
+        } else if !thinkingActive {
+            mode = "quick answer mode"
+        } else if modelSupportsReasoningEffort {
+            mode = "reasoning effort " + reasoningEffort.rawValue.lowercased()
+        } else {
+            mode = "thinking mode"
+        }
+        return "Initializing engine on first use for " + mode + "."
+    }
     @ObservationIgnored private var pendingAsk: UUID?
 
     private func showAsk(_ display: String, prompt: String,
@@ -789,8 +888,12 @@ import UniformTypeIdentifiers
         modelName: ChatModel.startModel(),
         systemPrompt: UserDefaults.standard.string(forKey: "systemPrompt")
             ?? ChatModel.defaultSystemPrompt)
-    var genTask: Task<Void, Never>?
-    var sendTask: Task<Void, Never>?
+    var genTask: Task<Void, Never>? {
+        didSet { stopPressed = stopPressed && turnLive }
+    }
+    var sendTask: Task<Void, Never>? {
+        didSet { stopPressed = stopPressed && turnLive }
+    }
     private static let benchPrompt = Flags.value("bench-prompt") ?? ""
     private static let benchTokens = Flags.int("bench-tokens") ?? 128
     private static let benchCool = Flags.int("bench-cool") ?? 90
@@ -1253,36 +1356,26 @@ import UniformTypeIdentifiers
             downloadFallback = Session.isOnDisk(modelName)
                 ? modelName : downloadedFallback()
             speech.cancelFetch()
-            sidecarTask?.cancel()
+            let quiet = sidecarTask
+            quiet?.cancel()
             commitSwitch(name)
             downloadName = nil
             downloading = true
             downloadDone = 0
             downloadTotal = 0
             downloadBase = -1
-            landedBytes = 0
-            let modelBytes = ModelCatalog.source(name)?.bytes ?? 0
-            let extra = sidecarsMissing.reduce(Int64(0)) { sum, pack in
-                sum + pack.bytes
-            }
-            plannedBytes = modelBytes + extra
-            downloadStage = Models.display(name)
+            plannedBytes = ChatModel.plannedBytes(name)
             phaseStart = Date()
             downloadBegan = phaseStart
             parkedAt = nil
             parkedSeconds = 0
             status = "downloading \(name)…"
-            let pace = Paced(milliseconds: 100)
             fetchTask = Task { @MainActor in
-                let failure = await session.fetch(name: name) { s in
-                    if pace.due(final: s.done >= s.total) {
-                        Task { @MainActor in self.observeDownload(s) }
-                    }
-                }
-                if failure == nil, !Task.isCancelled {
-                    landedBytes = modelBytes
-                    await fetchSidecars(shown: true)
-                }
+                await quiet?.value
+                let failure = await fetchSteps(ChatModel.downloadSteps(
+                    name, packs: sidecarsMissing.filter { pack in
+                        fetchable(pack)
+                    }))
                 downloading = false
                 if failure == nil { diskRevision += 1 }
                 if failure == nil, !Task.isCancelled {
@@ -1451,19 +1544,18 @@ import UniformTypeIdentifiers
         attachmentSerials = [:]
         transcriptSerial += 1
         let running = genTask
-        let onEvent: @MainActor (TraceEvent) -> Void = { [weak self] e in
-            self?.recordTrace(e)
+        if let running {
+            session.requestStop()
+            running.cancel()
+        }
+        let made = session.newChat(parking: leaving, sessionConfig()) {
+            [weak self] e in self?.recordTrace(e)
         }
         genSerial += 1
         let serial = genSerial
         genTask = Task { @MainActor in
-            if running != nil {
-                session.requestStop()
-                running?.cancel()
-                _ = await running?.value
-            }
-            if let leaving { await session.parkCurrent(leaving) }
-            await session.newChatEngine(sessionConfig(), onEvent: onEvent)
+            _ = await running?.value
+            await made.value
             if genSerial == serial { genTask = nil }
             Footprint.report(.load, "newChat end")
         }
@@ -1616,16 +1708,15 @@ import UniformTypeIdentifiers
     func toggleThinking() {
         if modelSupportsThinking, !voiceMode {
             thinking.toggle()
-            let on = thinking
-            let fresh = messages.isEmpty
-            Task { @MainActor in
-                await session.pushThinking(on, resetIfFresh: fresh)
-            }
-            flashHUD(on ? "Thinking: On" : "Thinking: Off")
+            session.pushThinking(thinking, resetIfFresh: messages.isEmpty)
+            flashHUD(thinking ? "Thinking: On" : "Thinking: Off")
         }
     }
 
+    private(set) var quickAsked = false
+
     func quickAnswer() {
+        quickAsked = true
         session.requestQuickAnswer()
     }
 
@@ -2231,11 +2322,12 @@ import UniformTypeIdentifiers
     }
 
     @ObservationIgnored private var transcriber: Task<Transcriber?, Never>?
+    @ObservationIgnored private let hearing = Warmed<Transcriber>()
     @ObservationIgnored private var heardTurn = false
 
     private func warmTranscriber() {
-        if transcriber == nil, let path = HearingPack.path {
-            transcriber = Task.detached { Transcriber(pack: path) }
+        if let path = HearingPack.path {
+            transcriber = hearing.take { Transcriber(pack: path) }
         }
     }
 
@@ -2258,8 +2350,10 @@ import UniformTypeIdentifiers
                     self.input = self.input.isEmpty ? text
                         : self.input + " " + text
                     self.caret = self.input.utf16.count
-                    self.heardTurn = true
-                    self.send()
+                    if !Task.isCancelled {
+                        self.heardTurn = true
+                        self.send()
+                    }
                 }
             }
         }
@@ -2291,6 +2385,7 @@ import UniformTypeIdentifiers
             prefillProgress = nil
         } else {
             stopPressed = true
+            sendTask?.cancel()
             session.stop()
         }
     }
@@ -2314,7 +2409,7 @@ import UniformTypeIdentifiers
     }
 
     private var canRunTurn: Bool {
-        session.hasSession && ready && !engineBusy
+        session.hasSession && ready && !engineBusy && !readOnly
     }
 
     @ObservationIgnored var transcriptSerial = 0
@@ -2378,6 +2473,7 @@ import UniformTypeIdentifiers
                 if let self {
                     let previewed = await self.shown(images)
                     if self.canRunTurn, serial == self.transcriptSerial,
+                       !Task.isCancelled,
                        let (asked, events) = self.session.sendSoft(
                            typed: typed, display: display, images: previewed,
                            clips: clips, docs: docs,
@@ -2413,6 +2509,7 @@ import UniformTypeIdentifiers
                 if let self {
                     let previewed = await self.shown(images)
                     if self.canRunTurn, serial == self.transcriptSerial,
+                       !Task.isCancelled,
                        let (asked, events) = self.session.sendSpoken(
                            said: said,
                            typed: self.aboutPreface
@@ -2438,6 +2535,7 @@ import UniformTypeIdentifiers
         let voiced = spoken || heardTurn
         heardTurn = false
         stopPressed = false
+        quickAsked = false
         followupHint = ""
         spokenTurn = voiced
         lastTurnSpoken = voiced
@@ -2459,9 +2557,12 @@ import UniformTypeIdentifiers
         let phrases = phraseCycler()
         genSerial += 1
         let serial = genSerial
+        let shown = transcriptSerial
         genTask = Task { @MainActor in
             for await event in events {
-                self.apply(event, at: idx)
+                if self.transcriptSerial == shown {
+                    self.apply(event, at: idx)
+                }
             }
             phrases.cancel()
             self.releaseWhenSettled()
@@ -2559,6 +2660,8 @@ import UniformTypeIdentifiers
         transcriptDirty = true
         if benchTask != nil { benchMetrics = metrics }
         adoptNoted()
+        let starved = metrics.endReason == ChatSession.memoryEnd
+            || outcome == .memory
         if outcome == .stopped {
             if messages.count >= 2 { messages.removeLast(2) }
         } else {
@@ -2577,8 +2680,11 @@ import UniformTypeIdentifiers
                               + "could read", seconds: 6)
                 }
             }
+            if starved, messages.indices.contains(idx) {
+                messages[idx].cut = ChatSession.memoryEnd
+            }
             commitCurrent()
-            if benchTask == nil { runMetaTurns() }
+            if benchTask == nil, !starved { runMetaTurns() }
         }
     }
 
@@ -2664,7 +2770,7 @@ import UniformTypeIdentifiers
         let recall = await session.recall(display, also: [],
                                           within: currentConversationId)
         recalling = false
-        if canRunTurn, serial == transcriptSerial {
+        if canRunTurn, serial == transcriptSerial, !Task.isCancelled {
             let text = recall.map { r in r.block + prompt } ?? prompt
             submitText(prompt: text, display: display, docs: docs,
                        stoppable: stoppable, stage: stage)
@@ -2991,7 +3097,7 @@ import UniformTypeIdentifiers
                       prompt: Texts.text("sample-story"),
                       title: "Picture Understanding",
                       subtitle: "It writes a story about this photo"),
-        PictureSample(id: "earth", file: "greenland",
+        PictureSample(id: "earth", file: "IMG_4127",
                       prompt: Texts.text("sample-earth"),
                       title: "Where on Earth?",
                       subtitle: "A view from orbit"),
@@ -3173,6 +3279,25 @@ import UniformTypeIdentifiers
         }
     }
 
+}
+
+@MainActor final class Warmed<T: Sendable> {
+    private var task: Task<T?, Never>?
+
+    func take(_ make: @escaping @Sendable () -> T?) -> Task<T?, Never> {
+        let out = task ?? Task.detached { make() }
+        if task == nil {
+            task = out
+            forgetIfEmpty(out)
+        }
+        return out
+    }
+
+    private func forgetIfEmpty(_ job: Task<T?, Never>) {
+        Task { @MainActor in
+            if await job.value == nil, task == job { task = nil }
+        }
+    }
 }
 
 struct SplitNoise {

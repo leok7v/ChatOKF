@@ -362,22 +362,39 @@ final class MetalKVPool {
         }
     }
 
+    func encodeShift(_ f: MetalEnc, keep: Int, count: Int, rope: KVRope,
+                     scratch: MTLBuffer) {
+        let rows = len - keep - count
+        if rows > 0 {
+            f.kvShift(kAddr: kAddr, vAddr: vAddr, pages: residentPages,
+                      scratch: scratch, rope: rope, from: keep + count,
+                      rows: rows, delta: count, P: P)
+        }
+    }
+
+    func shiftScratch(rows: Int) -> MTLBuffer {
+        device.makeBuffer(length: 2 * max(rows, 1) * kvDim
+                              * MemoryLayout<Float16>.stride,
+                          options: .storageModeShared)!
+    }
+
     struct Snapshot: @unchecked Sendable {
         let len: Int
         let kTail: Data
         let vTail: Data
     }
 
-    private var tailBytes: Int { (len % P) * kvDim * MemoryLayout<Float16>.stride }
+    func snapshot() -> Snapshot { snapshot(at: len) }
 
-    func snapshot() -> Snapshot {
+    func snapshot(at rows: Int) -> Snapshot {
         var k = Data()
         var v = Data()
-        if len % P != 0, !kPages.isEmpty {
-            k = Data(bytes: kPages[len / P].contents(), count: tailBytes)
-            v = Data(bytes: vPages[len / P].contents(), count: tailBytes)
+        let tail = (rows % P) * kvDim * MemoryLayout<Float16>.stride
+        if rows % P != 0, rows / P < kPages.count {
+            k = Data(bytes: kPages[rows / P].contents(), count: tail)
+            v = Data(bytes: vPages[rows / P].contents(), count: tail)
         }
-        return Snapshot(len: len, kTail: k, vTail: v)
+        return Snapshot(len: rows, kTail: k, vTail: v)
     }
 
     func restore(_ s: Snapshot) {

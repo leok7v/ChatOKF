@@ -28,7 +28,13 @@ public struct MemoryToolRunner: ToolRunner {
         } else {
             out = await inner.execute(name, args)
             if MemoryTools.pageTools.contains(name) {
-                out = await memories.keepPage(name, args, text: out)
+                let whole = name == "fetch_url"
+                    ? MemoryTools.arg(args, "url").flatMap { url in
+                        inner.memo.page(for: MemoryTools.href(url))
+                    } : nil
+                out = await memories.keepPage(
+                    name, args, text: out,
+                    body: whole ?? MemoryTools.unpaged(out))
             }
         }
         return out
@@ -195,6 +201,24 @@ public enum MemoryTools {
         }
         let offset = Int(arg(args, "offset") ?? "0") ?? 0
         return offset == 0 && out != nil && out != "pages/" ? out : nil
+    }
+
+    static let pagingMark = "\n...[truncated: bytes "
+
+    static func unpaged(_ text: String) -> String {
+        var out = text
+        let tail = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if tail.hasSuffix("]"),
+           let mark = text.range(of: MemoryTools.pagingMark,
+                                 options: .backwards) {
+            out = String(text[..<mark.lowerBound])
+        }
+        return out
+    }
+
+    static func href(_ url: String) -> String {
+        url.hasPrefix("http://") || url.hasPrefix("https://")
+            ? url : "https://" + url
     }
 
     static func pageFailed(_ text: String) -> Bool {

@@ -166,6 +166,90 @@ struct VLTowerTests {
         #expect(answer.lowercased().contains("dog"), "answer: \(answer)")
     }
 
+    @Test(needsQwenWeights) func aCancelledTurnStopsTheQwenTower() async {
+        let job = Task { () throws -> Int in
+            let gpu = try QwenMetalViT(path: try #require(qwenGgufPath))
+            let p = gpu.cfg.patchSize
+            withUnsafeCurrentTask { task in task?.cancel() }
+            return try gpu.forward(pixels: VLTowerTests.noise(16 * p, 16 * p),
+                                   gridH: 16, gridW: 16).count
+        }
+        await #expect(throws: CancellationError.self) {
+            try await job.value
+        }
+    }
+
+    @Test(needsQwenWeights) func aStopEndsTheQwenTowerWithinOneLayer() throws {
+        let gpu = try QwenMetalViT(path: try #require(qwenGgufPath))
+        let p = gpu.cfg.patchSize
+        var asked = 0
+        #expect(throws: CancellationError.self) {
+            try gpu.forward(pixels: pixels(16 * p, 16 * p), gridH: 16,
+                            gridW: 16) {
+                asked += 1
+                return asked == 3
+            }
+        }
+        #expect(asked == 3)
+    }
+
+    private static func noise(_ w: Int, _ h: Int) -> [Float] {
+        (0 ..< w * h * 3).map { i in Float((i * 7919) % 255) / 127.5 - 1 }
+    }
+
+    private static func gemmaCut(_ chat: GemmaChat) throws
+        -> (pixels: [Float], pos: [(Int, Int)]) {
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("fixtures/ViT-512x382.jpeg")
+        let patch = try Gemma4Patchify(chat.model)
+        let img = try #require(VisionPreprocess.decodeCapped(
+            try Data(contentsOf: url)))
+        return try #require(patch.patches(img,
+                                          budget: patch.patchBudget(70)))
+    }
+
+    @Test(needsGemmaWeights) func aCancelledTurnStopsTheGemmaTower() async {
+        let job = Task { () throws -> Int in
+            let chat = try GemmaChat(ggufPath: try #require(gemmaGgufPath))
+            let engine = try Gemma4MetalEngine(chat.model)
+            let tower = try Gemma4MetalViT(chat.model, ctx: engine.ctx)
+            let cut = try VLTowerTests.gemmaCut(chat)
+            withUnsafeCurrentTask { task in task?.cancel() }
+            return try tower.forward(pixels: cut.pixels, pos: cut.pos).count
+        }
+        await #expect(throws: CancellationError.self) {
+            try await job.value
+        }
+    }
+
+    @Test(needsGemmaWeights) func aStopEndsTheGemmaTowerWithinOneLayer()
+        throws {
+        let chat = try GemmaChat(ggufPath: try #require(gemmaGgufPath))
+        let engine = try Gemma4MetalEngine(chat.model)
+        let tower = try Gemma4MetalViT(chat.model, ctx: engine.ctx)
+        let cut = try VLTowerTests.gemmaCut(chat)
+        var asked = 0
+        #expect(throws: CancellationError.self) {
+            try tower.forward(pixels: cut.pixels, pos: cut.pos) {
+                asked += 1
+                return asked == 3
+            }
+        }
+        #expect(asked == 3)
+    }
+
+    @Test(.enabled(if: TestWeights.find("gemma-4-12B") != nil))
+    func aBlockwiseEngineFitsTheWidestImageInOneChunk() throws {
+        let path = try #require(TestWeights.find("gemma-4-12B"))
+        let model = try Gemma4Model(path: path)
+        #expect(model.cfg.blockwiseVision)
+        let engine = try Gemma4MetalEngine(model)
+        #expect(engine.chunkCapacity >= SoftTokens.widest,
+                "an image at the XL budget cannot ride one chunk")
+    }
+
     @Test(needsQwenWeights) func nativeGridMatchesAcrossEngines() throws {
         let path = try #require(qwenGgufPath)
         let cpu = try QwenViT(path: path)

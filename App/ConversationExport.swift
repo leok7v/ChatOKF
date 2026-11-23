@@ -38,8 +38,8 @@ enum ConversationExport {
         UserDefaults.standard.bool(forKey: reasoningKey)
     }
 
-    static func block(fromUser: Bool, text: String,
-                      reasoning: String) -> String {
+    static func block(fromUser: Bool, text: String, reasoning: String,
+                      cut: String = "") -> String {
         var out = fromUser ? "**You**\n\n" : "**Chat\u{1D52}\u{1D4F}F**\n\n"
         if !fromUser, includesReasoning, !reasoning.isEmpty {
             out += "_Thoughts_\n\n"
@@ -49,7 +49,9 @@ enum ConversationExport {
             }
             out += "\n"
         }
-        return out + text + "\n\n"
+        let ended = cut == ChatSession.memoryEnd
+            ? "_Stopped: out of memory_\n\n" : ""
+        return out + text + "\n\n" + ended
     }
 
     static func document(_ convo: ConversationStore.Convo)
@@ -57,7 +59,7 @@ enum ConversationExport {
         let stream = MarkdownStream()
         for (i, m) in convo.messages.enumerated() {
             stream.append(block(fromUser: m.fromUser, text: m.text,
-                                reasoning: m.reasoning))
+                                reasoning: m.reasoning, cut: m.cut ?? ""))
             stream.append(attached(m, i))
         }
         return stream.finish()
@@ -67,7 +69,7 @@ enum ConversationExport {
         let stream = MarkdownStream()
         for m in messages {
             stream.append(block(fromUser: m.fromUser, text: m.text,
-                                reasoning: m.reasoning))
+                                reasoning: m.reasoning, cut: m.cut))
         }
         return stream.finish()
     }

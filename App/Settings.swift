@@ -265,13 +265,20 @@ struct SettingsView: View {
     private func row<Control: View>(
         _ label: String, _ detail: String? = nil,
         @ViewBuilder control: () -> Control) -> some View {
+        rowLayout(label, detail.flatMap { d in d.isEmpty ? nil : Text(d) },
+                  control: control)
+    }
+
+    private func rowLayout<Control: View>(
+        _ label: String, _ detail: Text?,
+        @ViewBuilder control: () -> Control) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 12) {
                 Text(label)
                 Spacer(minLength: 12)
                 control()
             }
-            if let detail, !detail.isEmpty { explain(detail) }
+            if let detail { explained(detail) }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 11)
@@ -297,6 +304,47 @@ struct SettingsView: View {
             Toggle("", isOn: isOn)
                 .labelsHidden()
                 .toggleStyle(.switch)
+        }
+    }
+
+    static let paneScheme = "chatokf-settings"
+
+    private var webAccessDetail: AttributedString {
+        var link = AttributedString("Privacy")
+        link.link = URL(string: SettingsView.paneScheme + ":privacy")
+        link.swiftUI.foregroundColor = .accentColor
+        return AttributedString("Search, Wikipedia, pages, headlines and "
+                                + "weather. What is searched for leaves this "
+                                + "device. See ")
+            + link + AttributedString(" for details.")
+    }
+
+    private var webAccessRow: some View {
+        rowLayout("Web Access", Text(webAccessDetail)) {
+            Toggle("", isOn: Binding(
+                get: { model.webAccess },
+                set: { on in model.setAccess(web: on) }
+            ))
+            .labelsHidden()
+            .toggleStyle(.switch)
+        }
+        .environment(\.openURL, OpenURLAction { url in openPane(url) })
+    }
+
+    private func openPane(_ url: URL) -> OpenURLAction.Result {
+        var out = OpenURLAction.Result.systemAction
+        if url.scheme == SettingsView.paneScheme {
+            show(.privacy)
+            out = .handled
+        }
+        return out
+    }
+
+    private func show(_ pane: Category) {
+        if isOS {
+            path.append(pane)
+        } else {
+            model.settingsCategory = pane
         }
     }
 
@@ -609,9 +657,11 @@ struct SettingsView: View {
 
     private var imageRows: some View {
         wideRow("Images",
-                "How closely a picture is looked at, about "
-                + "\(model.imageBudget.tokens) tokens. Larger sees more and "
-                + "takes longer.") {
+                "How closely a picture is looked at"
+                + (model.pictureSeconds.map { s in
+                    ", " + ChatModel.lookCost(s) + " a picture"
+                } ?? "")
+                + ". Larger sees more and takes longer.") {
             Picker("Image detail", selection: $model.imageBudget) {
                 ForEach(ChatModel.ImageBudget.allCases) { size in
                     Text(size.rawValue).tag(size)
@@ -728,14 +778,7 @@ struct SettingsView: View {
                               $model.suggestFollowups)
                     hairline
                 }
-                switchRow("Web Access",
-                          "Search, Wikipedia, pages, headlines and weather. "
-                          + "What is searched for leaves this device. See "
-                          + "Privacy for details.",
-                          Binding(
-                    get: { model.webAccess },
-                    set: { on in model.setAccess(web: on) }
-                ))
+                webAccessRow
             }
             heading("Attachments")
             card {
@@ -901,7 +944,7 @@ struct SettingsView: View {
                     resumableRow
                 }
             }
-            if model.memoriesSupported, model.hasMemories || unlocked {
+            if model.memoriesSupported, !model.memoryList.isEmpty {
                 card {
                     wideRow(nil,
                             "Delete every memory. The conversations stay.") {
@@ -1071,13 +1114,7 @@ struct SettingsView: View {
                                                countStyle: .file))
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
-                Button("Manage") {
-                    if isOS {
-                        path.append(.models)
-                    } else {
-                        model.settingsCategory = .models
-                    }
-                }
+                Button("Manage") { show(.models) }
             }
         }
     }
@@ -1178,7 +1215,11 @@ struct SettingsView: View {
     }
 
     private func explain(_ text: String) -> some View {
-        Text(text)
+        explained(Text(text))
+    }
+
+    private func explained(_ text: Text) -> some View {
+        text
             .appFont(.callout)
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)

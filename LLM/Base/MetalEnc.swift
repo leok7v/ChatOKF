@@ -1267,6 +1267,37 @@ struct MetalEnc {
         }
     }
 
+    func kvShift(kAddr: MTLBuffer, vAddr: MTLBuffer, pages: [MTLResource],
+                 scratch: MTLBuffer, rope: KVRope, from: Int, rows: Int,
+                 delta: Int, P: Int) {
+        precondition(!sync.grouped,
+                     "kv_shift: the scatter reads what the gather wrote, so "
+                     + "it needs the barrier a group would drop")
+        var a = KVShiftArgs(kvDim: UInt32(rope.kvDim),
+                            headDim: UInt32(rope.headDim),
+                            nRot: UInt32(rope.nRot), base: rope.base,
+                            from: UInt32(from), rows: UInt32(rows),
+                            delta: UInt32(delta), P: UInt32(P))
+        let vOff = rows * rope.kvDim * MemoryLayout<Float16>.stride
+        e.useResources(pages, usage: [.read, .write])
+        grid1D("kv_shift_gather", rows * rope.kvDim) { e in
+            e.setBuffer(kAddr, offset: 0, index: 0)
+            e.setBuffer(vAddr, offset: 0, index: 1)
+            e.setBuffer(scratch, offset: 0, index: 2)
+            e.setBuffer(scratch, offset: vOff, index: 3)
+            e.setBytes(&a, length: MemoryLayout<KVShiftArgs>.stride, index: 4)
+        }
+        e.memoryBarrier(scope: .buffers)
+        grid1D("kv_shift_scatter", rows * rope.kvDim) { e in
+            e.setBuffer(scratch, offset: 0, index: 0)
+            e.setBuffer(scratch, offset: vOff, index: 1)
+            e.setBuffer(kAddr, offset: 0, index: 2)
+            e.setBuffer(vAddr, offset: 0, index: 3)
+            e.setBytes(&a, length: MemoryLayout<KVShiftArgs>.stride, index: 4)
+        }
+        e.memoryBarrier(scope: .buffers)
+    }
+
     func f16Gemm(_ w: MTLBuffer, X: MTLBuffer, out: MTLBuffer, K: Int, M: Int,
                  N: Int) {
         var a = F16WArgs(K: UInt32(K), M: UInt32(M))
@@ -1514,6 +1545,16 @@ struct RopeMBatchArgs {
 }
 struct KVBatchArgs {
     var kvDim: UInt32; var basePos: UInt32; var P: UInt32; var N: UInt32
+}
+struct KVShiftArgs {
+    var kvDim: UInt32; var headDim: UInt32; var nRot: UInt32; var base: Float
+    var from: UInt32; var rows: UInt32; var delta: UInt32; var P: UInt32
+}
+struct KVRope {
+    let kvDim: Int
+    let headDim: Int
+    let nRot: Int
+    let base: Float
 }
 struct AttnBatchArgs {
     var hd: UInt32; var nH: UInt32; var nKV: UInt32; var kvDim: UInt32

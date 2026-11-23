@@ -137,6 +137,9 @@ extension Markdown {
                     out.append((start, math))
                 }
                 kept(tailOf: start, at: i)
+            } else if let display = bracketDisplay(lines, i) {
+                out.append((start, .math(display.tex)))
+                i = display.end + 1
             } else if isHeading(line) {
                 out.append((start, consumeHeading(lines, &i)))
             } else if isHR(line) {
@@ -1289,12 +1292,8 @@ extension Markdown {
             let line = lines[i]
             level = body.isEmpty ? 0 : setextLevel(line)
             let blank = line.trimmedOuter().isEmpty
-            let other = leadingSpaces(line) < 4 &&
-                        (isHeading(line) || isHR(line) || isFence(line) ||
-                         isMathFence(line) ||
-                         isTableStart(lines, i) || isQuoteStart(line) ||
-                         listInterrupts(line) || imageBlock(line) != nil ||
-                         isCommentStart(line))
+            let other = opensBlock(lines, i) ||
+                        bracketDisplay(lines, i) != nil
             if level > 0 {
                 i += 1
                 done = true
@@ -1309,6 +1308,46 @@ extension Markdown {
         return level > 0
             ? .heading(level: level, text: inline(raw.trimmedOuter()))
             : bareMath(raw) ?? .paragraph(inline(raw))
+    }
+
+    static func opensBlock(_ lines: [String], _ i: Int) -> Bool {
+        let line = lines[i]
+        return leadingSpaces(line) < 4 &&
+               (isHeading(line) || isHR(line) || isFence(line) ||
+                isMathFence(line) ||
+                isTableStart(lines, i) || isQuoteStart(line) ||
+                listInterrupts(line) || imageBlock(line) != nil ||
+                isCommentStart(line))
+    }
+
+    static func bracketDisplay(_ lines: [String], _ i: Int)
+        -> (end: Int, tex: String)? {
+        var result: (end: Int, tex: String)? = nil
+        if mathEnabled, leadingSpaces(lines[i]) < 4,
+           lines[i].trimmedOuter().hasPrefix("\\[") {
+            var j = i
+            var end: Int? = nil
+            while end == nil, j < lines.count,
+                  j == i || continuesDisplay(lines, j) {
+                if lines[j].trimmedOuter().hasSuffix("\\]") { end = j }
+                j += 1
+            }
+            if let end {
+                let joined = lines[i...end].map { l in l.trimmedOuter() }
+                    .joined(separator: "\n")
+                let tex = String(joined.dropFirst(2).dropLast(2))
+                if TeX.bracketsMaths(tex, display: true) {
+                    result = (end, tex.trimmedOuter())
+                }
+            }
+        }
+        return result
+    }
+
+    private static func continuesDisplay(_ lines: [String],
+                                         _ j: Int) -> Bool {
+        !lines[j].trimmedOuter().isEmpty && setextLevel(lines[j]) == 0 &&
+            !opensBlock(lines, j)
     }
 
     static func setextLevel(_ line: String) -> Int {
@@ -1326,42 +1365,11 @@ extension Markdown {
     // around it, and the paragraph then reads as a wall of backslashes.
     private static func bareMath(_ raw: String) -> Block? {
         var result: Block? = nil
-        if mathEnabled, opensWithControlWord(raw), !hasProseWord(raw),
+        if mathEnabled, opensWithControlWord(raw), !TeX.readsAsProse(raw),
            TeX.parses(raw) {
             result = .math(raw)
         }
         return result
-    }
-
-    // Parsing cleanly is not enough: neighbouring letters multiply, so a
-    // run of three letters outside braces is prose wearing a backslash.
-    private static func hasProseWord(_ raw: String) -> Bool {
-        var depth = 0
-        var run = 0
-        var found = false
-        var inCommand = false
-        for ch in raw {
-            let namesCommand = inCommand && ch.isLetter
-            if ch == "\\" {
-                inCommand = true
-                run = 0
-            } else if !namesCommand {
-                inCommand = false
-                if ch == "{" {
-                    depth += 1
-                    run = 0
-                } else if ch == "}" {
-                    depth = max(depth - 1, 0)
-                    run = 0
-                } else if ch.isLetter, ch.isASCII, depth == 0 {
-                    run += 1
-                    if run >= 3 { found = true }
-                } else {
-                    run = 0
-                }
-            }
-        }
-        return found
     }
 
     private static func opensWithControlWord(_ raw: String) -> Bool {

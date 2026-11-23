@@ -199,9 +199,12 @@ extension DocumentText {
             textTable.layoutAlgorithm = .automaticLayoutAlgorithm
             // The shares leave room for the padding, or the table wants 100%
             // plus padding and the last columns are squeezed off.
-            let shares = TableMetrics.pointWidths(
-                headers: cells.headers, rows: cells.rows,
-                available: contentBudget(cols: cols))
+            let shares = TableMetrics.trailingShares(
+                naturals: textWidths(cells), width: width,
+                budget: contentBudget(cols: cols))
+                ?? TableMetrics.pointWidths(
+                    headers: cells.headers, rows: cells.rows,
+                    available: contentBudget(cols: cols))
             var rowIdx = 0
             if !cells.header.isEmpty {
                 m.append(tableRow(cells.header, table: textTable,
@@ -235,6 +238,22 @@ extension DocumentText {
             m.append(NSAttributedString(string: "\n"))
         }
         return m
+    }
+
+    private static func textWidths(_ cells: TableCells) -> [CGFloat] {
+        var out = [CGFloat](repeating: 0, count: cells.cols)
+        var pictured = false
+        for row in [cells.header] + cells.body {
+            for (c, cell) in row.enumerated() where c < cells.cols {
+                let whole = NSRange(location: 0, length: cell.text.length)
+                cell.text.enumerateAttribute(.attachment, in: whole,
+                                             options: []) { value, _, _ in
+                    if value != nil { pictured = true }
+                }
+                out[c] = max(out[c], attributedWidth(cell.text))
+            }
+        }
+        return pictured ? [] : out
     }
 
     private static func tableRow(_ cells: [TableCell], table: NSTextTable,

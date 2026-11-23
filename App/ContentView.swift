@@ -102,7 +102,10 @@ struct ContentView: View {
     var body: some View {
         content
             .modifier(OptionKeyMonitor(down: $model.optionDown))
-            .preferredColorScheme(model.theme.scheme)
+            .preferredColorScheme(isOS ? model.theme.scheme : nil)
+            .onChange(of: model.theme, initial: true) { _, theme in
+                applyAppearance(theme.scheme)
+            }
             .environment(\.appTextScale, model.textScale)
             .font(appTextFont(.body, model.textScale))
             .onAppear {
@@ -228,11 +231,12 @@ struct ContentView: View {
     }
 
     private var revealHidden: some Gesture {
-        LongPressGesture(minimumDuration: 2).onEnded { _ in
-            dismissKeyboard()
-            model.revealHidden()
-            closeSidebar()
-        }
+        LongPressGesture(minimumDuration: 1, maximumDistance: 40)
+            .onEnded { _ in
+                dismissKeyboard()
+                model.revealHidden()
+                closeSidebar()
+            }
     }
 
     private var trailingButtons: some View {
@@ -570,24 +574,49 @@ struct ContentView: View {
         }
     }
 
+    private struct Downloading {
+        let name: String
+        let fraction: Double
+        let counter: String
+    }
+
+    private var downloading: Downloading? {
+        var out: Downloading? = nil
+        if model.downloadTotal > 0 {
+            out = Downloading(name: Models.display(model.modelName),
+                              fraction: model.downloadFraction,
+                              counter: model.downloadCounter)
+        } else if let pack = model.packFetch {
+            let done = Int64(model.packFraction * Double(pack.bytes))
+            out = Downloading(
+                name: pack.label.prefix(1).uppercased()
+                    + pack.label.dropFirst(),
+                fraction: model.packFraction,
+                counter: ByteCountFormatter.string(fromByteCount: done,
+                                                   countStyle: .file)
+                    + " of " + pack.sizeText)
+        }
+        return out
+    }
+
     private var downloadProgress: some View {
         VStack(spacing: 16) {
-            ProgressView(value: model.downloadFraction)
+            ProgressView(value: downloading?.fraction ?? 0)
                 .frame(maxWidth: 320)
             VStack(spacing: 4) {
-                Text(model.downloadTotal > 0
-                     ? "Downloading" : "Preparing download…")
+                Text(downloading == nil ? "Preparing download…"
+                                        : "Downloading")
                     .appFont(.headline)
-                if model.downloadTotal > 0 {
-                    Text(model.downloadStage)
+                if let item = downloading {
+                    Text(item.name)
                         .appFont(.subheadline)
                         .foregroundStyle(.secondary)
-                    Text(model.downloadCounter)
+                    Text(item.counter)
                         .appFont(.callout)
                         .foregroundStyle(.secondary)
                 }
             }
-            if model.downloadTotal > 0 {
+            if downloading != nil {
                 stageWhimsical(.downloading, $downloadingPhrase)
             }
             if let eta = model.downloadETA {
@@ -1012,6 +1041,10 @@ struct ContentView: View {
                                } ?? false)
                             .id(m.id)
                     }
+                    if model.recalling {
+                        WaitingMark()
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
                     if model.showSamples { samplePills }
                     Color.clear
                         .frame(height: max(tailInset, 1))
@@ -1093,10 +1126,15 @@ struct ContentView: View {
             .overlay { toolCallout }
             .overlay(alignment: .bottom) {
                 VStack(spacing: 8) {
-                    if isReasoningLive { quickAnswerButton }
+                    if isReasoningLive, !model.quickAsked {
+                        quickAnswerButton
+                            .transition(.scale(scale: 0.6)
+                                .combined(with: .opacity))
+                    }
                     if !follow { toBottomButton(proxy) }
                 }
                 .padding(.bottom, 10)
+                .animation(.easeOut(duration: 0.3), value: model.quickAsked)
             }
         }
     }
@@ -1250,10 +1288,15 @@ struct ContentView: View {
                     } else if !isLive(m) {
                         AnswerActions(text: answer, title: title)
                     }
+                    if outOfMemory(m) { memoryNote(answered: true) }
+                } else if outOfMemory(m) {
+                    memoryNote(answered: false)
                 } else if m.loopStopped {
                     loopStopNote
                 } else if isAnswerless(m) {
                     noAnswerNote(m)
+                } else if m.reasoning.isEmpty, m.toolRounds.isEmpty {
+                    WaitingMark()
                 }
             }
             .frame(maxWidth: m.fromUser ? nil : answerColumn,
@@ -1367,6 +1410,28 @@ struct ContentView: View {
             .appFont(.caption)
             .italic()
             .foregroundStyle(.secondary)
+    }
+
+    private func outOfMemory(_ m: Message) -> Bool {
+        !m.fromUser && m.cut == ChatSession.memoryEnd
+    }
+
+    private func memoryNote(answered: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label((answered ? "Stopped" : "Not answered")
+                  + ": this conversation is using most of the memory.",
+                  systemImage: "exclamationmark.triangle.fill")
+                .appFont(.callout)
+                .foregroundStyle(.orange)
+            Button("Start a new chat", action: openNewChat)
+                .appFont(.callout)
+                .fontWeight(.semibold)
+                .buttonStyle(.bordered)
+                .disabled(model.locked)
+        }
+        .padding(10)
+        .background(Color.orange.opacity(0.12),
+                    in: RoundedRectangle(cornerRadius: 12))
     }
 
     private var loopStopNote: some View {
@@ -1492,6 +1557,26 @@ private struct PlayGlyph: View {
             .overlay { Circle().stroke(.white.opacity(0.35), lineWidth: 1) }
             .shadow(color: .black.opacity(0.3), radius: 6, y: 2)
             .allowsHitTesting(false)
+    }
+
+}
+
+private struct WaitingMark: View {
+
+    @State private var shown = false
+
+    var body: some View {
+        ProgressView()
+            .controlSize(.regular)
+            .padding(10)
+            .opacity(shown ? 0.6 : 0)
+            .task {
+                try? await Task.sleep(for: .milliseconds(500))
+                if !Task.isCancelled {
+                    withAnimation(.easeIn(duration: 0.4)) { shown = true }
+                }
+            }
+            .accessibilityLabel("Working")
     }
 
 }

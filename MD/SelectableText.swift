@@ -9,12 +9,72 @@ enum AtomicKind: String {
 // Where the copy overlay sets a button, measured in from the right edge of the
 // block it belongs to.
 let copyButtonGutter: CGFloat = 26
+let copyButtonSide: CGFloat = 22
 
 let atomicKindKey = NSAttributedString.Key("MD.atomic.kind")
 let atomicIdKey = NSAttributedString.Key("MD.atomic.id")
 // The block's SOURCE text for the in-block copy button, so Copy yields
 // the original markdown rather than the flattened render.
 let atomicCopyKey = NSAttributedString.Key("MD.atomic.copy")
+
+struct AtomicRun {
+    let id: String
+    let range: NSRange
+    let copy: String
+    let kind: String?
+}
+
+func richCopy(_ run: AtomicRun) -> String? {
+    var blocks: [Markdown.Block] = []
+    if run.kind == AtomicKind.table.rawValue {
+        blocks = Markdown.parse(run.copy).items.map { item in item.block }
+    } else if run.kind == AtomicKind.math.rawValue {
+        blocks = [.math(run.copy)]
+    }
+    return blocks.isEmpty ? nil : pasteable(
+        HtmlExport.render(blocks, title: "", images: [:]))
+}
+
+private func pasteable(_ html: String) -> String {
+    html.replacingOccurrences(
+        of: "<table style=\"",
+        with: "<table width=\"100%\" style=\"width:100%;")
+        .replacingOccurrences(
+            of: "<body>",
+            with: "<body style=\"font-family:-apple-system,Helvetica,"
+                + "sans-serif\">")
+}
+
+func copyRun(_ run: AtomicRun) {
+    platformSetClipboard(plainCopy(run), html: richCopy(run))
+}
+
+func plainCopy(_ run: AtomicRun) -> String {
+    var out = run.copy
+    if run.kind == AtomicKind.table.rawValue,
+       case .table(let headers, let rows, _)
+           = Markdown.parse(run.copy).items.first?.block {
+        out = TableMetrics.serializeReadable(headers: headers, rows: rows)
+    }
+    return out
+}
+
+func atomicRuns(in storage: NSAttributedString) -> [AtomicRun] {
+    var runs: [AtomicRun] = []
+    let full = NSRange(location: 0, length: storage.length)
+    storage.enumerateAttribute(atomicIdKey, in: full,
+                               options: []) { value, range, _ in
+        let copy = storage.attribute(atomicCopyKey, at: range.location,
+                                     effectiveRange: nil) as? String
+        if let id = value as? String, let copy {
+            runs.append(AtomicRun(
+                id: id, range: range, copy: copy,
+                kind: storage.attribute(atomicKindKey, at: range.location,
+                                        effectiveRange: nil) as? String))
+        }
+    }
+    return runs
+}
 
 // A read-only, self-sizing, selectable native text view.
 struct SelectableText: View {

@@ -495,8 +495,14 @@ import Foundation
             let suggested = CTTypesetterSuggestLineBreak(
                 setter, at, Double(max(width, 1)))
             let take = min(max(suggested, 1), cell.length - at)
-            out.append(cell.attributedSubstring(
-                from: NSRange(location: at, length: take)))
+            let line = NSMutableAttributedString(
+                attributedString: cell.attributedSubstring(
+                    from: NSRange(location: at, length: take)))
+            if line.string.hasSuffix(Markdown.lineBreak) {
+                line.deleteCharacters(in: NSRange(location: line.length - 1,
+                                                  length: 1))
+            }
+            out.append(line)
             at += take
         }
         return out
@@ -688,7 +694,7 @@ import Foundation
             .foregroundColor: platformSecondaryColor,
             .paragraphStyle: para,
         ]
-        var joins = false
+        let joins: Bool
         switch first {
             case .paragraph?, .list?, .heading?: joins = true
             default: joins = false
@@ -765,10 +771,16 @@ import Foundation
                        range: full)
         m.addAttribute(atomicIdKey, value: id, range: full)
         m.addAttribute(atomicCopyKey, value: text, range: full)
-        m.addAttribute(.paragraphStyle, value: blockParagraph(style),
-                       range: full)
+        let para = blockParagraph(style)
+        para.headIndent = codeHang(font)
+        m.addAttribute(.paragraphStyle, value: para, range: full)
         m.append(NSAttributedString(string: "\n"))
         return m
+    }
+
+    static func codeHang(_ font: PlatformFont) -> CGFloat {
+        NSAttributedString(string: "00", attributes: [.font: font])
+            .size().width
     }
 
     // A display carries its TeX on atomicCopyKey so Copy yields the

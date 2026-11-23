@@ -47,7 +47,7 @@ final class MathFindTests: XCTestCase {
     }
 
     func testBackslashBracketDisplay() {
-        let src = #"\[ i = e^{i\pi/2} \quad \text{(since } x\text{)} \]"#
+        let src = #"so \[ i = e^{i\pi/2} \quad \text{(since } x\text{)} \]"#
         let doc = Markdown.parse(src, math: true)
         let text = paragraphText(doc)
         XCTAssertFalse(text.contains("\\["))
@@ -60,7 +60,10 @@ final class MathFindTests: XCTestCase {
         let src = "\\[\n\\begin{aligned}\ni^i &= (e^{i\\pi/2})^i \\\\\n"
             + "&= e^{-\\pi/2}\n\\end{aligned}\n\\]"
         let doc = Markdown.parse(src, math: true)
-        let text = paragraphText(doc)
+        var tex = ""
+        if case .math(let body) = doc.items.first?.block { tex = body }
+        XCTAssertTrue(tex.hasPrefix("\\begin{aligned}"), "got: \(tex)")
+        let text = String(TeX.render(tex, display: true).characters)
         XCTAssertFalse(text.contains("begin"), "got: \(text)")
         XCTAssertFalse(text.contains("&"), "got: \(text)")
         XCTAssertFalse(text.contains("\\"), "got: \(text)")

@@ -100,15 +100,27 @@ import TTS
         if pack == .ready {
             if let wanted { mode = wanted }
             wanted = nil
-        } else {
+        } else if pack == .missing {
             fetch()
         }
     }
 
+    func carrying(_ fraction: Double) {
+        if pack != .ready, fetchTask == nil {
+            pack = .fetching
+            fetchFraction = fraction
+        }
+    }
+
     func adoptPack() {
-        if pack == .missing, VoicePack.onDisk {
-            pack = .ready
-            mode = VoiceSession.startMode()
+        if pack != .ready, fetchTask == nil {
+            let landed = VoicePack.onDisk
+            pack = landed ? .ready : .missing
+            if landed {
+                mode = VoiceTerms.accepted
+                    ? wanted ?? VoiceSession.startMode() : .off
+                wanted = nil
+            }
         }
     }
 

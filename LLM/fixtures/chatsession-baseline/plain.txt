@@ -1,0 +1,111 @@
+== turn 1
+answer: "Hello there."
+save 0
+sampler banned=0 dry=5 verbatim=false mask=false overthink=0.0
+reset
+extend <|im_start|>system\nYou are a bot.<|im_end|>\n<|im_start|>user\nhello<|im_end|>\n -> {1001}
+mark 77
+extend <|im_start|>assistant\n -> {1001}
+decode {1001} -> {-1}
+kv: <|im_start|>system\nYou are a bot.<|im_end|>\n<|im_start|>user\nhello<|im_end|>\n<|im_start|>assistant\n{1001}
+metrics: ctx=100 think=0 content=1 end=eos overrun=0 outcome=answered
+committed: 77 replay: 77
+== turn 2
+answer: "The answer is 4."
+save 100
+sampler banned=0 dry=5 verbatim=false mask=false overthink=0.0
+rewind 77
+extend <|im_start|>assistant\nHello there.<|im_end|>\n<|im_start|>user\nwhat is 2 + 2?<|im_end|>\n -> {1002}
+mark 164
+extend <|im_start|>assistant\n -> {1002}
+sampler banned=0 dry=5 verbatim=true mask=false overthink=0.0
+rewind 164
+extend <|im_start|>assistant\n<tool_call><function=calculator></function></tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\n4\n</tool_response><|im_end|>\n -> {1003}
+mark 314
+extend <|im_start|>assistant\n -> {1003}
+decode {1003} -> {-1}
+kv: <|im_start|>system\nYou are a bot.<|im_end|>\n<|im_start|>user\nhello<|im_end|>\n<|im_start|>assistant\nHello there.<|im_end|>\n<|im_start|>user\nwhat is 2 + 2?<|im_end|>\n<|im_start|>assistant\n<tool_call><function=calculator></function></tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\n4\n</tool_response><|im_end|>\n<|im_start|>assistant\n{1003}
+metrics: ctx=337 think=0 content=2 end=eos overrun=0 outcome=answered
+committed: 314 replay: 164
+== turn 3
+answer: "Rayleigh scattering."
+save 337
+sampler banned=0 dry=5 verbatim=false mask=false overthink=0.0
+rewind 314
+extend <|im_start|>assistant\nThe answer is 4.<|im_end|>\n<|im_start|>user\nwhy is the sky blue<|im_end|>\n -> {1004}
+mark 410
+extend <|im_start|>assistant\n -> {1004}
+decode {1004} -> {-1}
+kv: <|im_start|>system\nYou are a bot.<|im_end|>\n<|im_start|>user\nhello<|im_end|>\n<|im_start|>assistant\nHello there.<|im_end|>\n<|im_start|>user\nwhat is 2 + 2?<|im_end|>\n<|im_start|>assistant\n<tool_call><function=calculator></function></tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\n4\n</tool_response><|im_end|>\n<|im_start|>assistant\nThe answer is 4.<|im_end|>\n<|im_start|>user\nwhy is the sky blue<|im_end|>\n<|im_start|>assistant\n{1004}
+metrics: ctx=433 think=0 content=1 end=eos overrun=0 outcome=answered
+committed: 410 replay: 260
+== title
+answer: "Sky Color Question"
+save 433
+sampler banned=0 dry=5 verbatim=false mask=false overthink=0.0
+extend <|im_end|>\n<|im_start|>user\nGive this conversation a title of two to four words that names the subject it is about. Plain words on one line. Reply with the title only.<|im_end|>\n<|im_start|>assistant\n```text\n -> {1005}
+decode {1005} -> {-1}
+load 433
+kv: <|im_start|>system\nYou are a bot.<|im_end|>\n<|im_start|>user\nhello<|im_end|>\n<|im_start|>assistant\nHello there.<|im_end|>\n<|im_start|>user\nwhat is 2 + 2?<|im_end|>\n<|im_start|>assistant\n<tool_call><function=calculator></function></tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\n4\n</tool_response><|im_end|>\n<|im_start|>assistant\nThe answer is 4.<|im_end|>\n<|im_start|>user\nwhy is the sky blue<|im_end|>\n<|im_start|>assistant\n{1004}
+metrics: ctx=433 think=0 content=1 end=eos overrun=0 outcome=answered
+committed: 410 replay: 260
+== turn 4
+answer: "Red light wins."
+save 433
+sampler banned=0 dry=5 verbatim=false mask=false overthink=0.0
+rewind 410
+extend <|im_start|>assistant\nRayleigh scattering.<|im_end|>\n<|im_start|>user\nand at sunset?<|im_end|>\n -> {1006}
+mark 505
+extend <|im_start|>assistant\n -> {1006}
+decode {1006} -> {-1}
+kv: <|im_start|>system\nYou are a bot.<|im_end|>\n<|im_start|>user\nhello<|im_end|>\n<|im_start|>assistant\nHello there.<|im_end|>\n<|im_start|>user\nwhat is 2 + 2?<|im_end|>\n<|im_start|>assistant\n<tool_call><function=calculator></function></tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\n4\n</tool_response><|im_end|>\n<|im_start|>assistant\nThe answer is 4.<|im_end|>\n<|im_start|>user\nwhy is the sky blue<|im_end|>\n<|im_start|>assistant\nRayleigh scattering.<|im_end|>\n<|im_start|>user\nand at sunset?<|im_end|>\n<|im_start|>assistant\n{1006}
+metrics: ctx=528 think=0 content=1 end=eos overrun=0 outcome=answered
+committed: 505 replay: 355
+== park
+answer: ""
+rewind 505
+park 505
+kv: <|im_start|>system\nYou are a bot.<|im_end|>\n<|im_start|>user\nhello<|im_end|>\n<|im_start|>assistant\nHello there.<|im_end|>\n<|im_start|>user\nwhat is 2 + 2?<|im_end|>\n<|im_start|>assistant\n<tool_call><function=calculator></function></tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\n4\n</tool_response><|im_end|>\n<|im_start|>assistant\nThe answer is 4.<|im_end|>\n<|im_start|>user\nwhy is the sky blue<|im_end|>\n<|im_start|>assistant\nRayleigh scattering.<|im_end|>\n<|im_start|>user\nand at sunset?<|im_end|>\n
+metrics: ctx=528 think=0 content=1 end=eos overrun=0 outcome=answered
+committed: 505 replay: 355
+== resume
+answer: ""
+resume 505
+mark 505
+kv: <|im_start|>system\nYou are a bot.<|im_end|>\n<|im_start|>user\nhello<|im_end|>\n<|im_start|>assistant\nHello there.<|im_end|>\n<|im_start|>user\nwhat is 2 + 2?<|im_end|>\n<|im_start|>assistant\n<tool_call><function=calculator></function></tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\n4\n</tool_response><|im_end|>\n<|im_start|>assistant\nThe answer is 4.<|im_end|>\n<|im_start|>user\nwhy is the sky blue<|im_end|>\n<|im_start|>assistant\nRayleigh scattering.<|im_end|>\n<|im_start|>user\nand at sunset?<|im_end|>\n
+metrics: ctx=505 think=0 content=0 end= overrun=0 outcome=answered
+committed: 505 replay: 355
+== turn 5
+answer: "You are welcome."
+save 505
+sampler banned=0 dry=5 verbatim=false mask=false overthink=0.0
+rewind 505
+extend <|im_start|>assistant\nRed light wins.<|im_end|>\n<|im_start|>user\nthanks<|im_end|>\n -> {1007}
+mark 587
+extend <|im_start|>assistant\n -> {1007}
+decode {1007} -> {-1}
+kv: <|im_start|>system\nYou are a bot.<|im_end|>\n<|im_start|>user\nhello<|im_end|>\n<|im_start|>assistant\nHello there.<|im_end|>\n<|im_start|>user\nwhat is 2 + 2?<|im_end|>\n<|im_start|>assistant\n<tool_call><function=calculator></function></tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\n4\n</tool_response><|im_end|>\n<|im_start|>assistant\nThe answer is 4.<|im_end|>\n<|im_start|>user\nwhy is the sky blue<|im_end|>\n<|im_start|>assistant\nRayleigh scattering.<|im_end|>\n<|im_start|>user\nand at sunset?<|im_end|>\n<|im_start|>assistant\nRed light wins.<|im_end|>\n<|im_start|>user\nthanks<|im_end|>\n<|im_start|>assistant\n{1007}
+metrics: ctx=610 think=0 content=1 end=eos overrun=0 outcome=answered
+committed: 587 replay: 437
+== turn 6
+answer: "Sure."
+save 610
+sampler banned=0 dry=5 verbatim=false mask=false overthink=0.0
+rewind 587
+extend <|im_start|>assistant\nYou are welcome.<|im_end|>\n<|im_start|>user\none more<|im_end|>\n -> {1008}
+mark 672
+extend <|im_start|>assistant\n -> {1008}
+decode {1008} -> {-1}
+kv: <|im_start|>system\nYou are a bot.<|im_end|>\n<|im_start|>user\nhello<|im_end|>\n<|im_start|>assistant\nHello there.<|im_end|>\n<|im_start|>user\nwhat is 2 + 2?<|im_end|>\n<|im_start|>assistant\n<tool_call><function=calculator></function></tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\n4\n</tool_response><|im_end|>\n<|im_start|>assistant\nThe answer is 4.<|im_end|>\n<|im_start|>user\nwhy is the sky blue<|im_end|>\n<|im_start|>assistant\nRayleigh scattering.<|im_end|>\n<|im_start|>user\nand at sunset?<|im_end|>\n<|im_start|>assistant\nRed light wins.<|im_end|>\n<|im_start|>user\nthanks<|im_end|>\n<|im_start|>assistant\nYou are welcome.<|im_end|>\n<|im_start|>user\none more<|im_end|>\n<|im_start|>assistant\n{1008}
+metrics: ctx=695 think=0 content=1 end=eos overrun=0 outcome=answered
+committed: 672 replay: 522
+== follow-up
+answer: "Why is the sunset red?"
+save 695
+sampler banned=0 dry=5 verbatim=false mask=false overthink=0.0
+extend <|im_end|>\n<|im_start|>user\nPick one specific detail from your last answer that the user would most want to know more about, and write the question they would type to ask about it. One sentence ending in a question mark. Never repeat a question already asked. Output only the question.<|im_end|>\n<|im_start|>assistant\n```text\n -> {1009}
+decode {1009} -> {-1}
+load 695
+kv: <|im_start|>system\nYou are a bot.<|im_end|>\n<|im_start|>user\nhello<|im_end|>\n<|im_start|>assistant\nHello there.<|im_end|>\n<|im_start|>user\nwhat is 2 + 2?<|im_end|>\n<|im_start|>assistant\n<tool_call><function=calculator></function></tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\n4\n</tool_response><|im_end|>\n<|im_start|>assistant\nThe answer is 4.<|im_end|>\n<|im_start|>user\nwhy is the sky blue<|im_end|>\n<|im_start|>assistant\nRayleigh scattering.<|im_end|>\n<|im_start|>user\nand at sunset?<|im_end|>\n<|im_start|>assistant\nRed light wins.<|im_end|>\n<|im_start|>user\nthanks<|im_end|>\n<|im_start|>assistant\nYou are welcome.<|im_end|>\n<|im_start|>user\none more<|im_end|>\n<|im_start|>assistant\n{1008}
+metrics: ctx=695 think=0 content=1 end=eos overrun=0 outcome=answered
+committed: 672 replay: 522

@@ -3,7 +3,7 @@ import Observation
 
 @MainActor @Observable public final class Memories {
 
-    public struct Recall {
+    public struct Recall: Sendable {
         public let ids: [String]
         public let block: String
         public let standout: Float
@@ -59,6 +59,7 @@ import Observation
     private var floor: Float = 0
 
     public private(set) var isOpen = false
+    public private(set) var missRatio: Float = 0
     public internal(set) var list: [MemoryRow] = []
     public internal(set) var trashed: [MemoryRow] = []
     public private(set) var revision = 0
@@ -175,7 +176,7 @@ import Observation
         return out + "\n"
     }
 
-    static func boundary(_ bytes: [UInt8], _ at: Int) -> Int {
+    nonisolated static func boundary(_ bytes: [UInt8], _ at: Int) -> Int {
         var end = min(at, bytes.count)
         while end > 0 && end < bytes.count && bytes[end] & 0xC0 == 0x80 {
             end -= 1
@@ -190,6 +191,7 @@ import Observation
     public func recall(_ question: String, also: [String], pp: Double,
                        excluding read: Set<String>) async -> Recall? {
         var out: Recall? = nil
+        missRatio = 0
         if isOpen, !concepts.isEmpty {
             let queries = [question] + also.filter { text in
                 !text.isEmpty
@@ -241,6 +243,7 @@ import Observation
             let unread = result.hits.first { hit in
                 !read.contains(hit.concept.id)
             }
+            missRatio = floor > 0 ? (unread?.relevance ?? 0) / floor : 0
             Diag.shared.report(.turn, String(
                 format: "[recall] nothing: top unread %.3f of %.3f, "
                     + "standout %.1f, %d of %d concepts fit, "
@@ -492,6 +495,11 @@ import Observation
         "nous",
     ]
 
+    nonisolated public static func mentionsSelf(_ said: String) -> Bool {
+        said.lowercased().split(whereSeparator: { c in !c.isLetter })
+            .contains { word in Memories.selfWords.contains(String(word)) }
+    }
+
     nonisolated public static func speaksOfSelf(_ said: String) -> Bool {
         let lower = said.lowercased()
         let tokens = lower.split(whereSeparator: { c in !c.isLetter })
@@ -672,10 +680,11 @@ import Observation
         return out
     }
 
-    func keepPage(_ name: String, _ args: [ToolArg],
-                  text: String) async -> String {
+    func keepPage(_ name: String, _ args: [ToolArg], text: String,
+                  body: String) async -> String {
         var out = text
-        if isOpen, let kept = await owner.keepPage(name, args, text: text) {
+        if isOpen, let kept = await owner.keepPage(name, args, text: text,
+                                                   body: body) {
             adopt(kept)
             if let id = MemoryTools.pageId(name, args) {
                 out += "\n[kept as note " + id + "]"

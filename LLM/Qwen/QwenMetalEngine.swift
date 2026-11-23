@@ -918,6 +918,55 @@ public final class QwenMetalEngine {
         }
     }
 
+    public func shift(keep: Int, count: Int) -> Bool {
+        let fits = ropeShift == 0 && specQueue.isEmpty && count > 0
+            && keep >= 0 && keep + count <= pos
+        return fits && moveRows(keep: keep, count: count)
+    }
+
+    private func moveRows(keep: Int, count: Int) -> Bool {
+        let c = cfg
+        let drafter = mtp.flatMap { d in
+            d.origin == 0 && d.pool.len >= keep + count ? d.pool : nil
+        }
+        let moved = Array(kvPool.values) + (drafter.map { p in [p] } ?? [])
+        let widest = moved.map { p in p.len - keep - count }.max() ?? 0
+        let rope = KVRope(kvDim: c.headDim * c.nHeadKV, headDim: c.headDim,
+                          nRot: c.nRot, base: c.ropeBase)
+        let scratch = moved.first?.shiftScratch(rows: widest)
+        gpuFault = false
+        let cb = ctx.queue.makeCommandBuffer()!
+        let e = cb.makeComputeCommandEncoder()!
+        let f = MetalEnc(ctx: ctx, e: e)
+        for pool in moved {
+            pool.encodeShift(f, keep: keep, count: count, rope: rope,
+                             scratch: scratch!)
+        }
+        e.endEncoding()
+        commitTimed(cb, "kvShift")
+        if !gpuFault {
+            for pool in moved { pool.truncate(to: pool.len - count) }
+            pos -= count
+            if drafter == nil { mtp?.reorigin(at: pos) }
+        }
+        return !gpuFault
+    }
+
+    public func shifted(_ b: Bookmark, keep: Int, count: Int) -> Bookmark? {
+        var out: Bookmark? = nil
+        if b.ropeShift == 0 && b.pos >= keep + count {
+            var kv: [Int: MetalKVPool.Snapshot] = [:]
+            for (il, s) in b.kv {
+                kv[il] = kvPool[il]!.snapshot(at: s.len - count)
+            }
+            out = Bookmark(pos: b.pos - count, ropeShift: 0,
+                           recSlot: b.recSlot, conv: b.conv, rec: b.rec,
+                           kv: kv, drafter: nil, specOrigin: b.pos - count,
+                           prev: b.prev)
+        }
+        return out
+    }
+
     private func copyIn(_ a: [Float], _ b: MTLBuffer) {
         a.withUnsafeBytes { raw in
             _ = memcpy(b.contents(), raw.baseAddress!, raw.count)

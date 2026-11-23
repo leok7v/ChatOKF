@@ -43,8 +43,9 @@ public enum TurnEvent: Sendable {
     var session: ChatSession?
     private var metaTask: Task<Void, Never>?
     private var workTask: Task<Void, Never>?
-    private var primingTask: Task<Void, Never>?
-    private var retiring: Task<Void, Never>?
+    private var lane: Task<Void, Never>?
+    private var primings = 0
+    public var priming: Bool { primings > 0 }
     private var currentToolRounds: [ToolRoundEvent] = []
 
     public private(set) var modelShape: ModelShape?
@@ -135,21 +136,35 @@ public enum TurnEvent: Sendable {
         }
     }
 
+    @discardableResult
+    func inLane<T: Sendable>(_ op: @escaping @MainActor () async -> T)
+        -> Task<T, Never> {
+        let prior = lane
+        let task = Task { @MainActor in
+            await prior?.value
+            return await op()
+        }
+        lane = Task { @MainActor in _ = await task.value }
+        return task
+    }
+
+    func cutMeta() {
+        if let running = metaTask {
+            metaTask = nil
+            session?.requestStop()
+            running.cancel()
+        }
+    }
+
     public func releaseSession(parking id: UUID? = nil) {
         let outgoing = session
-        let meta = metaTask
-        let prior = retiring
         let name = modelName
-        metaTask = nil
-        retiring = Task {
-            await prior?.value
-            outgoing?.requestStop()
-            meta?.cancel()
-            await meta?.value
+        cutMeta()
+        inLane {
             await outgoing?.endPriming()
             await outgoing?.quiesce()
             if let id, let outgoing {
-                await park(outgoing, as: id, model: name)
+                await self.park(outgoing, as: id, model: name)
             }
         }
         ggufBackend = nil
@@ -196,8 +211,7 @@ public enum TurnEvent: Sendable {
     public func buildGguf(name: String, path: String) async -> String? {
         memories.modelName = name
         releaseSession()
-        await retiring?.value
-        retiring = nil
+        await lane?.value
         let loaded = await Session.loadHeavy(name: name, path: path)
         await memories.awaitOpen()
         var failure: String? = Session.prepFailed
@@ -368,7 +382,8 @@ public enum TurnEvent: Sendable {
         return v > 0 ? v : 100
     }
 
-    private func recordRate(_ key: String, _ rate: Double) {
+    nonisolated private static func recordRate(_ key: String,
+                                               _ rate: Double) {
         if rate > 0 {
             let old = UserDefaults.standard.double(forKey: key)
             let ema = old > 0 ? 0.7 * old + 0.3 * rate : rate
@@ -377,11 +392,56 @@ public enum TurnEvent: Sendable {
     }
 
     private func recordTG(_ tg: Double) {
-        recordRate(Session.tgKey(modelName), tg)
+        Session.recordRate(Session.tgKey(modelName), tg)
     }
 
     private func recordPP(_ pp: Double) {
-        recordRate(Session.ppKey(modelName), pp)
+        Session.recordRate(Session.ppKey(modelName), pp)
+    }
+
+    nonisolated static func lookKey(_ name: String) -> String {
+        "look.\(name)"
+    }
+
+    public struct Look: Sendable {
+        let model: String
+        let eye: ModelShape.Eye
+        let textWeights: Int
+        let pp: Double
+    }
+
+    private var look: Look? {
+        modelShape.flatMap { shape in
+            shape.eye.map { eye in
+                Look(model: modelName, eye: eye,
+                     textWeights: shape.textWeights, pp: measuredPP)
+            }
+        }
+    }
+
+    public func pictureSeconds(_ softTokens: Int) -> Double? {
+        look.map { l in
+            let k = UserDefaults.standard.double(forKey: Session.lookKey(
+                l.model))
+            return ModelShape.pictureSeconds(
+                l.eye, textWeights: l.textWeights, softTokens: softTokens,
+                pp: l.pp, k: k > 0 ? k : l.eye.k)
+        }
+    }
+
+    nonisolated static func recordLook(_ look: Look?, rows: Int,
+                                       seconds: Double) {
+        if let look, rows > 0 {
+            let unit = ModelShape.lookSeconds(
+                look.eye, textWeights: look.textWeights, softTokens: rows,
+                pp: look.pp, k: 1)
+            Session.recordRate(Session.lookKey(look.model), seconds / unit)
+            Diag.shared.report(.turn, String(
+                format: "[look] %@ %d rows in %.1fs at pp %.0f: k %.2f, "
+                    + "kept %.2f", look.model, rows, seconds, look.pp,
+                seconds / unit, UserDefaults.standard.double(
+                    forKey: Session.lookKey(look.model))))
+        }
     }
 
     public func recall(_ question: String, also: [String],
@@ -402,11 +462,32 @@ public enum TurnEvent: Sendable {
                     found.searchSeconds, found.ids.joined(separator: " ")))
                 recalledIds.formUnion(found.ids)
                 out = found
-            } else if Models.judges(modelName), let session {
-                out = await judged(question, session,
-                                   excluding: recalledIds.union(own ?? []))
+            } else if Models.judges(modelName), session != nil,
+                      worthJudging(question) {
+                beginWork()
+                defer { endWork() }
+                cutMeta()
+                let read = recalledIds.union(own ?? [])
+                out = await inLane {
+                    await self.judged(question, excluding: read)
+                }.value
             }
             Footprint.report(.memory, "after recall")
+        }
+        return out
+    }
+
+    static let judgeNear: Float = 0.5
+
+    private func worthJudging(_ question: String) -> Bool {
+        let personal = Memories.mentionsSelf(question)
+        let near = memories.missRatio >= Session.judgeNear
+        let out = personal || (near && !priming)
+        if !out {
+            Diag.shared.report(.turn, String(
+                format: "[judge] skipped: miss at %.2f of the cut, %@",
+                memories.missRatio,
+                priming ? "the instructions are being read" : "not near"))
         }
         return out
     }
@@ -426,33 +507,45 @@ public enum TurnEvent: Sendable {
         return total > 0 ? (shares.first ?? 0) / total : 0
     }
 
+    private func judged(_ question: String,
+                        excluding read: Set<String>) async
+        -> Memories.Recall? {
+        var out: Memories.Recall? = nil
+        if let session {
+            await warming?.value
+            await session.quiesce()
+            out = await judged(question, session, excluding: read)
+        }
+        return out
+    }
+
     private func judged(_ question: String, _ session: ChatSession,
                         excluding read: Set<String>) async
         -> Memories.Recall? {
         var out: Memories.Recall? = nil
-        beginWork()
-        defer { endWork() }
-        await awaitPrimed()
-        await drainMeta()
         let began = Date()
         let about = Session.yes(await session.judge(
             frame: Memories.aboutFrame, items: [question],
-            options: ["yes", "no"]).first ?? [])
+            options: ["yes", "no"], label: "about-memory").first ?? [])
         Diag.shared.report(.turn, String(
             format: "[judge] about-memory %.2f in %.1fs", about,
             Date().timeIntervalSince(began)))
         if about >= Session.judgeCuts[0] {
             out = memories.listing(pp: measuredPP)
         } else {
+            let searching = Date()
             let near = await memories.candidates(
                 question, excluding: read, limit: Session.judgedNotes)
+            Diag.shared.report(.turn, String(
+                format: "[judge] %d near notes found in %.2fs", near.count,
+                Date().timeIntervalSince(searching)))
             let shares = await session.judge(
                 frame: Memories.helpsFrame,
                 items: near.map { note in
                     "Note: " + (note.description.isEmpty
                         ? note.title : note.description)
                         + "\nMessage: " + question
-                }, options: ["yes", "no"])
+                }, options: ["yes", "no"], label: "note-helps")
             var kept: [Concept] = []
             for (note, share) in zip(near, shares) {
                 Diag.shared.report(.turn, String(
@@ -649,14 +742,19 @@ public enum TurnEvent: Sendable {
                 overthink: Session.overthinkLambda,
                 seed: Flags.uint64("seed") ?? 0, runner: toolRunner,
                 readGuard: Session.memoryGuard,
+                chatGuard: Session.chatGuard,
                 breakers: turnTables?.breakers,
-                grammarVocab: turnTables?.vocab)
+                grammarVocab: turnTables?.vocab,
+                context: Flags.int("context")
+                    ?? modelShape?.trainedContext ?? 0,
+                shift: Models.shift(modelName))
             ReadBudget.shared.setRate(measuredPP)
             Diag.shared.report(.load, "[chat] session \(modelName): thinking "
                 + (thinkingActive ? "on" : "off, reasoning suppressed")
                 + ", asked " + (config.thinking ? "on" : "off")
                 + ", model " + (modelSupportsThinking ? "thinks" : "cannot")
                 + ", effort " + (modelSupportsReasoningEffort ? wire : "none")
+                + ", shift " + Models.shift(modelName).rawValue
                 + (config.voice ? ", voice rules" : ""))
             hookTrace(thinkingActive: thinkingActive, onEvent: onEvent)
         }
@@ -665,12 +763,28 @@ public enum TurnEvent: Sendable {
     nonisolated static let readFloor =
         UInt64(Flags.int("read-floor-mb") ?? 300) << 20
 
+    nonisolated static let chatFloor = UInt64(
+        Flags.int("chat-floor-mb") ?? Session.chatFloorMB(installedGB)) << 20
+
+    nonisolated static func chatFloorMB(_ gb: Int) -> Int {
+        min(gb * 50, 250)
+    }
+
     nonisolated static func memoryGuard() -> String? {
+        Session.starved(below: Session.readFloor, "[read] cut: ")
+    }
+
+    nonisolated static func chatGuard() -> String? {
+        Session.starved(below: Session.chatFloor, "[chat] cut: ")
+    }
+
+    nonisolated static func starved(below floor: UInt64,
+                                    _ tag: String) -> String? {
         var out: String? = nil
-        if let left = Footprint.availableBytes(), left < Session.readFloor {
+        if let left = Footprint.availableBytes(), left < floor {
             out = "\(left >> 20) MB left before the device kills the app, "
-                + "floor \(Session.readFloor >> 20) MB"
-            Diag.shared.report(.turn, "[read] cut: " + out!)
+                + "floor \(floor >> 20) MB"
+            Diag.shared.report(.turn, tag + out!)
         }
         return out
     }
@@ -705,7 +819,7 @@ public enum TurnEvent: Sendable {
         for file in newest {
             total += file.size
             let stale = !Session.isStampNamed(file.url) || (
-                total > precookBudget && file.url != keeping)
+                total > precookBudget && !Session.sameDir(file.url, keeping))
             if stale { try? fm.removeItem(at: file.url) }
         }
     }
@@ -778,17 +892,17 @@ public enum TurnEvent: Sendable {
     }
 
     public func primeSession(resetFirst: Bool = false) {
-        if let session {
-            let prior = primingTask
-            primingTask = Task {
-                await prior?.value
+        primings += 1
+        inLane {
+            if let session = self.session {
                 await self.primeOrCookInternal(session, reset: resetFirst)
             }
+            self.primings -= 1
         }
     }
 
     public func awaitPrimed() async {
-        await primingTask?.value
+        await lane?.value
         await warming?.value
     }
 
@@ -797,51 +911,54 @@ public enum TurnEvent: Sendable {
     }
 
     public func pushSpeculation(_ on: Bool) async {
-        await session?.setSpeculation(on)
-    }
-
-    public func drainMeta() async {
-        if let running = metaTask {
-            metaTask = nil
-            session?.requestStop()
-            running.cancel()
-            await running.value
-        }
-        await session?.quiesce()
+        await inLane { await self.session?.setSpeculation(on) }.value
     }
 
     public func newChatEngine(_ config: SessionConfig,
                               onEvent: @escaping @MainActor (TraceEvent) -> Void
     ) async {
-        await drainMeta()
-        await session?.endPriming()
-        Footprint.report(.load, "newChat outgoing released")
-        forgetRecalled()
-        await memories.awaitOpen()
-        makeSession(config, onEvent: onEvent)
+        await openChat(config, onEvent: onEvent).value
+    }
+
+    public func newChat(parking leaving: UUID?, _ config: SessionConfig,
+                        onEvent: @escaping @MainActor (TraceEvent) -> Void)
+        -> Task<Void, Never> {
+        if let leaving { parked(leaving) }
+        return openChat(config, onEvent: onEvent)
+    }
+
+    private func openChat(_ config: SessionConfig,
+                          onEvent: @escaping @MainActor (TraceEvent) -> Void)
+        -> Task<Void, Never> {
+        cutMeta()
+        let made = inLane {
+            await self.session?.endPriming()
+            await self.session?.quiesce()
+            Footprint.report(.load, "newChat outgoing released")
+            self.forgetRecalled()
+            await self.memories.awaitOpen()
+            self.makeSession(config, onEvent: onEvent)
+        }
         primeSession(resetFirst: true)
+        return made
     }
 
     public func quiesce() async { await session?.quiesce() }
 
-    public func pushThinking(_ on: Bool, resetIfFresh fresh: Bool) async {
-        await session?.setThinking(on)
-        await session?.setSuppressReasoning(!on)
-        if fresh {
-            primeSession(resetFirst: true)
-            await awaitPrimed()
+    public func pushThinking(_ on: Bool, resetIfFresh fresh: Bool) {
+        inLane {
+            await self.session?.setThinking(on)
+            await self.session?.setSuppressReasoning(!on)
         }
+        if fresh { primeSession(resetFirst: true) }
     }
 
     public func pushTools() {
-        let s = session
-        let r = toolRunner
-        Task { await s?.setTools(r) }
+        inLane { await self.session?.setTools(self.toolRunner) }
     }
 
     public func pushReasoningEffort(_ wire: String) {
-        let s = session
-        Task { await s?.setReasoningEffort(wire) }
+        inLane { await self.session?.setReasoningEffort(wire) }
     }
 
     public func requestQuickAnswer() {
@@ -996,7 +1113,8 @@ public enum TurnEvent: Sendable {
             -> AsyncStream<String>
     ) -> AsyncStream<TurnEvent> {
         AsyncStream { cont in
-            let task = Task { @MainActor in
+            cutMeta()
+            let task = inLane {
                 await self.driveTurn(thinkTokenCap: thinkTokenCap,
                                      thinkingActive: thinkingActive,
                                      failure: failure, open, cont)
@@ -1016,8 +1134,8 @@ public enum TurnEvent: Sendable {
         if let session {
             beginWork()
             defer { endWork() }
-            await awaitPrimed()
-            await drainMeta()
+            await warming?.value
+            await session.quiesce()
             let began = Date()
             _ = ggufBackend?.drainGPUSeconds()
             currentToolRounds = []
@@ -1121,12 +1239,14 @@ public enum TurnEvent: Sendable {
                 prompt: typed.isEmpty ? "" : preface + typed)
             asked.docs = docs
             asked.placeholder = placeholder
+            let look = look
             let events = softTurn(typed, preface: preface, labelled: labelled,
                                   thinkTokenCap: thinkTokenCap,
                                   thinkingActive: thinkingActive
             ) { onFrame in
                 try await Session.encode(media, images: images, clips: clips,
-                                         budget: budget, onFrame: onFrame)
+                                         budget: budget, look: look,
+                                         onFrame: onFrame)
             }
             result = (asked, events)
         }
@@ -1151,13 +1271,14 @@ public enum TurnEvent: Sendable {
             asked.docs = docs
             asked.placeholder = true
             let seen = !images.isEmpty || !clips.isEmpty
+            let look = look
             let events = softTurn(typed, labelled: seen,
                                   thinkTokenCap: thinkTokenCap,
                                   thinkingActive: thinkingActive
             ) { onFrame in
                 let looked = try await Session.encode(
                     media, images: images, clips: clips, budget: budget,
-                    onFrame: onFrame)
+                    look: look, onFrame: onFrame)
                 let heard = try await Session.encode(media, speech: said)
                 return (looked.parts + heard.parts,
                         looked.spans + heard.spans, looked.perImage)
@@ -1199,35 +1320,50 @@ public enum TurnEvent: Sendable {
         onFollowup: @escaping @MainActor (String) -> Void,
         onRemembered: @escaping @MainActor ([Memories.Remembered]) -> Void
     ) {
-        if let session, titled || wantsFollowup || extraction != nil
+        if session != nil, titled || wantsFollowup || extraction != nil
             || conversation != nil || pictures != nil {
-            let running = metaTask
             beginWork()
-            metaTask = Task { @MainActor in
-                defer { endWork() }
-                await running?.value
-                var made = ""
-                if titled, !Task.isCancelled {
-                    made = await session.makeTitle()
-                    if !made.isEmpty, !Task.isCancelled { onTitle(made) }
-                }
-                if wantsFollowup, !Task.isCancelled {
-                    let hint = await session.makeFollowup()
-                    if !Task.isCancelled { onFollowup(hint) }
-                }
-                if let pictures, !Task.isCancelled {
-                    await caption(pictures, session)
-                }
-                if let extraction, !Task.isCancelled {
-                    let got = await extract(extraction)
-                    if !got.isEmpty, !Task.isCancelled { onRemembered(got) }
-                }
-                if let conversation, !Task.isCancelled {
-                    await keep(conversation,
-                               title: made.isEmpty ? conversation.title : made)
+            metaTask = inLane {
+                if let session = self.session {
+                    await self.metaTurns(
+                        session, titled: titled, wantsFollowup: wantsFollowup,
+                        extraction: extraction, conversation: conversation,
+                        pictures: pictures, onTitle: onTitle,
+                        onFollowup: onFollowup, onRemembered: onRemembered)
                 }
                 self.metaTask = nil
+                self.endWork()
             }
+        }
+    }
+
+    private func metaTurns(
+        _ session: ChatSession, titled: Bool, wantsFollowup: Bool,
+        extraction: Extraction?, conversation: ConversationNote?,
+        pictures: PictureNote?,
+        onTitle: @escaping @MainActor (String) -> Void,
+        onFollowup: @escaping @MainActor (String) -> Void,
+        onRemembered: @escaping @MainActor ([Memories.Remembered]) -> Void
+    ) async {
+        var made = ""
+        if titled, !Task.isCancelled {
+            made = await session.makeTitle()
+            if !made.isEmpty, !Task.isCancelled { onTitle(made) }
+        }
+        if wantsFollowup, !Task.isCancelled {
+            let hint = await session.makeFollowup()
+            if !Task.isCancelled { onFollowup(hint) }
+        }
+        if let pictures, !Task.isCancelled {
+            await caption(pictures, session)
+        }
+        if let extraction, !Task.isCancelled {
+            let got = await extract(extraction)
+            if !got.isEmpty, !Task.isCancelled { onRemembered(got) }
+        }
+        if let conversation, !Task.isCancelled {
+            await keep(conversation,
+                       title: made.isEmpty ? conversation.title : made)
         }
     }
 
@@ -1372,7 +1508,7 @@ public enum TurnEvent: Sendable {
 
     nonisolated private static func encode(
         _ media: any MediaEncoder, images: [ImageAttachment],
-        clips: [ClipAttachment], budget: Int,
+        clips: [ClipAttachment], budget: Int, look: Look?,
         onFrame: (@Sendable (VideoPeek) -> Void)? = nil
     ) async throws -> (parts: [ContentPart], spans: [SoftSpan], perImage: Int) {
         var out = Attached()
@@ -1384,6 +1520,8 @@ public enum TurnEvent: Sendable {
             widest = max(widest, got.spans.map { s in s.rows }.max() ?? 0)
             out.append(got)
             Session.note("image", img.name, got.rows, t0)
+            Session.recordLook(look, rows: got.rows,
+                               seconds: Date().timeIntervalSince(t0))
         }
         for clip in clips {
             try Task.checkCancellation()

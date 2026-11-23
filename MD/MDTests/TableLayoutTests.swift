@@ -61,6 +61,11 @@ import Testing
     @Test func anEmptyCellHasNoLines() {
         #expect(DocumentText.wrapCell(cell(""), width: 100).isEmpty)
     }
+
+    @Test func aHardBreakInACellEndsALineWithoutStaggering() {
+        let lines = DocumentText.wrapCell(cell("abc\u{2028}def"), width: 400)
+        #expect(lines.map { line in line.string } == ["abc", "def"])
+    }
 }
 
 #if os(iOS)

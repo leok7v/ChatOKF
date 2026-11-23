@@ -22,14 +22,14 @@ extension ChatModel {
         let leaving = liveConversation
         if !locked {
             let running = replaying ? genTask : nil
+            let serial = transcriptSerial
             if running != nil { session.requestStop() }
             Task { @MainActor in
                 if let running {
                     running.cancel()
                     _ = await running.value
                 }
-                if !locked, let restored = await session.openConversation(id) {
-                    let plan = await session.resumePlan(id, restored.messages)
+                if let (restored, plan) = await opened(id, at: serial) {
                     if case .needsModel(let name) = plan,
                        let kin = ChatModel.onDiskKin(name) {
                         resumeAfterLoad = id
@@ -42,6 +42,16 @@ extension ChatModel {
                 }
             }
         }
+    }
+
+    private func opened(_ id: UUID, at serial: Int) async
+        -> (Session.Opened, ResumePlan)? {
+        var out: (Session.Opened, ResumePlan)? = nil
+        if !locked, let restored = await session.openConversation(id) {
+            let plan = await session.resumePlan(id, restored.messages)
+            if !locked, serial == transcriptSerial { out = (restored, plan) }
+        }
+        return out
     }
 
     static func onDiskKin(_ name: String) -> String? {
@@ -77,9 +87,12 @@ extension ChatModel {
         if leaving != nil || live {
             genSerial += 1
             let serial = genSerial
+            let shown = transcriptSerial
             genTask = Task { @MainActor in
-                if let leaving { await session.parkCurrent(leaving) }
-                if case .parked = plan { await resumeParked(id) }
+                if let leaving {
+                    await session.parkCurrent(leaving, opening: id)
+                }
+                if case .parked = plan { await resumeParked(id, shown) }
                 if case .replay(let turns) = plan { await replay(id, turns) }
                 if genSerial == serial { genTask = nil }
             }
@@ -101,14 +114,33 @@ extension ChatModel {
         }
     }
 
-    private func resumeParked(_ id: UUID) async {
-        if session.hasParked(id), await session.resumeParked(
-            id, sessionConfig(), onEvent: { [weak self] e in
-                self?.recordTrace(e)
-            }) {
+    private func resumeParked(_ id: UUID, _ shown: Int) async {
+        let resumed = session.hasParked(id)
+            ? await session.resumeParked(
+                id, sessionConfig(), onEvent: { [weak self] e in
+                    self?.recordTrace(e)
+                })
+            : false
+        if shown != transcriptSerial || Task.isCancelled {
+            Diag.shared.report(.load, "[park] resumed a chat no longer shown")
+        } else if resumed {
             generatedTitle = ChatModel.storedTitle(id)
             readOnly = false
             statsLabel = savedLabel
+        } else {
+            await replayInstead(id, shown)
+        }
+    }
+
+    private func replayInstead(_ id: UUID, _ shown: Int) async {
+        session.dropParked(id)
+        let plan = await session.resumePlan(id, messages)
+        if shown != transcriptSerial {
+            Diag.shared.report(.load, "[park] left before the replay")
+        } else if case .replay(let turns) = plan {
+            await replay(id, turns)
+        } else {
+            noteReadOnly("could not resume")
         }
     }
 

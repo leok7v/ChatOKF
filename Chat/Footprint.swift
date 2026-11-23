@@ -182,6 +182,10 @@ public enum Footprint {
 
 extension Footprint {
 
+    static func headroom(_ raw: Int) -> UInt64? {
+        raw > 0 ? UInt64(raw) : nil
+    }
+
     static func hardwareID() -> String {
         var size = 0
         sysctlbyname("hw.machine", nil, &size, nil, 0)

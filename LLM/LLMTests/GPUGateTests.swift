@@ -42,6 +42,11 @@ final class GPUGateTests: XCTestCase {
         gate.simulate(thermal: nil, faultRate: 0)
     }
 
+    func testTheSeedFallbackIsTheKnobDefault() {
+        let knob = Flags.registry.first { k in k.name == "seed" }
+        XCTAssertEqual(knob?.defaultValue, String(GPUGate.defaultSeed))
+    }
+
     func testTheKnobSpellingsParse() {
         XCTAssertEqual(GPUGate.parse("serious"), .serious)
         XCTAssertEqual(GPUGate.parse("critical"), .critical)

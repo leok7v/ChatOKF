@@ -134,6 +134,7 @@ public struct Message: Identifiable, Sendable {
     public var reasoning = ""
     public var placeholder = false
     public var loopStopped = false
+    public var cut = ""
     public var answerDoc = Markdown.Document.empty
     public var reasoningDoc = Markdown.Document.empty
     public var prompt = ""

@@ -73,46 +73,31 @@ enum HtmlExport {
         for run in attr.runs {
             let segment = esc(String(attr[run.range].characters))
                 .replacingOccurrences(of: Markdown.lineBreak, with: "<br>")
-            let intent = run.inlinePresentationIntent ?? []
-            var open: [String] = []
-            var close: [String] = []
-            if run[SmallAttribute.self] == true {
-                open.append("<small>")
-                close.insert("</small>", at: 0)
-            }
-            if let url = run.link, safeLink(url) {
-                open.append("<a href=\"\(escAttr(url.absoluteString))\">")
-                close.insert("</a>", at: 0)
-            }
-            if intent.contains(.code) {
-                open.append("<code style=\"\(inlineCodeStyle)\">")
-                close.insert("</code>", at: 0)
-            }
-            if intent.contains(.stronglyEmphasized) {
-                open.append("<strong>")
-                close.insert("</strong>", at: 0)
-            }
-            if intent.contains(.emphasized) {
-                open.append("<em>")
-                close.insert("</em>", at: 0)
-            }
-            if intent.contains(.strikethrough) {
-                open.append("<del>")
-                close.insert("</del>", at: 0)
-            }
-            if run.underlineStyle != nil {
-                open.append("<u>")
-                close.insert("</u>", at: 0)
-            }
-            // Back to the tag the source wrote.
-            if let level = run[ScriptAttribute.self] {
-                let tag = level > 0 ? "sup" : "sub"
-                open.append("<\(tag)>")
-                close.insert("</\(tag)>", at: 0)
-            }
-            out += open.joined() + segment + close.joined()
+            let on = inlineTags(run).filter { tag in tag.applies }
+            out += on.map { tag in tag.open }.joined() + segment +
+                   on.reversed().map { tag in tag.close }.joined()
         }
         return out
+    }
+
+    private static func inlineTags(_ run: AttributedString.Runs.Run)
+        -> [(applies: Bool, open: String, close: String)] {
+        let intent = run.inlinePresentationIntent ?? []
+        let link = run.link.flatMap { url in safeLink(url) ? url : nil }
+        let href = escAttr(link?.absoluteString ?? "")
+        let level = run[ScriptAttribute.self]
+        let script = (level ?? 0) > 0 ? "sup" : "sub"
+        return [
+            (run[SmallAttribute.self] == true, "<small>", "</small>"),
+            (link != nil, "<a href=\"\(href)\">", "</a>"),
+            (intent.contains(.code), "<code style=\"\(inlineCodeStyle)\">",
+             "</code>"),
+            (intent.contains(.stronglyEmphasized), "<strong>", "</strong>"),
+            (intent.contains(.emphasized), "<em>", "</em>"),
+            (intent.contains(.strikethrough), "<del>", "</del>"),
+            (run.underlineStyle != nil, "<u>", "</u>"),
+            (level != nil, "<\(script)>", "</\(script)>"),
+        ]
     }
 
     private static let linkSchemes: Set<String> = ["http", "https", "mailto"]

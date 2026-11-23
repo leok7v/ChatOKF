@@ -98,8 +98,10 @@ public struct QwenMetalChat {
         let inside = m.gguf.int("clip.vision.block_count") != nil
         let mmproj = inside ? ggufPath : QwenMetalChat.mmprojBeside(ggufPath)
         mmprojPath = mmproj
-        shape = ModelShape(gguf: m.gguf,
-                           sidecars: inside ? [] : QwenMetalChat.eye(mmproj))
+        shape = ModelShape(
+            gguf: m.gguf, sidecars: inside ? [] : QwenMetalChat.eye(mmproj),
+            eyeFile: inside ? nil
+                            : mmproj.flatMap { p in try? GGUF(path: p) })
     }
 
     // Everything in an mmproj serves the eye, so the file size IS the tower's.

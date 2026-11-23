@@ -34,9 +34,6 @@ extension NativeText: UIViewRepresentable {
                 width: CGFloat.greatestFiniteMagnitude,
                 height: CGFloat.greatestFiniteMagnitude)
         }
-        // The OS find navigator (hardware Cmd+F) rides alongside the
-        // controller-driven find; either presents and selects matches.
-        if find != nil { v.isFindInteractionEnabled = true }
         v.findId = findId
         v.findController = find
         if let find, let findId { find.register(findId, v) }
@@ -307,47 +304,34 @@ extension NativeText: UIViewRepresentable {
         private func rebuildCopyOverlays() {
             var live: Set<String> = []
             layoutManager.ensureLayout(for: textContainer)
-            let inset = textContainerInset
-            let full = NSRange(location: 0, length: textStorage.length)
-            textStorage.enumerateAttribute(atomicIdKey, in: full,
-                                           options: []) { value, range, _ in
-                let id = value as? String
-                let source = id == nil ? nil : textStorage.attribute(
-                    atomicCopyKey, at: range.location,
-                    effectiveRange: nil) as? String
-                let kind = id == nil ? nil : textStorage.attribute(
-                    atomicKindKey, at: range.location,
-                    effectiveRange: nil) as? String
-                if let id, source != nil {
-                    let gr = layoutManager.glyphRange(
-                        forCharacterRange: range, actualCharacterRange: nil)
-                    let block = layoutManager.boundingRect(
-                        forGlyphRange: gr, in: textContainer)
-                    // Centred on the FIRST line fragment, not the block top,
-                    // or it reads as sitting on the baseline.
-                    let line = layoutManager.lineFragmentUsedRect(
-                        forGlyphAt: gr.location, effectiveRange: nil)
-                    // A display is CENTRED, so its button anchors to the
-                    // full-width line fragment, not to the formula.
-                    let right = kind == AtomicKind.math.rawValue
-                        ? layoutManager.lineFragmentRect(
-                            forGlyphAt: gr.location,
-                            effectiveRange: nil).maxX
-                        : block.maxX
-                    let side = CopyRunButton.side
-                    let btn = copyButtons[id] ?? makeCopyButton(id)
-                    btn.frame = CGRect(
-                        x: right + inset.left - side - 4,
-                        y: line.minY + inset.top + (line.height - side) / 2,
-                        width: side, height: side)
-                    copyButtons[id] = btn
-                    live.insert(id)
-                }
+            for run in atomicRuns(in: textStorage) {
+                let btn = copyButtons[run.id] ?? makeCopyButton(run.id)
+                btn.frame = copyFrame(of: run)
+                copyButtons[run.id] = btn
+                live.insert(run.id)
             }
             for (id, btn) in copyButtons where !live.contains(id) {
                 btn.removeFromSuperview()
                 copyButtons[id] = nil
             }
+        }
+
+        private func copyFrame(of run: AtomicRun) -> CGRect {
+            let inset = textContainerInset
+            let gr = layoutManager.glyphRange(forCharacterRange: run.range,
+                                              actualCharacterRange: nil)
+            let block = layoutManager.boundingRect(forGlyphRange: gr,
+                                                   in: textContainer)
+            let line = layoutManager.lineFragmentUsedRect(
+                forGlyphAt: gr.location, effectiveRange: nil)
+            let right = run.kind == AtomicKind.math.rawValue
+                ? layoutManager.lineFragmentRect(
+                    forGlyphAt: gr.location, effectiveRange: nil).maxX
+                : block.maxX
+            let side = CopyRunButton.side
+            return CGRect(x: right + inset.left - side - 4,
+                          y: line.minY + inset.top + (line.height - side) / 2,
+                          width: side, height: side)
         }
 
         private func makeCopyButton(_ id: String) -> CopyRunButton {
@@ -363,19 +347,10 @@ extension NativeText: UIViewRepresentable {
         // The block's CURRENT source by atomic id: ranges shift as tokens
         // stream, the id is stable.
         private func copyBlock(_ id: String) {
-            var copy: String? = nil
-            let full = NSRange(location: 0, length: textStorage.length)
-            textStorage.enumerateAttribute(atomicIdKey, in: full,
-                                           options: []) { value, range, stop in
-                if value as? String == id {
-                    copy = textStorage.attribute(
-                        atomicCopyKey, at: range.location,
-                        effectiveRange: nil) as? String
-                    stop.pointee = true
-                }
-            }
-            if let copy {
-                platformSetClipboardString(copy)
+            let run = atomicRuns(in: textStorage)
+                .first { run in run.id == id }
+            if let run {
+                copyRun(run)
                 copyButtons[id]?.flashDone()
             }
         }

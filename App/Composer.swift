@@ -501,6 +501,8 @@ struct Composer: View {
             text = "Answering from what I've read so far\u{2026}"
         } else if model.replaying {
             text = ChatModel.resumingNotice + "\u{2026}"
+        } else if model.priming, model.recalling || model.prefilling {
+            text = model.primingNote
         } else if model.recalling {
             text = "Recalling what I already know\u{2026}"
         } else if model.waiting, !model.listening, !model.speech.engaged {
@@ -518,6 +520,8 @@ struct Composer: View {
         } else if model.speech.pack == .fetching {
             text = "Downloading the voice, "
                 + "\(Int(model.speech.fetchFraction * 100))%"
+        } else if let note = model.packNote {
+            text = note
         } else {
             text = plainFootnote
         }

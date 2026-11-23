@@ -1829,6 +1829,9 @@ public enum Tools {
     private static let tab = UInt8(ascii: "\t")
     private static let cr = UInt8(ascii: "\r")
     private static let newline = UInt8(ascii: "\n")
+    private static let equals = UInt8(ascii: "=")
+    private static let quote = UInt8(ascii: "\"")
+    private static let apostrophe = UInt8(ascii: "'")
     private static let gtBytes = [gt]
     private static let closeOpen = Array("</".utf8)
     private static let commentOpen = Array("<!--".utf8)
@@ -1837,6 +1840,7 @@ public enum Tools {
     private static let articleTag = Array("article".utf8)
     private static let tagDelims: Set<UInt8> = [gt, space, slash, tab,
                                                  newline, cr]
+    private static let attrDelims = tagDelims.union([equals])
 
     static func htmlToText(_ html: String) -> String {
         htmlToText(Array(html.utf8))
@@ -1880,20 +1884,147 @@ public enum Tools {
         } else {
             let closing = p + 1 < n && b[p + 1] == slash
             let nameAt = closing ? p + 2 : p + 1
-            let drop = closing ? nil : dropTagAt(b, nameAt)
+            let end = tagEnd(b, p)
+            let drop = closing ? nil : droppedTag(b, nameAt, end)
             if let drop {
-                next = skipElement(b, p, drop, &raw)
+                next = skipElement(b, end, drop, &raw)
             } else {
                 if isBlockTag(b, nameAt) { raw.append(newline) }
-                next = find(b, gtBytes, p).map { g in g + 1 } ?? n
+                next = min(end + 1, n)
             }
         }
         return next
     }
 
-    private static let dropTags = ["script", "style", "nav", "header",
-                                   "footer", "aside", "form", "math"]
-        .map { tag in Array(tag.utf8) }
+    private static func tagEnd(_ b: [UInt8], _ p: Int) -> Int {
+        var i = p + 1
+        while i < b.count && b[i] != gt {
+            i = b[i] == equals ? valueEnd(b, i + 1) : i + 1
+        }
+        return i
+    }
+
+    private static func valueEnd(_ b: [UInt8], _ from: Int) -> Int {
+        let i = blanksEnd(b, from, b.count)
+        var result = i
+        if i < b.count && (b[i] == quote || b[i] == apostrophe),
+           let close = find(b, [b[i]], i + 1) {
+            result = close + 1
+        }
+        return result
+    }
+
+    private static let dropTags: Set<[UInt8]> = Set([
+        "script", "style", "nav", "header", "footer", "aside", "form",
+        "math", "template", "dialog", "noscript",
+    ].map { tag in Array(tag.utf8) })
+
+    private static let inlineDropTags: Set<[UInt8]> = Set([
+        "button", "svg", "select", "iframe",
+    ].map { tag in Array(tag.utf8) })
+
+    private static let rawTextTags: Set<[UInt8]> = [
+        Array("script".utf8), Array("style".utf8),
+    ]
+
+    private static let voidTags: Set<[UInt8]> = Set([
+        "area", "base", "br", "col", "embed", "hr", "img", "input", "link",
+        "meta", "source", "track", "wbr",
+    ].map { tag in Array(tag.utf8) })
+
+    private static let clutterRoles: Set<[UInt8]> = Set([
+        "navigation", "banner", "contentinfo", "complementary", "search",
+        "menu", "menubar", "toolbar", "dialog", "alertdialog",
+    ].map { role in Array(role.utf8) })
+
+    private static let clutterClasses: Set<[UInt8]> = Set([
+        "navbox", "vertical-navbox", "navbar", "mw-editsection",
+        "catlinks", "printfooter", "noprint", "metadata", "mw-jump-link",
+    ].map { name in Array(name.utf8) })
+
+    private static let hiddenAttr = Array("hidden".utf8)
+    private static let roleAttr = Array("role".utf8)
+    private static let classAttr = Array("class".utf8)
+
+    private static func droppedTag(_ b: [UInt8], _ at: Int,
+                                   _ end: Int) -> [UInt8]? {
+        var nameEnd = at
+        while nameEnd < end && !tagDelims.contains(b[nameEnd]) {
+            nameEnd += 1
+        }
+        let name = b[at..<nameEnd].map { c in lower(c) }
+        let named = dropTags.contains(name) || inlineDropTags.contains(name)
+        let marked = !named && !name.isEmpty && !voidTags.contains(name)
+            && clutterAttributes(b, nameEnd, end)
+        return named || marked ? name : nil
+    }
+
+    private static func clutterAttributes(_ b: [UInt8], _ from: Int,
+                                          _ end: Int) -> Bool {
+        var found = false
+        var i = from
+        while !found && i < end {
+            let attr = attribute(b, i, end)
+            found = clutterAttribute(b, attr.name, attr.value)
+            i = attr.next
+        }
+        return found
+    }
+
+    private static func attribute(_ b: [UInt8], _ from: Int, _ end: Int)
+        -> (name: Range<Int>, value: Range<Int>, next: Int) {
+        var i = from
+        while i < end && (whitespace.contains(b[i]) || b[i] == slash) {
+            i += 1
+        }
+        let start = i
+        while i < end && !attrDelims.contains(b[i]) { i += 1 }
+        let name = start..<i
+        i = blanksEnd(b, i, end)
+        var value = i..<i
+        if i < end && b[i] == equals {
+            let parsed = attributeValue(b, i + 1, end)
+            value = parsed.value
+            i = parsed.next
+        }
+        return (name, value, max(i, from + 1))
+    }
+
+    private static func attributeValue(_ b: [UInt8], _ from: Int,
+                                       _ end: Int)
+        -> (value: Range<Int>, next: Int) {
+        let i = blanksEnd(b, from, end)
+        let quoted = i < end && (b[i] == quote || b[i] == apostrophe)
+        let begin = quoted ? i + 1 : i
+        var j = begin
+        while j < end && (quoted ? b[j] != b[i]
+                                 : !whitespace.contains(b[j])) {
+            j += 1
+        }
+        return (begin..<j, quoted ? min(j + 1, end) : j)
+    }
+
+    private static func blanksEnd(_ b: [UInt8], _ from: Int,
+                                  _ end: Int) -> Int {
+        var i = from
+        while i < end && whitespace.contains(b[i]) { i += 1 }
+        return i
+    }
+
+    private static func clutterAttribute(_ b: [UInt8], _ name: Range<Int>,
+                                         _ value: Range<Int>) -> Bool {
+        let key = b[name].map { c in lower(c) }
+        var result = false
+        if key == hiddenAttr {
+            result = true
+        } else if key == roleAttr {
+            result = clutterRoles.contains(b[value].map { c in lower(c) })
+        } else if key == classAttr {
+            result = b[value].split { c in whitespace.contains(c) }
+                .contains { word in clutterClasses.contains(Array(word)) }
+        }
+        return result
+    }
 
     private static func tagAt(_ b: [UInt8], _ at: Int,
                               _ tag: [UInt8]) -> Bool {
@@ -1902,25 +2033,47 @@ public enum Tools {
             && tagDelims.contains(b[after])
     }
 
-    private static func dropTagAt(_ b: [UInt8], _ at: Int) -> [UInt8]? {
-        var result: [UInt8]? = nil
-        var k = 0
-        while result == nil && k < dropTags.count {
-            if tagAt(b, at, dropTags[k]) { result = dropTags[k] }
-            k += 1
-        }
-        return result
-    }
-
-    private static func skipElement(_ b: [UInt8], _ p: Int,
+    private static func skipElement(_ b: [UInt8], _ end: Int,
                                     _ tag: [UInt8],
                                     _ raw: inout [UInt8]) -> Int {
         var next = b.count
-        if let e = find(b, closeOpen + tag, p + 1, ci: true) {
+        if end < b.count && b[end - 1] == slash {
+            next = end + 1
+        } else if let e = closeOf(b, end + 1, tag) {
             next = find(b, gtBytes, e).map { g in g + 1 } ?? b.count
+        } else if !dropTags.contains(tag) && !inlineDropTags.contains(tag) {
+            next = min(end + 1, b.count)
         }
-        raw.append(newline)
+        let breaks = dropTags.contains(tag) || blockTags.contains(tag)
+        raw.append(breaks ? newline : space)
         return next
+    }
+
+    private static func closeOf(_ b: [UInt8], _ from: Int,
+                                _ tag: [UInt8]) -> Int? {
+        var close = nextTag(b, from, closeOpen, tag)
+        var open = rawTextTags.contains(tag)
+            ? nil : nextTag(b, from, [lt], tag)
+        var depth = 0
+        while let c = close, depth > 0 || (open.map { o in o < c } ?? false) {
+            if let o = open, o < c {
+                depth += 1
+                open = nextTag(b, o + 1, [lt], tag)
+            } else {
+                depth -= 1
+                close = nextTag(b, c + 1, closeOpen, tag)
+            }
+        }
+        return close
+    }
+
+    private static func nextTag(_ b: [UInt8], _ from: Int,
+                                _ opener: [UInt8], _ tag: [UInt8]) -> Int? {
+        var at = find(b, opener + tag, from, ci: true)
+        while let a = at, !tagAt(b, a + opener.count, tag) {
+            at = find(b, opener + tag, a + 1, ci: true)
+        }
+        return at
     }
 
     private static func mainContent(_ b: [UInt8]) -> [UInt8] {

@@ -92,6 +92,17 @@ final class SurfaceLayoutTests: XCTestCase {
         XCTAssertEqual(kind, AtomicKind.code.rawValue)
     }
 
+    func testAWrappedCodeLineHangsTwoCharactersIn() {
+        let mono = FontRole.mono(MarkdownStyle.default.codeSize).platformFont
+        for t in [text("```\nlet x = 1\n```"),
+                  text("- ```\n  let x = 1\n  ```")] {
+            let style = para(t, at: "let x")
+            XCTAssertEqual((style?.headIndent ?? 0)
+                               - (style?.firstLineHeadIndent ?? 0),
+                           DocumentText.codeHang(mono), accuracy: 0.01)
+        }
+    }
+
     func testAListEndingInANestedListKeepsTheBlockSpacing() {
         let t = text("- a\n  - b\n\nAfter.")
         XCTAssertGreaterThanOrEqual(para(t, at: "b")?.paragraphSpacing ?? 0,

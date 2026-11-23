@@ -1525,7 +1525,8 @@ public final class Store {
                 }
             }
             from = parts[low].from
-            to = parts[high].to
+            to = Memories.boundary(Array(concept.body.utf8),
+                                   min(parts[high].to, from + limit))
         }
         return (from, to)
     }

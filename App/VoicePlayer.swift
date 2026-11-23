@@ -46,7 +46,9 @@ final class VoicePlayer: @unchecked Sendable {
     private var demoWritten = 0.0
     private var demoConverter: AVAudioConverter?
 
-    static let speechFloorGB = Flags.int("speech-floor") ?? 4
+    static let speechFloorDefault = 3
+    static let speechFloorGB = Flags.int("speech-floor")
+        ?? VoicePlayer.speechFloorDefault
 
     init?() {
         let fmt = AVAudioFormat(commonFormat: .pcmFormatFloat32,

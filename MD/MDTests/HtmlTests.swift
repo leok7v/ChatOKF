@@ -127,6 +127,54 @@ final class HtmlTests: XCTestCase {
                        "one  \ntwo with small and under.\n")
     }
 
+    func testInlineTagsCloseInTheReverseOrderOfTheirOpening() {
+        let doc = Markdown.parse("***both*** and **[link](https://e.com/)** "
+                                 + "and H<sub>2</sub>O")
+        let html = Markdown.html(doc, title: "t")
+        XCTAssertTrue(html.contains("<strong><em>both</em></strong>"), html)
+        XCTAssertTrue(html.contains("<a href=\"https://e.com/\"><strong>"
+                                    + "link</strong></a>"), html)
+        XCTAssertTrue(html.contains("H<sub>2</sub>O"), html)
+    }
+
+    func testATableAndADisplayCopyAsRichHtmlAndCodeDoesNot() throws {
+        let source = "| Planet | Notes |\n|---|---|\n| Earth | home<br>third |"
+        let table = AtomicRun(id: "t", range: NSRange(location: 0, length: 0),
+                              copy: source,
+                              kind: AtomicKind.table.rawValue)
+        let html = try XCTUnwrap(richCopy(table))
+        XCTAssertTrue(html.contains("<table"), html)
+        XCTAssertTrue(html.contains("home<br>third"), html)
+        XCTAssertFalse(html.contains("| Planet"), html)
+        XCTAssertTrue(html.contains("<table width=\"100%\""), html)
+        XCTAssertTrue(html.contains("font-family:-apple-system"), html)
+        XCTAssertEqual(plainCopy(table), """
+            | Planet | Notes |
+            | ------ | ----- |
+            | Earth  | home  |
+            |        | third |
+
+            """)
+        let math = AtomicRun(id: "m", range: NSRange(location: 0, length: 0),
+                             copy: "E = mc^2", kind: AtomicKind.math.rawValue)
+        XCTAssertNotNil(richCopy(math))
+        let code = AtomicRun(id: "c", range: NSRange(location: 0, length: 0),
+                             copy: "print(1)", kind: AtomicKind.code.rawValue)
+        XCTAssertNil(richCopy(code))
+    }
+
+    func testASmallTableGivesItsSpareWidthToTheLastColumn() throws {
+        let shares = try XCTUnwrap(TableMetrics.trailingShares(
+            naturals: [60, 120], width: 1000, budget: 97.6))
+        XCTAssertEqual(shares[0], 60 * TableMetrics.trailingAir / 10,
+                       accuracy: 0.001)
+        XCTAssertEqual(shares[0] + shares[1], 97.6, accuracy: 0.001)
+        XCTAssertNil(TableMetrics.trailingShares(
+            naturals: [600, 600], width: 1000, budget: 97.6))
+        XCTAssertNil(TableMetrics.trailingShares(
+            naturals: [60], width: 1000, budget: 97.6))
+    }
+
     func testACreditIsALinkInTheHtmlAndOnEveryPdfPage() throws {
         let credit = Markdown.Credit(
             text: "Built with Chat\u{1D52}\u{1D4F}F",

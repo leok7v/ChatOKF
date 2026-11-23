@@ -80,4 +80,46 @@ struct Gemma4AudioTests {
                 "a clip past the ceiling must be cut: \(spans.count) span(s)")
         #expect(spans.allSatisfy { s in s.rows > 0 })
     }
+
+    private static func mel(_ chat: GemmaChat) async throws
+        -> (values: [Float], frames: Int, bins: Int) {
+        let pcm = try await AudioFile.samples(
+            url: Gemma4AudioTests.fixture("en-lets-leave-tomorrow.wav"),
+            sampleRate: Double(chat.melConfig.sampleRate))
+        let mel = Gemma4Mel(chat.melConfig)
+        let feats = mel.features(pcm)
+        return (feats.values, feats.frames, mel.cfg.bins)
+    }
+
+    @Test(needsGemmaWeights) func aCancelledTurnStopsTheAudioTower() async {
+        let job = Task { () throws -> Int in
+            let chat = try GemmaChat(ggufPath: try #require(gemmaGgufPath))
+            let engine = try Gemma4MetalEngine(chat.model)
+            let tower = try Gemma4MetalAudio(chat.model, ctx: engine.ctx)
+            let mel = try await Gemma4AudioTests.mel(chat)
+            withUnsafeCurrentTask { task in task?.cancel() }
+            return try tower.forward(mel: mel.values, frames: mel.frames,
+                                     bins: mel.bins).count
+        }
+        await #expect(throws: CancellationError.self) {
+            try await job.value
+        }
+    }
+
+    @Test(needsGemmaWeights) func aStopEndsTheAudioTowerWithinOneLayer()
+        async throws {
+        let chat = try GemmaChat(ggufPath: try #require(gemmaGgufPath))
+        let engine = try Gemma4MetalEngine(chat.model)
+        let tower = try Gemma4MetalAudio(chat.model, ctx: engine.ctx)
+        let mel = try await Gemma4AudioTests.mel(chat)
+        var asked = 0
+        #expect(throws: CancellationError.self) {
+            try tower.forward(mel: mel.values, frames: mel.frames,
+                              bins: mel.bins) {
+                asked += 1
+                return asked == 3
+            }
+        }
+        #expect(asked == 3)
+    }
 }

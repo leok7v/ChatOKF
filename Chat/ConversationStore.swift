@@ -36,12 +36,13 @@ import LLM
         public let posters: [Data]?
         public let soft: String?
         public let prompt: String?
+        public let cut: String?
 
         public init(fromUser: Bool, text: String, reasoning: String,
                     rounds: [Round], images: [Data], loopStopped: Bool,
                     clips: [String]?, docs: [StoredDoc]?,
                     posters: [Data]?, soft: String? = nil,
-                    prompt: String? = nil) {
+                    prompt: String? = nil, cut: String? = nil) {
             self.fromUser = fromUser
             self.text = text
             self.reasoning = reasoning
@@ -53,6 +54,7 @@ import LLM
             self.posters = posters
             self.soft = soft
             self.prompt = prompt
+            self.cut = cut
         }
     }
 

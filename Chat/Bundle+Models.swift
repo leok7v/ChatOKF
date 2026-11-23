@@ -71,7 +71,7 @@ public enum Models {
                "Qwen3.8-27B-Q4_K_S",
                "Ternary-Bonsai-27B", "Ternary-Bonsai-1.7B",
                "Ternary-Bonsai-2-2B", "Ternary-Bonsai-2-4B",
-               "Ternary-Bonsai-2-9B",
+               "Ternary-Bonsai-2-9B", "Ternary-Bonsai-2-27B",
                "gemma-4-E2B", "gemma-4-E4B", "gemma-4-12B"]
     }
 
@@ -100,7 +100,8 @@ public enum Models {
             if gb >= 8 { band.insert("Qwen3.5-4B") }
             if gb >= 16 { band.insert("Qwen3.5-9B") }
             if let one = qwen38(gb) { band.insert(one) }
-            if gb >= 9 { band.insert("Ternary-Bonsai-27B") }
+            if gb >= 8 { band.insert("Ternary-Bonsai-2-9B") }
+            if gb >= 9 { band.insert("Ternary-Bonsai-2-27B") }
             band.insert("Ternary-Bonsai-1.7B")
             band.insert(fallback)
             if gb >= 8 { band.insert(e4b) }
@@ -124,6 +125,16 @@ public enum Models {
 
     static let unjudged: Set<String> = ["Ternary-Bonsai-1.7B", "Qwen3.5-2B",
                                         "Ternary-Bonsai-2-2B"]
+
+    static let softShift: Set<String> = [
+        "Qwen3.5-4B", "Qwen3.5-9B", "Ternary-Bonsai-2-4B",
+        "Ternary-Bonsai-2-9B", "Ternary-Bonsai-2-27B",
+    ]
+
+    public static func shift(_ name: String) -> ChatSession.ShiftMode {
+        ChatSession.ShiftMode(rawValue: Flags.value("shift") ?? "")
+            ?? (softShift.contains(name) ? .soft : .off)
+    }
 
     public static var offersNoteTools: Bool { Flags.on("note-tools") }
 
@@ -186,6 +197,7 @@ public enum Models {
             case "Ternary-Bonsai-2-2B": out = "Bonsai2 2B"
             case "Ternary-Bonsai-2-4B": out = "Bonsai2 4B"
             case "Ternary-Bonsai-2-9B": out = "Bonsai2 9B"
+            case "Ternary-Bonsai-2-27B": out = "Bonsai2 27B"
             case "gemma-4-E2B", "gemma-4-E2B-MTP": out = "Gemma E2B"
             case "gemma-4-E4B", "gemma-4-E4B-MTP": out = "Gemma E4B"
             case "gemma-4-12B", "gemma-4-12B-MTP": out = "Gemma 12B"

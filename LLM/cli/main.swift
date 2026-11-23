@@ -30,7 +30,10 @@ args.consume("--diagnostics", hasValue: true)
 args.consume("--reasoning-note", hasValue: true)
 args.consume("--encoder-folder", hasValue: true)
 args.consume("--read-budget", hasValue: true)
+args.consume("--context", hasValue: true)
+args.consume("--shift", hasValue: true)
 let seedVal = Flags.uint64("seed") ?? 0
+let contextVal = Flags.int("context") ?? 0
 // Biases the curated branch-opening tokens down while thinking (arxiv
 // 2606.00206).
 let overthink = args.float("--overthink") ?? 0
@@ -46,8 +49,8 @@ let memoryDrill: MemoryDrill? = args.value("--memories").map { root in
     MemoryDrill(root: root, network: args.flag("--tools"))
 }
 args.consume("--import", hasValue: true)
-let toolRunner: (any ToolRunner)? = memoryDrill?.runner
-    ?? SafeToolRunner(network: args.flag("--tools"))
+let toolRunner: (any ToolRunner)? = args.flag("--no-tools") ? nil
+    : memoryDrill?.runner ?? SafeToolRunner(network: args.flag("--tools"))
 // One JSON line per turn; the captured stderr is the full log, this the
 // companion.
 let trVal = args.value("--trace")
@@ -65,6 +68,7 @@ let imageBudget = args.int("--image-budget") ?? 280
 let greedyDecode = args.flag("--greedy")
 let stopAtVal = args.int("--stop-at")
 let lettersVal = args.int("--letters")
+let quickAfterVal = args.int("--quick-after")
 var stopArmed = true
 
 if args.flag("--emit-iq-tables") {
@@ -105,6 +109,7 @@ if isModelFile(arg1), rawArgs.contains("--kld")
     || rawArgs.contains("--kld-dump") { try runDivergence(arg1, args) }
 if args.flag("--puzzle-rescore") { runPuzzleRescore(args) }
 if args.flag("--puzzle-gate") { await runPuzzleGate(args) }
+if args.flag("--recall-bench") { await runRecallBench(args) }
 if isModelFile(arg1) { try await runGgufMain() }
 
 err("\(arg1): not a .ggxf -- this build runs GGUF models only\n")
